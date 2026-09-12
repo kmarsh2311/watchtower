@@ -685,6 +685,16 @@ def main():
         except Exception:
             pass
 
+        # Self-healing: clear generating_sheet records if no contact sheet job is actively running
+        has_csm_job = any("contact" in (j.get("description") or "").lower() or "csm" in (j.get("description") or "").lower() for j in active_jobs)
+        if not has_csm_job:
+            connection = connect(database_path)
+            try:
+                connection.execute("DELETE FROM incoming_files WHERE status='generating_sheet'")
+                connection.commit()
+            finally:
+                connection.close()
+
         result = {
             "monitor": filesystem_monitor_summary(database_path),
             "incoming": incoming_summary(database_path),
