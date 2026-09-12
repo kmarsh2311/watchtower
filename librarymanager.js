@@ -468,6 +468,8 @@
       return () => window.clearTimeout(timer);
     }, [error]);
     const sceneHoverTimer = React.useRef(null);
+    const [helpSectionId, setHelpSectionId] = React.useState("getting-started");
+    const [helpSearch, setHelpSearch] = React.useState("");
     const [useOriginalHeader, setUseOriginalHeader] = React.useState(() => {
       try {
         return window.localStorage.getItem("lm_header_original") === "true";
@@ -1983,96 +1985,210 @@
                   React.createElement("small", { className: "lm-report-file" }, `Export file: ${report.filename}`)) :
                   React.createElement("p", { className: "lm-empty" }, report.error || "Run the corresponding tool under Advanced Diagnostic Tools to create this report."))))))
         : null)
-    else if (tab === "help") content = React.createElement("div", { className: "lm-help-section" },
-      panel("Watchtower Guide & Documentation", "Comprehensive reference and best practices for automated library management, naming rules, filesystem monitoring, and diagnostics.",
-        React.createElement("div", { className: "lm-help-grid" },
-          React.createElement("div", { className: "lm-help-card" },
-            React.createElement("div", { className: "lm-help-card-header" },
-              React.createElement("span", { className: "lm-help-icon" }, "🚀"),
-              React.createElement("strong", null, "Overview & Architecture")),
-            React.createElement("div", { className: "lm-help-body" },
-              React.createElement("p", null, "Watchtower bridges Stash's rich metadata with your physical hard drive. It automatically manages file names, tracks external moves, pairs companion sidecars, and generates visual contact sheets."),
-              React.createElement("p", null, "All operations prioritize safety above all else: preview simulations, serialized queue workers, debounce delay timers, and collision locks ensure your files are never damaged or overwritten."),
-              React.createElement("div", { className: "lm-help-alert info" },
-                React.createElement("strong", null, "Safety First: "), "Automatic renaming only runs when explicitly enabled. Testing with Scene ID restricts all actions to that single scene.")
+    else if (tab === "help") {
+      const GUIDE_SECTIONS = [
+        {
+          id: "getting-started",
+          icon: "🚀",
+          title: "Getting Started",
+          content: [
+            React.createElement("h2", { key: "h2" }, "🚀 Getting Started with Watchtower"),
+            React.createElement("p", { key: "p1" }, "Watchtower is a comprehensive library manager and filesystem daemon for Stash. It bridges Stash's rich metadata with your physical hard drive, keeping file names, folder structures, and companion sidecars synchronized in real time."),
+            React.createElement("h3", { key: "h3_1" }, "Core Architecture & Safety Principles"),
+            React.createElement("p", { key: "p2" }, "Watchtower operates on a strictly non-destructive philosophy designed to prevent accidental data loss:"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "Safe Defaults: "), "Automatic renaming is disabled by default until you explicitly turn it on."),
+              React.createElement("li", null, React.createElement("strong", null, "Test Scene ID: "), "Allows locking all automatic actions to a single test scene while testing rules."),
+              React.createElement("li", null, React.createElement("strong", null, "Live Simulation Sandbox: "), "Preview rules in real time against live scenes with zero disk writes."),
+              React.createElement("li", null, React.createElement("strong", null, "Queue & Debounce: "), "Metadata edits are debounced and queued through a background worker so Stash never freezes.")
+            ),
+            React.createElement("div", { key: "note1", className: "lm-help-note" },
+              React.createElement("strong", null, "Recommended Setup: "), "Start by setting a Test Scene ID in Advanced Diagnostics, test your rules in the Filename Management sandbox, and once satisfied, enable Automatic Renaming.")
+          ]
+        },
+        {
+          id: "filename-rules",
+          icon: "🏷️",
+          title: "Filename Management",
+          content: [
+            React.createElement("h2", { key: "h2" }, "🏷️ Filename Management & Granular Rules"),
+            React.createElement("p", { key: "p1" }, "Configure how filenames are structured across your entire collection with over 220,000 permutations."),
+            React.createElement("h3", { key: "h3_1" }, "Master Title & Base Source"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "Stash Scene Title: "), "Uses Stash's cleaned or scraped title. If blank, falls back to the original file stem."),
+              React.createElement("li", null, React.createElement("strong", null, "Physical Filename: "), "Uses the original disk filename as the base stem, preserving raw filenames."),
+              React.createElement("li", null, React.createElement("strong", null, "Strict Scene Title: "), "Only renames if a title has been explicitly assigned in Stash.")
+            ),
+            React.createElement("h3", { key: "h3_2" }, "Granular Title Cleaning Switches"),
+            React.createElement("ul", { key: "ul2" },
+              React.createElement("li", null, React.createElement("strong", null, "Strip Studio from Titles: "), "Automatically removes the studio name if it was embedded in the title string."),
+              React.createElement("li", null, React.createElement("strong", null, "Strip Performers from Titles: "), "Removes tagged performer names from the title."),
+              React.createElement("li", null, React.createElement("strong", null, "Strip Connective Words & Punctuation: "), "Eats directly attached conjunctions (", React.createElement("code", null, "&"), ", ", React.createElement("code", null, "and"), ", ", React.createElement("code", null, "with"), ", ", React.createElement("code", null, "feat."), ", ", React.createElement("code", null, "vs."), ") when stripping performers, avoiding dangling punctuation."),
+              React.createElement("li", null, React.createElement("strong", null, "Collapse Multiple Separators & Spaces: "), "Cleans duplicate hyphens (", React.createElement("code", null, "--"), ") and excess spaces.")
+            ),
+            React.createElement("h3", { key: "h3_3" }, "Ordering & Performer Limits"),
+            React.createElement("ul", { key: "ul3" },
+              React.createElement("li", null, React.createElement("strong", null, "Filename Information Order: "), "Choose whether Title, Studio, or Performers appear first, second, or third."),
+              React.createElement("li", null, React.createElement("strong", null, "Separators: "), "Choose custom separators (Dash, Space, Underscore) between sections and performer names."),
+              React.createElement("li", null, React.createElement("strong", null, "Maximum Performers: "), "Limit filenames to the first 1–5 performers (or 0 for all).")
+            ),
+            React.createElement("h3", { key: "h3_4" }, "Test Rules with a Real Scene (Safe Sandbox)"),
+            React.createElement("p", { key: "p2" }, "Located at the bottom of the Filename Management console. Search for any scene by ID, performer, or studio text to view a live character-aligned before/after diff with artwork thumbnail. Changing any dropdown instantly re-evaluates the diff with zero disk modifications.")
+          ]
+        },
+        {
+          id: "hooks-sync",
+          icon: "⚡",
+          title: "Automatic Sync & Hooks",
+          content: [
+            React.createElement("h2", { key: "h2" }, "⚡ Automatic Metadata Synchronization & Hooks"),
+            React.createElement("p", { key: "p1" }, "Watchtower registers native Stash event hooks to automatically keep filenames up to date as you organize your library."),
+            React.createElement("h3", { key: "h3_1" }, "Active Event Triggers"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "Scene.Update.Post: "), "Fires whenever a scene's title, studio, performers, or date are saved."),
+              React.createElement("li", null, React.createElement("strong", null, "Performer.Update.Post: "), "When you rename a performer entity in the Performers tab, Watchtower automatically queries all scenes containing that performer and queues them for background renaming."),
+              React.createElement("li", null, React.createElement("strong", null, "Studio.Update.Post: "), "Renaming a studio entity automatically updates filenames for all associated scenes.")
+            ),
+            React.createElement("h3", { key: "h3_2" }, "FastTag & Bulk Edit Synergy"),
+            React.createElement("p", { key: "p2" }, "Watchtower is 100% compatible with FastTag and Stash bulk editors. When FastTag parses AI titles or applies tags across multiple scenes, Stash emits the update hooks. Watchtower intercepts them, queues them safely, and processes the disk renames sequentially in the background."),
+            React.createElement("div", { key: "tip1", className: "lm-help-tip" },
+              React.createElement("strong", null, "Seamless Workflow: "), "FastTag manages your metadata intelligence inside Stash, while Watchtower automatically reflects those changes on your physical hard drive.")
+          ]
+        },
+        {
+          id: "monitor-moves",
+          icon: "👁️",
+          title: "Filesystem Monitor",
+          content: [
+            React.createElement("h2", { key: "h2" }, "👁️ Filesystem Monitor & Move Reconciliation"),
+            React.createElement("p", { key: "p1" }, "The filesystem monitor runs a lightweight background daemon (watchdog) that watches your configured Stash library folders."),
+            React.createElement("h3", { key: "h3_1" }, "External Move Reconciliation"),
+            React.createElement("p", { key: "p2" }, "If you move or rename a video file outside of Stash (e.g. via macOS Finder or Windows Explorer), Watchtower detects the change and:"),
+            React.createElement("ol", { key: "ol1" },
+              React.createElement("li", null, "Matches the destination file against the missing source by exact file size."),
+              React.createElement("li", null, "Computes the cryptographic OpenSubtitles hash (", React.createElement("code", null, "oshash"), ") to verify a 100% exact match."),
+              React.createElement("li", null, "Asks Stash to update the scene's file path to the new location without losing any tags or ratings.")
+            ),
+            React.createElement("h3", { key: "h3_2" }, "Companion File Pairing"),
+            React.createElement("p", { key: "p3" }, "Companion files (artwork ", React.createElement("code", null, ".jpg, .webp"), ", subtitles ", React.createElement("code", null, ".srt, .vtt"), ", contact sheets ", React.createElement("code", null, ".mp4.jpg"), ") automatically stay paired with their parent video. When a video is renamed or moved, all companion files are automatically renamed and relocated alongside it.")
+          ]
+        },
+        {
+          id: "incoming-downloads",
+          icon: "📥",
+          title: "Incoming Downloads",
+          content: [
+            React.createElement("h2", { key: "h2" }, "📥 Incoming Downloads Workflow"),
+            React.createElement("p", { key: "p1" }, "Automates the ingest of newly completed video downloads into Stash."),
+            React.createElement("h3", { key: "h3_1" }, "How It Works"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "In-Flight Download Tracking: "), "Watchtower identifies active download temporary files (", React.createElement("code", null, ".crdownload, .part, .download, .tmp"), ") in the Live Terminal."),
+              React.createElement("li", null, React.createElement("strong", null, "Settle Delay Timer: "), "Once downloading completes and the file size stops changing for the configured settle delay (default: 5 minutes), Watchtower triggers a targeted Stash scan to import the new scene."),
+              React.createElement("li", null, React.createElement("strong", null, "Automated Artwork: "), "Optionally generates contact sheet images immediately upon import.")
             )
+          ]
+        },
+        {
+          id: "contact-sheets",
+          icon: "🖼️",
+          title: "Contact Sheets (CSM)",
+          content: [
+            React.createElement("h2", { key: "h2" }, "🖼️ Visual Contact Sheets (CSM)"),
+            React.createElement("p", { key: "p1" }, "Generates high-resolution multi-frame video index companion images (", React.createElement("code", null, ".mp4.jpg"), ") alongside your video files using ffmpeg."),
+            React.createElement("h3", { key: "h3_1" }, "Features & Customization"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "Header Metadata Banner: "), "Displays video resolution, duration, file size, codec, and clean filename at the top of the sheet."),
+              React.createElement("li", null, React.createElement("strong", null, "Custom Grids: "), "Choose standard 4x4 (16 frames) or widescreen 5x4 (20 frames)."),
+              React.createElement("li", null, React.createElement("strong", null, "Vertical Video (9:16) Auto-Adjust: "), "Automatically adjusts columns for vertical smartphone videos so sheets fit standard widescreen displays."),
+              React.createElement("li", null, React.createElement("strong", null, "Metadata Edit Synchronization: "), "Toggle whether contact sheets are automatically re-rendered with new banners when titles or performers are edited.")
+            )
+          ]
+        },
+        {
+          id: "diagnostics-tools",
+          icon: "🛠️",
+          title: "Advanced Diagnostics",
+          content: [
+            React.createElement("h2", { key: "h2" }, "🛠️ Advanced Diagnostic Tools & Buttons"),
+            React.createElement("p", { key: "p1" }, "The Advanced Diagnostics tab contains technical scanners to audit, inspect, and repair your library. All diagnostic tools are 100% read-only."),
+            React.createElement("h3", { key: "h3_1" }, "Tool Breakdown & What Every Button Does"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "Build Read-Only Inventory: "), "Scans all scenes from Stash into Watchtower's local SQLite database. Automatically prunes records for scenes that have been deleted in Stash."),
+              React.createElement("li", null, React.createElement("strong", null, "Preview Safe Filenames: "), "Calculates proposed filenames for every file across your entire collection using your active naming rules, showing what would change without touching disk."),
+              React.createElement("li", null, React.createElement("strong", null, "Find Renamed Files: "), "Searches folders for missing files to locate safe rename/move candidates."),
+              React.createElement("li", null, React.createElement("strong", null, "Build Resolution Plan: "), "Compares missing and live metadata to recommend safe reconciliation steps."),
+              React.createElement("li", null, React.createElement("strong", null, "Preview Metadata Merge: "), "Previews metadata that could be recovered from stale duplicate records."),
+              React.createElement("li", null, React.createElement("strong", null, "Reconcile Filesystem Events: "), "Reviews pending events captured by the background filesystem watcher."),
+              React.createElement("li", null, React.createElement("strong", null, "View / Export Recent Activity: "), "Exports full audit history to readable JSON and CSV files.")
+            )
+          ]
+        },
+        {
+          id: "safe-auto-resolve",
+          icon: "🧹",
+          title: "Safe Auto-Resolve & Cleaning",
+          content: [
+            React.createElement("h2", { key: "h2" }, "🧹 Safe Auto-Resolve & Library Maintenance"),
+            React.createElement("p", { key: "p1" }, "Explains how to resolve discrepancies shown in Diagnostic Results."),
+            React.createElement("h3", { key: "h3_1" }, "The 1-Click Safe Auto-Resolve Flow"),
+            React.createElement("p", { key: "p2" }, "When you click ", React.createElement("strong", null, "⚡ Safe Auto-Resolve (Reconcile & Clean)"), ", Watchtower executes a multi-step sequence with metadata protection:"),
+            React.createElement("ol", { key: "ol1" },
+              React.createElement("li", null, React.createElement("strong", null, "Auto-Reconciles Verified Renames First: "), "Locates any verified moved files on disk (like Scene 5314) and asks Stash to link them to their scenes first. This preserves 100% of your tags, performers, and ratings."),
+              React.createElement("li", null, React.createElement("strong", null, "Safely Prunes Dead Records: "), "Runs Stash's clean task to remove phantom references for files that no longer exist on disk (like duplicate references on Scene 4860). No media files are ever deleted."),
+              React.createElement("li", null, React.createElement("strong", null, "Rebuilds Inventory & Refreshes: "), "Re-runs the inventory scan and clears the diagnostic report to 0 missing.")
+            ),
+            React.createElement("h3", { key: "h3_2" }, "Understanding Status Badges"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "verified: "), "The file was moved or renamed on disk, but has an exact byte size and cryptographic hash match. Safe to re-link."),
+              React.createElement("li", null, React.createElement("strong", null, "Protected / Skipped: "), "Watchtower detected that multiple files would share the same target filename in the same folder. Watchtower locks them and refuses to rename automatically to safeguard against accidental overwrites."),
+              React.createElement("li", null, React.createElement("strong", null, "conflict: "), "Duplicate file records in Stash. Cleaned safely via Auto-Resolve."),
+              React.createElement("li", null, React.createElement("strong", null, "skipped: "), "The filename was evaluated and already matches the current naming rules.")
+            ),
+            React.createElement("div", { key: "tip1", className: "lm-help-tip" },
+              React.createElement("strong", null, "Safe Operation: "), "Stash Clean and Safe Auto-Resolve only prune phantom database entries; they never delete or alter video files on your hard drive.")
+          ]
+        }
+      ];
+
+      const filteredSections = helpSearch.trim()
+        ? GUIDE_SECTIONS.filter(s => {
+            const query = helpSearch.toLowerCase().trim();
+            const textMatch = s.title.toLowerCase().includes(query);
+            return textMatch;
+          })
+        : GUIDE_SECTIONS;
+
+      const activeSection = GUIDE_SECTIONS.find(s => s.id === helpSectionId) || GUIDE_SECTIONS[0];
+
+      content = React.createElement("div", { className: "lm-help-container" },
+        React.createElement("div", { className: "lm-help-header-bar" },
+          React.createElement("strong", null, "📖 Watchtower User Guide & Reference"),
+          React.createElement("input", {
+            type: "search",
+            className: "lm-help-search-input",
+            placeholder: "Search guide topics…",
+            value: helpSearch,
+            onChange: e => setHelpSearch(e.target.value)
+          })
+        ),
+        React.createElement("div", { className: "lm-help-workspace" },
+          React.createElement("nav", { className: "lm-help-nav-sidebar" },
+            filteredSections.map(s => React.createElement("button", {
+              key: s.id,
+              type: "button",
+              className: `lm-help-nav-item ${s.id === activeSection.id ? "active" : ""}`,
+              onClick: () => setHelpSectionId(s.id)
+            },
+              React.createElement("span", null, s.icon),
+              React.createElement("span", null, s.title)
+            ))
           ),
-          React.createElement("div", { className: "lm-help-card" },
-            React.createElement("div", { className: "lm-help-card-header" },
-              React.createElement("span", { className: "lm-help-icon" }, "🏷️"),
-              React.createElement("strong", null, "Filename Management")),
-            React.createElement("div", { className: "lm-help-body" },
-              React.createElement("p", null, "Configure how filenames are structured across your entire library with over 220,000 permutations:"),
-              React.createElement("ul", null,
-                React.createElement("li", null, React.createElement("strong", null, "Master Title Source: "), "Choose whether the title is driven by Stash metadata or original disk filename."),
-                React.createElement("li", null, React.createElement("strong", null, "Granular Switches: "), "Toggle Studio, Performers, connective words (", React.createElement("code", null, "&"), ", ", React.createElement("code", null, "with"), "), and dash collapsing independently."),
-                React.createElement("li", null, React.createElement("strong", null, "Performer Limit: "), "Include all performers or limit to the first 1–5.")
-              ),
-              React.createElement("p", null, "Use the ", React.createElement("strong", null, "Real Scene Sandbox"), " to simulate rules against live scenes with instant before/after character-aligned diffs.")
-            )
-          ),
-          React.createElement("div", { className: "lm-help-card" },
-            React.createElement("div", { className: "lm-help-card-header" },
-              React.createElement("span", { className: "lm-help-icon" }, "⚡"),
-              React.createElement("strong", null, "Automatic Sync & Hooks")),
-            React.createElement("div", { className: "lm-help-body" },
-              React.createElement("p", null, "Watchtower registers native Stash event hooks to keep files perfectly synchronized in real time:"),
-              React.createElement("ul", null,
-                React.createElement("li", null, React.createElement("strong", null, "Scene.Update.Post: "), "Fires when saving scene titles, performers, or studios."),
-                React.createElement("li", null, React.createElement("strong", null, "Performer.Update.Post: "), "Renaming a performer entity automatically updates filenames for all their scenes."),
-                React.createElement("li", null, React.createElement("strong", null, "Studio.Update.Post: "), "Renaming a studio entity automatically updates all scenes.")
-              ),
-              React.createElement("div", { className: "lm-help-alert tip" },
-                React.createElement("strong", null, "FastTag Synergy: "), "When FastTag parses AI titles or applies bulk tags, Watchtower automatically catches the event and renames the file seamlessly.")
-            )
-          ),
-          React.createElement("div", { className: "lm-help-card" },
-            React.createElement("div", { className: "lm-help-card-header" },
-              React.createElement("span", { className: "lm-help-icon" }, "👁️"),
-              React.createElement("strong", null, "Filesystem Monitor")),
-            React.createElement("div", { className: "lm-help-body" },
-              React.createElement("p", null, "The background daemon monitors your configured Stash library roots using OS-native events (watchdog):"),
-              React.createElement("ul", null,
-                React.createElement("li", null, React.createElement("strong", null, "External Move Reconciliation: "), "When files are moved outside Stash, Watchtower verifies size and cryptographic hash (", React.createElement("code", null, "oshash"), ") before asking Stash to update."),
-                React.createElement("li", null, React.createElement("strong", null, "Companion Pairing: "), "Artwork (", React.createElement("code", null, ".jpg"), ") and subtitles (", React.createElement("code", null, ".srt, .vtt"), ") automatically move and rename alongside parent videos.")
-              )
-            )
-          ),
-          React.createElement("div", { className: "lm-help-card" },
-            React.createElement("div", { className: "lm-help-card-header" },
-              React.createElement("span", { className: "lm-help-icon" }, "📥"),
-              React.createElement("strong", null, "Incoming Downloads")),
-            React.createElement("div", { className: "lm-help-body" },
-              React.createElement("p", null, "Set a dedicated incoming download folder. In-flight downloads (", React.createElement("code", null, ".crdownload, .part, .tmp"), ") are tracked in the Live Terminal."),
-              React.createElement("p", null, "Once a file finishes downloading and remains completely unchanged for the configured settle delay (default: 5 min), Stash automatically ingests it.")
-            )
-          ),
-          React.createElement("div", { className: "lm-help-card" },
-            React.createElement("div", { className: "lm-help-card-header" },
-              React.createElement("span", { className: "lm-help-icon" }, "🖼️"),
-              React.createElement("strong", null, "Contact Sheets (CSM)")),
-            React.createElement("div", { className: "lm-help-body" },
-              React.createElement("p", null, "Automatically creates high-quality multi-frame contact sheet images (", React.createElement("code", null, ".mp4.jpg"), ") with metadata header banners showing resolution, duration, and file size."),
-              React.createElement("p", null, "Supports customizable grids (4x4, 5x4), vertical (9:16) video auto-adjustments, and automatic header re-rendering on metadata updates.")
-            )
-          ),
-          React.createElement("div", { className: "lm-help-card" },
-            React.createElement("div", { className: "lm-help-card-header" },
-              React.createElement("span", { className: "lm-help-icon" }, "🛠️"),
-              React.createElement("strong", null, "Diagnostics & Safe Clean")),
-            React.createElement("div", { className: "lm-help-body" },
-              React.createElement("p", null, "Under Advanced Diagnostics, you can audit your entire library with read-only tools:"),
-              React.createElement("ul", null,
-                React.createElement("li", null, React.createElement("strong", null, "⚡ Safe Auto-Resolve: "), "1-click repair that re-links verified moved files before safely pruning dead records in Stash."),
-                React.createElement("li", null, React.createElement("strong", null, "Protected Safeguards: "), "Scenes with multi-file duplicates or identical names in the same folder are locked to prevent accidental overwrite."),
-                React.createElement("li", null, React.createElement("strong", null, "Activity History: "), "Full audit log with exportable CSV and JSON reports.")
-              )
-            )
+          React.createElement("div", { className: "lm-help-content-pane" },
+            activeSection.content
           )
         )
-      )
-    )
-
+      );
+    }
 
     return React.createElement("main", { className: "lm-dashboard" },
       React.createElement("header", { className: "lm-header" }, React.createElement("div", { className: "lm-page-brand" },
