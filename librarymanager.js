@@ -508,7 +508,6 @@
         React.createElement("input", {
           type: "checkbox",
           checked: isChecked,
-          disabled: busy === "settings",
           style: { cursor: "pointer" },
           onChange: e => updateSetting(setting, e.target.checked)
         }),
