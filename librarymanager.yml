@@ -13,10 +13,6 @@ settings:
     displayName: Test Scene ID
     description: Optional test scene ID. While set, Automatic Renaming is restricted to this scene only, protecting the rest of your library while you test.
     type: STRING
-  allowTestRename:
-    displayName: Unlock Test Rename Action
-    description: Safety lock that must be enabled before Apply Configured Test Rename can change the configured test scene's filename on disk.
-    type: BOOLEAN
   automaticRenaming:
     displayName: Automatic Renaming
     description: Rename an edited scene from its stable base, studio and performers. Test Scene ID restricts this to one scene while testing.

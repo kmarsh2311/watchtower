@@ -1128,8 +1128,6 @@ def main():
         if mode == "preview_test_rename":
             result = preview_scene_filename(database_path, scene_id, config)
         else:
-            if not config.get("allowTestRename"):
-                raise ValueError("Enable the \"Unlock Test Rename Action\" safety switch before applying the test rename")
             result = apply_scene_filename(
                 database_path, scene_id,
                 lambda file_id, folder, basename: stash.move_files({"ids": [file_id], "destination_folder": folder,
