@@ -2103,26 +2103,22 @@ a.lm-activity-scene-pill:hover {
 @keyframes lmDialogEnter {
   0% {
     opacity: 0;
-    transform: translateY(32px) scale(0.94);
-  }
-  60% {
-    opacity: 1;
-    transform: translateY(-2px) scale(1.003);
+    transform: translateY(26px);
   }
   100% {
     opacity: 1;
-    transform: translateY(0) scale(1);
+    transform: none;
   }
 }
 
 @keyframes lmPaneFadeIn {
   0% {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(6px);
   }
   100% {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
 
@@ -2141,7 +2137,7 @@ a.lm-activity-scene-pill:hover {
   justify-content: center !important;
   padding: 1.5rem !important;
   box-sizing: border-box !important;
-  animation: lmFadeInBackdrop 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  animation: lmFadeInBackdrop 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
 }
 .lm-wizard-dialog button, .lm-wizard-preset-card, .lm-wizard-step-item {
   touch-action: manipulation !important;
@@ -2159,8 +2155,11 @@ a.lm-activity-scene-pill:hover {
   flex-direction: column !important;
   overflow: hidden !important;
   color: #e9edf5 !important;
-  animation: lmDialogEnter 0.65s cubic-bezier(0.16, 1, 0.3, 1) 0.1s backwards !important;
-  will-change: transform, opacity;
+  animation: lmDialogEnter 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.08s backwards !important;
+  -webkit-font-smoothing: antialiased !important;
+  -moz-osx-font-smoothing: grayscale !important;
+  text-rendering: optimizeLegibility !important;
+  transform: none !important;
 }
 .lm-wizard-pane {
   animation: lmPaneFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
