@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/watchtower-header.gif" alt="Watchtower for Stash" width="100%" />
+<img src="assets/watchtower-header.png" alt="Watchtower for Stash" width="100%" />
 
 # 🗼 Watchtower for Stash
 ### The Zero-Data-Loss Media Inventory Guardian, Live Filesystem Watcher & Atomic Renaming Engine for Stash
