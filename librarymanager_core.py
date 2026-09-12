@@ -708,6 +708,10 @@ def inventory(database_path: Path, scenes) -> dict:
                 {**record, "exists_on_disk": int(exists), "first_seen_at": now, "last_seen_at": now, "missing_since": missing_since},
             )
 
+        connection.execute("DELETE FROM filename_state WHERE file_id IN (SELECT file_id FROM files WHERE last_seen_at != ?)", (now,))
+        connection.execute("DELETE FROM filename_previews WHERE file_id IN (SELECT file_id FROM files WHERE last_seen_at != ?)", (now,))
+        connection.execute("DELETE FROM files WHERE last_seen_at != ?", (now,))
+
         connection.execute(
             """UPDATE inventory_runs SET completed_at=?,stash_file_count=?,stash_scene_count=?,present_count=?,missing_count=?,
                    changed_path_count=?,restored_count=?,status='complete' WHERE id=?""",
