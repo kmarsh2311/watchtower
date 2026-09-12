@@ -173,6 +173,14 @@ class MoveWorker(threading.Thread):
         self.items = queue.Queue()
         self.stopping = False
 
+    @property
+    def automatic_move_reconciliation(self):
+        return self.enabled
+
+    @automatic_move_reconciliation.setter
+    def automatic_move_reconciliation(self, value):
+        self.enabled = bool(value)
+
     def submit(self, source, destination):
         self.items.put((source, destination))
 
@@ -992,25 +1000,29 @@ def main():
                     if request.get("action") == "stop":
                         break
                     elif request.get("action") == "reload":
-                        new_cfg = request.get("config") or {}
-                        worker.automatic_move_reconciliation = new_cfg.get("automatic_move_reconciliation", worker.automatic_move_reconciliation)
-                        worker.notifications = new_cfg.get("mac_notifications", worker.notifications)
-                        _new_folder_str = new_cfg.get("incoming_folder")
-                        if _new_folder_str is not None:
-                            incoming_worker.incoming_folder = Path(_new_folder_str).resolve() if _new_folder_str else None
-                        _new_enabled = new_cfg.get("incoming_imports")
-                        if _new_enabled is not None:
-                            incoming_worker.enabled = bool(_new_enabled and incoming_worker.incoming_folder)
-                        incoming_worker.settle_seconds = new_cfg.get("incoming_settle_seconds", incoming_worker.settle_seconds)
-                        incoming_worker.generate_contact_sheets = new_cfg.get("generate_contact_sheets", incoming_worker.generate_contact_sheets)
-                        incoming_worker.contact_sheet_grid = new_cfg.get("contact_sheet_grid", incoming_worker.contact_sheet_grid)
-                        incoming_worker.contact_sheet_banner = new_cfg.get("contact_sheet_banner", incoming_worker.contact_sheet_banner)
-                        incoming_worker.contact_sheet_adjust_vertical = new_cfg.get("contact_sheet_adjust_vertical", incoming_worker.contact_sheet_adjust_vertical)
-                        incoming_worker.contact_sheet_script = new_cfg.get("contact_sheet_script", incoming_worker.contact_sheet_script)
                         try:
-                            control_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                            new_cfg = request.get("config") or {}
+                            worker.enabled = bool(new_cfg.get("automatic_move_reconciliation", worker.enabled))
+                            worker.notifications = bool(new_cfg.get("mac_notifications", worker.notifications))
+                            _new_folder_str = new_cfg.get("incoming_folder")
+                            if _new_folder_str is not None:
+                                incoming_worker.incoming_folder = Path(_new_folder_str).resolve() if _new_folder_str else None
+                            _new_enabled = new_cfg.get("incoming_imports")
+                            if _new_enabled is not None:
+                                incoming_worker.enabled = bool(_new_enabled and incoming_worker.incoming_folder)
+                            incoming_worker.settle_seconds = new_cfg.get("incoming_settle_seconds", incoming_worker.settle_seconds)
+                            incoming_worker.generate_contact_sheets = new_cfg.get("generate_contact_sheets", incoming_worker.generate_contact_sheets)
+                            incoming_worker.contact_sheet_grid = new_cfg.get("contact_sheet_grid", incoming_worker.contact_sheet_grid)
+                            incoming_worker.contact_sheet_banner = new_cfg.get("contact_sheet_banner", incoming_worker.contact_sheet_banner)
+                            incoming_worker.contact_sheet_adjust_vertical = new_cfg.get("contact_sheet_adjust_vertical", incoming_worker.contact_sheet_adjust_vertical)
+                            incoming_worker.contact_sheet_script = new_cfg.get("contact_sheet_script", incoming_worker.contact_sheet_script)
+                        except Exception as reload_err:
+                            logger.debug("Failed to apply reload configuration: %s", reload_err)
+                        finally:
+                            try:
+                                control_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
             update_status(database_path, args.token, os.getpid(), "running", available, unavailable)
             time.sleep(2)
     finally:
