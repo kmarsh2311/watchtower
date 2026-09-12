@@ -1558,7 +1558,7 @@
             help: "Safety lock required by the manual Apply Configured Test Rename task." }),
           React.createElement("label", { className: "lm-field" },
             React.createElement("strong", null, "Test Scene ID"),
-            React.createElement("small", null, "Scene used by Step 6 tests. While set, Automatic Renaming is restricted to this scene only."),
+            React.createElement("small", null, "Optional test scene ID. While set, Automatic Renaming is restricted to this scene only, protecting the rest of your library while you test."),
             React.createElement("input", {
               value: config.testSceneId || "",
               

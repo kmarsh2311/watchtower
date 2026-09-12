@@ -11,7 +11,7 @@ ui:
 settings:
   testSceneId:
     displayName: Test Scene ID
-    description: Scene used by Step 6 tests. While set, Automatic Renaming is restricted to this scene only.
+    description: Optional test scene ID. While set, Automatic Renaming is restricted to this scene only, protecting the rest of your library while you test.
     type: STRING
   allowTestRename:
     displayName: Allow One Test Rename
