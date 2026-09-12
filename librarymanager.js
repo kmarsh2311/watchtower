@@ -218,17 +218,17 @@
   function RealScenePreviewer({ config, data }) {
     const [sceneIdInput, setSceneIdInput] = React.useState("");
     const [previewResult, setPreviewResult] = React.useState(null);
+    const [searchResults, setSearchResults] = React.useState([]);
     const [loading, setLoading] = React.useState(false);
     const [errorMsg, setErrorMsg] = React.useState("");
 
-    const runPreview = async (targetId) => {
-      const id = String(targetId || sceneIdInput).trim();
+    const runPreviewForSceneId = async (id) => {
       if (!id) return;
-      setLoading(true); setErrorMsg("");
+      setLoading(true); setErrorMsg(""); setSearchResults([]);
       try {
         const [gqlRes, backendRaw] = await Promise.all([
           gql(`query FetchPreviewScene($id: ID!) {
-            findScene(id: $id) { id title studio { name } performers { name } files { path basename } }
+            findScene(id: $id) { id title studio { name } performers { name } files { path basename } paths { screenshot preview } }
           }`, { id }),
           operation("preview_test_rename", { scene_id: id }).catch(err => ({ error: err.message }))
         ]);
@@ -246,6 +246,7 @@
           title: scene.title || "Untitled",
           studio: scene.studio?.name || "None",
           performers: (scene.performers || []).map(p => p.name).join(", ") || "None",
+          screenshot: scene.paths?.screenshot || null,
           current: currentBasename,
           proposed: proposedBasename,
           status: status,
@@ -261,48 +262,141 @@
       }
     };
 
+    const handleSearchOrTest = async (queryText) => {
+      const q = String(queryText !== undefined ? queryText : sceneIdInput).trim();
+      if (!q) return;
+      
+      // If pure digits, directly test that scene ID
+      if (/^\d+$/.test(q)) {
+        setSceneIdInput(q);
+        await runPreviewForSceneId(q);
+        return;
+      }
+
+      // Otherwise perform a text search across scenes
+      setLoading(true); setErrorMsg(""); setSearchResults([]);
+      try {
+        const res = await gql(`query SearchPreviewScenes($filter: FindFilterType) {
+          findScenes(filter: $filter) {
+            count
+            scenes {
+              id
+              title
+              studio { name }
+              performers { name }
+              paths { screenshot }
+            }
+          }
+        }`, { filter: { q: q, per_page: 8 } });
+
+        const scenes = res?.findScenes?.scenes || [];
+        if (!scenes.length) {
+          setErrorMsg(`No scenes found matching "${q}"`);
+          setPreviewResult(null);
+        } else if (scenes.length === 1) {
+          setSceneIdInput(String(scenes[0].id));
+          await runPreviewForSceneId(scenes[0].id);
+        } else {
+          setSearchResults(scenes);
+        }
+      } catch (err) {
+        setErrorMsg(err.message || String(err));
+      } finally {
+        setLoading(false);
+      }
+    };
+
     const pickRecent = () => {
-      const recentWithScene = (data?.activity || []).find(r => r.scene_id);
-      if (recentWithScene) {
-        setSceneIdInput(String(recentWithScene.scene_id));
-        runPreview(recentWithScene.scene_id);
+      const recentRows = (data?.activity || []).filter(r => r.scene_id);
+      const uniqueScenes = [];
+      const seen = new Set();
+      for (const r of recentRows) {
+        if (!seen.has(String(r.scene_id))) {
+          seen.add(String(r.scene_id));
+          uniqueScenes.push({ id: String(r.scene_id), title: basename(r.new_path || r.old_path || `Scene ${r.scene_id}`) });
+          if (uniqueScenes.length >= 6) break;
+        }
+      }
+      if (uniqueScenes.length === 1) {
+        setSceneIdInput(uniqueScenes[0].id);
+        runPreviewForSceneId(uniqueScenes[0].id);
+      } else if (uniqueScenes.length > 1) {
+        setSearchResults(uniqueScenes);
       } else {
-        runPreview("1");
+        handleSearchOrTest("1");
       }
     };
 
     return React.createElement("div", { className: "lm-real-scene-tester" },
       React.createElement("div", { className: "lm-real-scene-header" },
         React.createElement("strong", null, "Test Rules with a Real Scene"),
-        React.createElement("small", null, "Type a Scene ID or test with a recent scene from your library (Read-Only).")),
+        React.createElement("small", null, "Enter a Scene ID, search by title/performer, or pick a recent scene to preview its filename and artwork.")),
       React.createElement("div", { className: "lm-real-scene-inputs" },
         React.createElement("input", {
           type: "text",
-          placeholder: "Enter Scene ID (e.g. 6318)",
+          placeholder: "Scene ID or search by name / performer / studio…",
           value: sceneIdInput,
-          onChange: e => setSceneIdInput(e.target.value),
-          onKeyDown: e => { if (e.key === "Enter") runPreview(); }
+          onChange: e => { setSceneIdInput(e.target.value); setSearchResults([]); },
+          onKeyDown: e => { if (e.key === "Enter") handleSearchOrTest(); }
         }),
-        React.createElement(Button, { variant: "secondary", disabled: loading, onClick: () => runPreview() },
-          loading ? "Checking…" : "Test Scene"),
+        React.createElement(Button, { variant: "secondary", disabled: loading, onClick: () => handleSearchOrTest() },
+          loading ? "Searching…" : "Test / Search"),
         React.createElement(Button, { variant: "secondary", disabled: loading, onClick: pickRecent },
           "Pick Recent Scene")),
+      searchResults.length > 0 && React.createElement("div", { className: "lm-real-scene-search-results" },
+        searchResults.map(s => React.createElement("button", {
+          key: s.id,
+          type: "button",
+          className: "lm-real-scene-search-item",
+          onClick: () => {
+            setSceneIdInput(String(s.id));
+            runPreviewForSceneId(s.id);
+          }
+        },
+          s.paths?.screenshot
+            ? React.createElement("img", { src: s.paths.screenshot, alt: "", className: "lm-real-scene-search-thumb" })
+            : React.createElement("div", { className: "lm-real-scene-search-thumb", style: { display: "flex", alignItems: "center", justifyContent: "center", fontSize: "0.7rem", color: "#666" } }, `#${s.id}`),
+          React.createElement("div", { className: "lm-real-scene-search-info" },
+            React.createElement("span", { className: "lm-real-scene-search-title" }, s.title || `Scene ${s.id}`),
+            React.createElement("span", { className: "lm-real-scene-search-sub" },
+              `Scene #${s.id}${s.studio?.name ? ` • ${s.studio.name}` : ""}${s.performers?.length ? ` • ${s.performers.map(p => p.name).join(", ")}` : ""}`))
+        ))),
       errorMsg && React.createElement("p", { className: "lm-real-scene-error" }, `! ${errorMsg}`),
       previewResult && React.createElement("div", { className: "lm-real-scene-result" },
-        React.createElement("div", { className: "lm-real-scene-meta" },
-          React.createElement("span", null, React.createElement("b", null, "Title: "), previewResult.title),
-          React.createElement("span", null, React.createElement("b", null, "Studio: "), previewResult.studio),
-          React.createElement("span", null, React.createElement("b", null, "Performers: "), previewResult.performers)),
-        React.createElement("div", { className: "lm-real-scene-diff" },
-          React.createElement("div", { className: "lm-real-scene-diff-row" },
-            React.createElement("span", { className: "lm-diff-label" }, "Current on disk:"),
-            React.createElement("code", { className: "lm-diff-code" }, previewResult.current)),
-          React.createElement("div", { className: "lm-real-scene-diff-row" },
-            React.createElement("span", { className: "lm-diff-label" }, "Proposed filename:"),
-            React.createElement("code", { className: `lm-diff-code ${previewResult.matches ? "matches" : "proposed"}` }, previewResult.proposed)),
-          React.createElement("div", { style: { marginTop: "6px" } },
-            React.createElement("span", { className: `lm-badge ${previewResult.matches ? "ok" : (previewResult.status === "blocked" ? "error" : "warn")}` },
-              previewResult.matches ? "✓ Already matches current format (No rename needed)" : (previewResult.status === "blocked" ? `Blocked: ${previewResult.reason}` : "Would rename if automatic renaming enabled"))))));
+        React.createElement("div", { className: "lm-real-scene-card" },
+          previewResult.screenshot && React.createElement("a", {
+            href: `/scenes/${previewResult.sceneId}`,
+            target: "_blank",
+            rel: "noopener noreferrer",
+            className: "lm-real-scene-thumb-wrap",
+            title: `Open Scene ${previewResult.sceneId} in Stash`
+          },
+            React.createElement("img", { src: previewResult.screenshot, alt: "", className: "lm-real-scene-thumb" }),
+            React.createElement("span", { className: "lm-real-scene-id-badge" }, `Scene ${previewResult.sceneId} ↗`)),
+          React.createElement("div", { className: "lm-real-scene-body" },
+            React.createElement("div", { className: "lm-real-scene-meta" },
+              React.createElement("span", null, React.createElement("b", null, "Title: "), previewResult.title),
+              React.createElement("span", null, React.createElement("b", null, "Studio: "), previewResult.studio),
+              React.createElement("span", null, React.createElement("b", null, "Performers: "), previewResult.performers)),
+            React.createElement("div", { className: "lm-real-scene-diff" },
+              React.createElement("div", { className: "lm-real-scene-diff-row" },
+                React.createElement("span", { className: "lm-diff-label" }, "Current on disk:"),
+                React.createElement("code", { className: "lm-diff-code" }, previewResult.current)),
+              React.createElement("div", { className: "lm-real-scene-diff-row" },
+                React.createElement("span", { className: "lm-diff-label" }, "Proposed filename:"),
+                React.createElement("code", { className: `lm-diff-code ${previewResult.matches ? "matches" : "proposed"}` }, previewResult.proposed)),
+              React.createElement("div", { style: { marginTop: "6px", display: "flex", gap: "8px", alignItems: "center", flexWrap: "wrap" } },
+                React.createElement("span", { className: `lm-badge ${previewResult.matches ? "ok" : (previewResult.status === "blocked" ? "error" : "warn")}` },
+                  previewResult.matches ? "✓ Already matches current format (No rename needed)" : (previewResult.status === "blocked" ? `Blocked: ${previewResult.reason}` : "Would rename if automatic renaming enabled")),
+                previewResult.sidecars && previewResult.sidecars.length > 0 && React.createElement("span", { className: "lm-badge muted", title: `${previewResult.sidecars.length} companion file(s) safely paired` },
+                  `📁 ${previewResult.sidecars.length} companion(s) paired`
+                )
+              )
+            )
+          )
+        )
+      )
+    );
   }
 
   function Dashboard() {
