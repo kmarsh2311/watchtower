@@ -863,9 +863,11 @@
       )
     );
 
-    return (window.ReactDOM && typeof window.ReactDOM.createPortal === "function")
-      ? window.ReactDOM.createPortal(modalElement, document.body)
-      : modalElement;
+    return (ReactDOM && typeof ReactDOM.createPortal === "function")
+      ? ReactDOM.createPortal(modalElement, document.body)
+      : (api?.ReactDOM && typeof api.ReactDOM.createPortal === "function")
+        ? api.ReactDOM.createPortal(modalElement, document.body)
+        : modalElement;
   }
 
   function Dashboard() {
@@ -2851,7 +2853,7 @@
       );
     }
 
-    return React.createElement("main", { className: `lm-dashboard ${showOnboardingWizard ? "lm-blurred-background" : ""}` },
+    return React.createElement("main", { className: "lm-dashboard" },
       React.createElement("header", { className: "lm-header" }, React.createElement("div", { className: "lm-page-brand" },
         React.createElement("div", { className: "lm-brand-wrapper" },
           React.createElement("img", {

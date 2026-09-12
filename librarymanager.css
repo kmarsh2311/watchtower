@@ -2126,13 +2126,6 @@ a.lm-activity-scene-pill:hover {
   }
 }
 
-.lm-blurred-background {
-  filter: blur(14px) brightness(0.55) !important;
-  transition: filter 0.3s ease !important;
-  pointer-events: none !important;
-  user-select: none !important;
-}
-
 .lm-wizard-backdrop {
   position: fixed !important;
   top: 0 !important;
@@ -2140,15 +2133,15 @@ a.lm-activity-scene-pill:hover {
   right: 0 !important;
   bottom: 0 !important;
   z-index: 999999 !important;
-  background: rgba(3, 7, 18, 0.90) !important;
-  backdrop-filter: blur(18px) saturate(1.2) !important;
-  -webkit-backdrop-filter: blur(18px) saturate(1.2) !important;
+  background: rgba(3, 7, 18, 0.85) !important;
+  backdrop-filter: blur(14px) !important;
+  -webkit-backdrop-filter: blur(14px) !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
   padding: 1.5rem !important;
   box-sizing: border-box !important;
-  animation: lmFadeInBackdrop 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  animation: lmFadeInBackdrop 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
 }
 .lm-wizard-dialog button, .lm-wizard-preset-card, .lm-wizard-step-item {
   touch-action: manipulation !important;
