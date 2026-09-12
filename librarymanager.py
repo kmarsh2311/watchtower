@@ -8,6 +8,7 @@ import plistlib
 from logging.handlers import RotatingFileHandler
 import os
 import subprocess
+import shutil
 import sys
 import time
 import uuid
@@ -1128,7 +1129,7 @@ def main():
             result = preview_scene_filename(database_path, scene_id, config)
         else:
             if not config.get("allowTestRename"):
-                raise ValueError("Enable Allow One Test Rename before running the apply task")
+                raise ValueError("Enable the \"Unlock Test Rename Action\" safety switch before applying the test rename")
             result = apply_scene_filename(
                 database_path, scene_id,
                 lambda file_id, folder, basename: stash.move_files({"ids": [file_id], "destination_folder": folder,
