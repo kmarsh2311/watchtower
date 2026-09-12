@@ -472,6 +472,11 @@ def main():
             return
         try:
             refresh_scene(stash, database_path, scene_id)
+            preview = preview_scene_filename(database_path, str(scene_id), config)
+            if preview.get("status") == "unchanged":
+                cancel_pending_rename(database_path, str(scene_id))
+                print(json.dumps({"output": f"Scene {scene_id} filename matches current file on disk; no rename needed."}))
+                return
         except Exception:
             pass
         rename_settle = int(config.get("renameSettleSeconds") if config.get("renameSettleSeconds") is not None else 30)

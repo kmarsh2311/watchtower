@@ -453,6 +453,16 @@ def incoming_summary(database_path: Path) -> dict:
                 except Exception:
                     proposed_name = None
 
+            # If not actively processing and proposed filename is already identical to current filename,
+            # auto-clear it from the queue so we do not show a pointless countdown.
+            if not is_proc and proposed_name and proposed_name == bname:
+                try:
+                    connection.execute("DELETE FROM rename_queue WHERE scene_id=? AND status='pending'", (str(sc_id),))
+                    connection.commit()
+                except Exception:
+                    pass
+                continue
+
             active.append({
                 "path": f"scene://{sc_id}/{bname}",
                 "scene_id": str(sc_id),
