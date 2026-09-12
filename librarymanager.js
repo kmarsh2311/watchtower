@@ -1208,6 +1208,21 @@
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "automaticRenaming", label: "Automatic Renaming",
             help: "Rename edited scenes using the stable filename base. Turning this off leaves filenames untouched while filesystem monitoring continues running." }),
+          React.createElement("div", { className: "lm-filename-style-grid", style: { marginTop: "12px" } },
+            React.createElement(ChoiceField, {
+              label: "Metadata Edit Settle Delay",
+              help: "Wait this many seconds after metadata edits in Stash before renaming files and refreshing contact sheets. Additional edits reset the timer.",
+              value: Number(config.renameSettleSeconds !== undefined ? config.renameSettleSeconds : 30),
+              disabled: busy === "settings",
+              choices: [
+                [0, "Immediate (No delay)"],
+                [15, "15 seconds"],
+                [30, "30 seconds (Recommended)"],
+                [60, "60 seconds"],
+                [120, "2 minutes"]
+              ],
+              onChange: value => updateSetting("renameSettleSeconds", Number(value))
+            })),
           config.testSceneId && React.createElement("p", { className: "lm-help", style: { marginTop: "8px", color: "var(--lm-accent-gold, #f59e0b)" } },
             `Testing limit active: automatic renaming applies only to Scene ${config.testSceneId}. Configure under Advanced Diagnostics.`))),
       panel("How Filenames Look", "Choose a clear style for future filename changes. Saving these choices does not rename your existing library.",
@@ -1414,7 +1429,7 @@
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "generateContactSheets", defaultValue: false,
             label: "Generate Visual Contact Sheets (CSM)",
-            help: "Automatically generate a visual contact sheet companion image (.mp4.jpg) when new videos arrive." }),
+            help: "Automatically generate a visual contact sheet (.mp4.jpg) for new videos, and regenerate it with updated metadata whenever a scene is edited or renamed." }),
           React.createElement("div", { className: "lm-filename-style-grid", style: { marginTop: "12px" } },
             React.createElement(ChoiceField, {
               label: "Contact Sheet Location Scope",
