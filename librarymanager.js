@@ -687,10 +687,10 @@
       const unavailableRoots = monitor.unavailable_roots || [];
       const unresolved = data?.pending_events || [];
       const stream = (data?.activity || []).slice(0, 250);
-      const watcherWorking = monitor.state === "running";
+      const isMonitorStale = monitor.is_stale === true || monitor.state === "stale";
+      const watcherWorking = monitor.state === "running" && !isMonitorStale;
 
-
-      const totalProblems = failedIncoming.length + unavailableRoots.length + unresolved.length;
+      const totalProblems = failedIncoming.length + unavailableRoots.length + unresolved.length + (isMonitorStale ? 1 : 0);
 
       const problemsCount = stream.filter(r => r.severity === "error" || r.severity === "warning" || r.status === "failed" || r.status === "review").length;
       const addedCount = stream.filter(r => r.category === "incoming" && r.status === "imported").length;
@@ -712,7 +712,7 @@
             `${PRODUCT_NAME.toUpperCase()} // LIVE`),
           React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "1rem" } },
             totalProblems > 0 && React.createElement("span", { className: "lm-terminal-header-alert" }, `⚠️ ${totalProblems} PROBLEM${totalProblems === 1 ? "" : "S"}`),
-            React.createElement("span", { className: watcherWorking ? "online" : "offline" }, watcherWorking ? "● LISTENING" : "● STOPPED"))),
+            React.createElement("span", { className: watcherWorking ? "online" : "offline" }, watcherWorking ? "● LISTENING" : (isMonitorStale ? "● STALE" : "● STOPPED")))),
 
         totalProblems > 0 && React.createElement("div", { className: "lm-terminal-attention-card" },
           React.createElement("div", { className: "lm-terminal-attention-header" },
@@ -720,6 +720,24 @@
               React.createElement("span", { className: "lm-terminal-attention-tag" }, "⚠️ NEEDS ATTENTION"),
               React.createElement("span", { className: "lm-terminal-attention-count" }, `${totalProblems} item${totalProblems === 1 ? " requires" : "s require"} your action`)),
             React.createElement("div", { className: "lm-terminal-batch-btns" },
+              isMonitorStale && React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn retry",
+                disabled: !!busy,
+                onClick: async () => {
+                  setBusy("restart_monitor");
+                  setError("");
+                  try {
+                    await operation("stop_monitor");
+                    await operation("ensure_monitor");
+                    await refresh();
+                  } catch (e) {
+                    setError(`Restart failed: ${e.message}`);
+                  } finally {
+                    setBusy("");
+                  }
+                }
+              }, "⟳ RESTART WATCHER"),
               failedIncoming.length > 1 && React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn retry",
@@ -979,13 +997,19 @@
         React.createElement("div", { className: "lm-status-grid" },
           React.createElement(StatusCard, {
             title: "Filesystem monitoring",
-            value: monitor.state === "running" ? "Running" : (config.autoStartMonitor ? "Stopped" : "Off"),
+            value: (monitor.is_stale || monitor.state === "stale")
+              ? "Stale"
+              : (monitor.state === "running" ? "Running" : (config.autoStartMonitor ? "Stopped" : "Off")),
             detail: monitor.unavailable_roots?.length
               ? `${monitor.unavailable_roots.length} library folder${monitor.unavailable_roots.length === 1 ? "" : "s"} unavailable`
-              : (monitor.state === "running"
-                  ? (config.automaticMoveReconciliation ? "Watching moves & move reconciliation active" : "Watcher active (reconciliation paused)")
-                  : (config.autoStartMonitor ? "Watcher stopped unexpectedly" : "Filesystem watching disabled")),
-            tone: monitor.unavailable_roots?.length ? "warn" : (monitor.state === "running" ? "ok" : (config.autoStartMonitor ? "warn" : ""))
+              : ((monitor.is_stale || monitor.state === "stale")
+                  ? (monitor.stale_reason || `Heartbeat lost (${monitor.heartbeat_age_seconds ? Math.round(monitor.heartbeat_age_seconds) + "s ago" : "no heartbeat"}) — watcher may have stopped`)
+                  : (monitor.state === "running"
+                      ? (config.automaticMoveReconciliation ? "Watching moves & move reconciliation active" : "Watcher active (reconciliation paused)")
+                      : (config.autoStartMonitor ? "Watcher stopped unexpectedly" : "Filesystem watching disabled"))),
+            tone: (monitor.unavailable_roots?.length || monitor.is_stale || monitor.state === "stale")
+              ? "warn"
+              : (monitor.state === "running" ? "ok" : (config.autoStartMonitor ? "warn" : ""))
           }),
           React.createElement(StatusCard, {
             title: "Automatic renaming",
@@ -1101,7 +1125,14 @@
         React.createElement("p", null, "Both video.jpg and video.ext.jpg styles are recognised. Only exact same-folder matches are touched.")));
     else if (tab === "monitor") content = React.createElement(React.Fragment, null,
       panel("Monitor status", "The watcher records filesystem events but never changes Stash or library files.", React.createElement("div", { className: "lm-status-grid compact" },
-        React.createElement(StatusCard, { title: "State", value: monitor.state || "Unknown", detail: monitor.heartbeat_at || "No heartbeat" }),
+        React.createElement(StatusCard, {
+          title: "State",
+          value: (monitor.is_stale || monitor.state === "stale") ? "Stale" : (monitor.state === "running" ? "Running" : (monitor.state || "Unknown")),
+          detail: (monitor.is_stale || monitor.state === "stale")
+            ? (monitor.stale_reason || `Heartbeat lost (${monitor.heartbeat_at || "no timestamp"})`)
+            : (monitor.heartbeat_at ? `Heartbeat: ${monitor.heartbeat_at}` : "No heartbeat"),
+          tone: (monitor.is_stale || monitor.state === "stale") ? "warn" : (monitor.state === "running" ? "ok" : "")
+        }),
         React.createElement(StatusCard, { title: "Events", value: monitor.pending_events || 0, detail: `${(monitor.roots || []).length} configured roots` }))),
       panel("Controls", "Start and stop monitoring or convert recorded events into read-only proposals.", React.createElement("div", { className: "lm-actions" },
         React.createElement(TaskButton, { name: "Start Read-Only Filesystem Monitor", label: "Start Monitor", variant: "primary" }),

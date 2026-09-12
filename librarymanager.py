@@ -296,8 +296,16 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
 
 def stop_filesystem_monitor(database_path):
     status = filesystem_monitor_summary(database_path)
-    if status.get("state") != "running" or not status.get("token"):
+    if status.get("raw_state", status.get("state")) != "running" or not status.get("token"):
         return {**status, "message": "Filesystem monitor is already stopped"}
+    if status.get("is_stale") and status.get("pid") and not status.get("pid_alive"):
+        connection = connect(database_path)
+        try:
+            connection.execute("UPDATE filesystem_monitor_status SET state='stopped' WHERE id=1")
+            connection.commit()
+        finally:
+            connection.close()
+        return {**status, "state": "stopped", "raw_state": "stopped", "is_stale": False, "message": "Filesystem monitor was dead and is now reset to stopped"}
     control_path = Path(__file__).with_name("monitor-control.json")
     control_path.write_text(json.dumps({"action": "stop", "token": status["token"]}), encoding="utf-8")
     for _ in range(40):

@@ -886,18 +886,76 @@ def resolve_filesystem_event(database_path: Path, event_type: str, source_path: 
         connection.close()
 
 
+def _is_pid_alive(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ProcessLookupError, ValueError):
+        return False
+
+
 def filesystem_monitor_summary(database_path: Path) -> dict:
     connection = connect(database_path)
     try:
         status = connection.execute("SELECT * FROM filesystem_monitor_status WHERE id=1").fetchone()
+        if not status:
+            return {"state": "stopped", "raw_state": "stopped", "is_stale": False, "heartbeat_age_seconds": None,
+                    "pid": None, "pid_alive": False, "started_at": None, "token": None, "heartbeat_at": None,
+                    "roots": [], "unavailable_roots": [], "pending_events": 0, "event_types": {}}
         counts = {row["event_type"]: row["count"] for row in connection.execute(
             "SELECT event_type,COUNT(*) AS count FROM filesystem_events WHERE status='pending' GROUP BY event_type"
         )}
-        return {"state": status["state"], "pid": status["pid"], "started_at": status["started_at"],
-                "token": status["token"],
-                "heartbeat_at": status["heartbeat_at"], "roots": json.loads(status["roots_json"] or "[]"),
-                "unavailable_roots": json.loads(status["unavailable_roots_json"] or "[]"),
-                "pending_events": sum(counts.values()), "event_types": counts}
+        
+        heartbeat_at = status["heartbeat_at"]
+        heartbeat_age = None
+        if heartbeat_at:
+            try:
+                hb_dt = datetime.fromisoformat(heartbeat_at)
+                if hb_dt.tzinfo is None:
+                    hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+                heartbeat_age = max(0.0, (datetime.now(timezone.utc) - hb_dt).total_seconds())
+            except Exception:
+                heartbeat_age = None
+
+        pid = status["pid"]
+        pid_alive = _is_pid_alive(pid) if pid else False
+        raw_state = status["state"] or "stopped"
+        effective_state = raw_state
+        is_stale = False
+        stale_reason = None
+
+        if raw_state == "running":
+            if pid and not pid_alive:
+                is_stale = True
+                effective_state = "stale"
+                stale_reason = f"Process (PID {pid}) terminated unexpectedly"
+            elif heartbeat_age is not None and heartbeat_age > 30.0:
+                is_stale = True
+                effective_state = "stale"
+                stale_reason = f"No heartbeat for {int(heartbeat_age)}s (expected every 2s)"
+            elif not heartbeat_at:
+                is_stale = True
+                effective_state = "stale"
+                stale_reason = "No heartbeat recorded since startup"
+
+        return {
+            "state": effective_state,
+            "raw_state": raw_state,
+            "is_stale": is_stale,
+            "stale_reason": stale_reason,
+            "heartbeat_age_seconds": round(heartbeat_age, 1) if heartbeat_age is not None else None,
+            "pid": pid,
+            "pid_alive": pid_alive,
+            "started_at": status["started_at"],
+            "token": status["token"],
+            "heartbeat_at": heartbeat_at,
+            "roots": json.loads(status["roots_json"] or "[]"),
+            "unavailable_roots": json.loads(status["unavailable_roots_json"] or "[]"),
+            "pending_events": sum(counts.values()),
+            "event_types": counts,
+        }
     finally:
         connection.close()
 
