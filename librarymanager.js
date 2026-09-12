@@ -339,6 +339,7 @@
         const [raw, settings] = await Promise.all([operation("dashboard", { limit: 250 }), getConfig()]);
         const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
         setData({ ...payload, _liveReceivedAt: Date.now() }); setConfig(settings);
+        window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
       } catch (e) { setError(e.message); }
       finally { if (isUserClick === true) setBusy(""); }
     }, []);
@@ -1691,16 +1692,26 @@
 
     React.useEffect(() => {
       check();
-      const timer = window.setInterval(check, 30000);
+      const timer = window.setInterval(check, 10000);
       const visible = () => { if (!document.hidden) check(); };
+      const onHealthEvent = () => check();
       document.addEventListener("visibilitychange", visible);
-      return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
+      window.addEventListener("librarymanager:health-check", onHealthEvent);
+      return () => {
+        window.clearInterval(timer);
+        document.removeEventListener("visibilitychange", visible);
+        window.removeEventListener("librarymanager:health-check", onHealthEvent);
+      };
     }, [check]);
 
     return React.createElement("div", {
       className: "nav-utility lm-nav-wrapper",
       style: { position: "relative", display: "inline-flex", alignItems: "center" },
-      onMouseEnter: () => { window.clearTimeout(hudTimer.current); setShowHud(true); },
+      onMouseEnter: () => {
+        window.clearTimeout(hudTimer.current);
+        check();
+        setShowHud(true);
+      },
       onMouseLeave: () => { hudTimer.current = window.setTimeout(() => setShowHud(false), 250); }
     },
       React.createElement(NavLink, { className: "lm-nav-link", exact: true, to: PATH, title: health.title,
