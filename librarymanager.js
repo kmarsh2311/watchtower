@@ -1470,8 +1470,7 @@
             className: "lm-easter-egg-t",
             onClick: toggleHeaderArt
           })
-        ),
-        React.createElement("p", null, "Inventory, safe renaming, monitoring and recovery in one place."))),
+        ))),
       error && React.createElement("div", { className: "lm-message error" }, error),
       notice && React.createElement("div", { className: "lm-message" }, notice),
       React.createElement("div", { className: "lm-layout" },
