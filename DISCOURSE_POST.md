@@ -1,19 +1,17 @@
-||||
-|-|-|-|
-:placard: | **Summary** | 24/7 background filesystem watcher, automated multi-folder download ingest, zero-rescan external move tracking, and atomic renaming engine for Stash with companion sidecar rollback and visual contact sheets.
-:link: | **Repository** | https://github.com/kmarsh2311/watchtower
-:information_source: | **Source URL** | https://kmarsh2311.github.io/my-stash-plugins/index.yml
-:open_book: | **Install** | [How to install a plugin?](https://discourse.stashapp.cc/t/-/1015)
+| | | |
+| --- | --- | --- |
+| :placard: | **Summary** | **Watchtower** — 24/7 background filesystem watcher, automated multi-folder download ingest, zero-rescan external move tracking, and atomic renaming engine for Stash with companion sidecar rollback and visual contact sheets. |
+| :link: | **Repository** | https://github.com/kmarsh2311/watchtower |
+| :information_source: | **Source URL** | https://kmarsh2311.github.io/my-stash-plugins/index.yml |
+| :open_book: | **Install** | [How to install a plugin?](https://discourse.stashapp.cc/t/-/1015) |
 
-<div align="center">
+---
 
-<img src="https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/watchtower-header.png" width="100%" />
+![Watchtower for Stash](https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/watchtower-header.png)
 
 # 🗼 Watchtower — 24/7 Library Guardian & Ingest Engine for Stash
 
-</div>
-
-**Watchtower** is a 24/7 background system guardian and automated media ingest pipeline designed from the ground up for Stash. 
+**Watchtower** is a 24/7 background system guardian and automated media ingest pipeline designed from the ground up for Stash. *From the creator of FastTag.*
 
 Instead of waiting for slow manual library sweeps or worrying if external file moves broke your scene links, Watchtower continuously listens to your storage drives in real-time. Drop downloads into incoming folders and watch them automatically verify, settle, generate visual contact sheets, and import into Stash the moment they finish. Reorganize files in Finder or Explorer without fear—Watchtower detects moves by size and `OSHash` and reconnects scenes instantly without destructive rescans.
 
@@ -30,7 +28,7 @@ Instead of waiting for slow manual library sweeps or worrying if external file m
 
 ### 📥 2. Automated Multi-Folder Download Ingest & Settle Pipeline
 * **Zero-Touch Ingest:** Configure up to 5 incoming download folders. Drop new videos in and let Watchtower handle everything from verification to import.
-* **Partial Download Filter:** Actively ignores in-progress downloads (`.part`, `.partial`, `.crdownload`, `.download`, `.tmp`).
+* **Partial Download Protection:** Actively filters out in-progress downloads (`.part`, `.partial`, `.crdownload`, `.download`, `.tmp`).
 * **Dynamic Stability Settle Timers:** Watches file size and `mtime` continuously. The import timer (configurable 1–30 mins) automatically resets if a transfer is still writing.
 * **Targeted Automated Scans:** Once a video is 100% stable, Watchtower triggers an exact-path Stash scan with thumbnail, sprite, and perceptual-hash generation—importing only the new file in seconds.
 * **Subfolder Discovery:** Automatically discovers and processes videos nested inside newly downloaded subfolders.
@@ -83,32 +81,20 @@ Instead of waiting for slow manual library sweeps or worrying if external file m
 
 ## Screenshots
 
-<div align="center">
-
 ### 🖥️ Live Stream Feed & Control Console
-<img src="https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/overview_terminal.png" width="100%" />
-
-<br/><br/>
+![Live Stream Feed & Control Console](https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/overview_terminal.png)
 
 ### 📡 Filesystem Storage Monitor
-<img src="https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/filesystem_monitor.png" width="100%" />
-
-<br/><br/>
+![Filesystem Storage Monitor](https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/filesystem_monitor.png)
 
 ### 📥 Navbar Quick Status Popover
-<img src="https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/navbar_status.png" width="55%" />
-
-<br/><br/>
+![Navbar Quick Status Popover](https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/navbar_status.png)
 
 ### 🖼️ Video Storyboard Contact Sheets (CSM)
-<img src="https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/contact_sheets.png" width="100%" />
-
-<br/><br/>
+![Video Storyboard Contact Sheets](https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/contact_sheets.png)
 
 ### 🛡️ Atomic Filename Management & Sandbox Simulator
-<img src="https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/filename_management.png" width="100%" />
-
-</div>
+![Atomic Filename Management](https://raw.githubusercontent.com/kmarsh2311/my-stash-plugins/main/plugins/watchtower/assets/filename_management.png)
 
 ---
 
