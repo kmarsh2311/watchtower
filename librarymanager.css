@@ -1288,7 +1288,7 @@ a.lm-activity-scene-pill:hover {
 
 
 
-/* Menu KitKat Support Button */
+/* Menu KitKat Support Button - Emerald Command-Center Theme */
 .lm-tabs-divider {
   height: 1px;
   background: rgba(140, 155, 185, 0.2);
@@ -1302,24 +1302,24 @@ a.lm-activity-scene-pill:hover {
   gap: 6px;
   margin: 6px 4px 4px;
   padding: 8px 10px;
-  border: 1px solid rgba(245, 158, 11, 0.45);
+  border: 1px solid rgba(47, 166, 109, 0.45);
   border-radius: 8px;
-  background: rgba(245, 158, 11, 0.1);
-  color: #fde7b0 !important;
+  background: rgba(47, 166, 109, 0.12);
+  color: #45d38a !important;
   font-size: 0.82rem;
   font-weight: 600;
   line-height: 1.35;
   text-align: center;
   text-decoration: none !important;
-  transition: all 0.16s ease;
-  box-shadow: 0 0 8px rgba(245, 158, 11, 0.08);
+  transition: all 0.18s ease;
+  box-shadow: 0 0 8px rgba(47, 166, 109, 0.08);
   cursor: pointer;
 }
 
 .lm-kitkat-btn:hover {
-  background: rgba(245, 158, 11, 0.24);
-  border-color: #f59e0b;
+  background: #218657;
+  border-color: #45c586;
   color: #ffffff !important;
-  box-shadow: 0 0 14px rgba(245, 158, 11, 0.35);
+  box-shadow: 0 0 14px rgba(47, 166, 109, 0.4);
   transform: translateY(-1px);
 }
