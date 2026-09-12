@@ -568,6 +568,10 @@ def main():
                 except Exception:
                     pass
 
+                sheet_path_str = f"{vid}.jpg"
+                expect_filesystem_create(database_path, sheet_path_str)
+                expect_filesystem_create(database_path, f"{vid.stem}.jpg")
+
                 res = generate_video_contact_sheet(
                     vid,
                     grid=grid,
