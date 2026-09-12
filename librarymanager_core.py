@@ -1698,7 +1698,8 @@ def filename_format_options(config: dict | None = None) -> dict:
 def _sanitize_filename_stem(stem: str, options: dict | None = None) -> str:
     """Remove or replace illegal filesystem characters with clean punctuation."""
     opts = options or {}
-    cleaned = re.sub(r'[?"*]', '', str(stem or ''))
+    cleaned = re.sub(r'', '', str(stem or ''))  # strip null bytes first
+    cleaned = re.sub(r'[?"*]', '', cleaned)
     cleaned = re.sub(r'[/\:<>|]', '-', cleaned)
     cleaned = re.sub(r'\s*-\s*([!.,;])', r' \1', cleaned)
     if opts.get("collapseMultipleDashes") is not False:

@@ -845,5 +845,79 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(before, scene_naming_signature(database, "10"))
 
 
+
+    def test_sidecar_rollback_on_move_file_failure(self):
+        """If move_file() returns False, already-moved sidecars are restored to their original names."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            video = root / "Original.mp4"
+            sidecar = root / "Original.srt"
+            video.write_bytes(b"video")
+            sidecar.write_bytes(b"srt content")
+            database = root / "inventory.sqlite3"
+            scene = {"id": "10", "title": "Title", "studio": {"name": "Studio"},
+                     "performers": [{"id": "1", "name": "Person"}],
+                     "files": [{"id": "20", "path": str(video), "size": 5}]}
+            inventory(database, [scene])
+
+            def failing_move(_file_id, _folder, _basename):
+                return False  # Stash refuses the rename
+
+            try:
+                apply_scene_filename(database, "10", failing_move)
+                self.fail("Expected a RuntimeError when move_file returns False")
+            except RuntimeError:
+                pass  # expected - Stash refused the rename
+            # The sidecar must be rolled back to its original location
+            self.assertTrue(sidecar.exists(), "Sidecar was not rolled back after move_file() failure")
+
+    def test_empty_stem_guardrail_after_full_metadata_strip(self):
+        """A scene whose title is only performer names must not produce an empty proposed filename."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            video = root / "Original.mp4"
+            video.write_bytes(b"video")
+            database = root / "inventory.sqlite3"
+            # Title is exactly the performer name — after stripping it would collapse to empty
+            scene = {"id": "10", "title": "Person", "studio": None,
+                     "performers": [{"id": "1", "name": "Person"}],
+                     "files": [{"id": "20", "path": str(video), "size": 5}]}
+            inventory(database, [scene])
+            _, report = preview_safe_filenames(database)
+            proposed = report[0]["proposed_path"]
+            stem = Path(proposed).stem
+            self.assertTrue(len(stem) > 0, f"Proposed stem must not be empty, got: {repr(stem)}")
+
+    def test_utf8_filename_byte_limit(self):
+        """255-byte proposed filename is accepted; 256-byte is blocked as conflict via preview_manual_filename."""
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = root / "inventory.sqlite3"
+            video = root / "Original.mp4"
+            video.write_bytes(b"video")
+            scene = {"id": "10", "title": "", "studio": None, "performers": [],
+                     "files": [{"id": "20", "path": str(video), "size": 5}]}
+            inventory(database, [scene])
+
+            # 251-char stem + ".mp4" (4) = 255 bytes total — must pass
+            ok_name = "A" * 251 + ".mp4"
+            result_ok = preview_manual_filename(database, "10", ok_name)
+            self.assertNotEqual(result_ok["status"], "blocked",
+                                f"255-byte filename should not be blocked, got: {result_ok['reason']}")
+
+            # 252-char stem + ".mp4" (4) = 256 bytes total — must be blocked
+            too_long_name = "A" * 252 + ".mp4"
+            result_long = preview_manual_filename(database, "10", too_long_name)
+            self.assertEqual(result_long["status"], "blocked",
+                             "256-byte filename should be blocked as exceeding 255 UTF-8 bytes")
+
+    def test_nfo_not_in_associated_extensions(self):
+        """Confirm .nfo files are excluded from the core rename engine's sidecar auto-rename set."""
+        from librarymanager_core import ASSOCIATED_EXTENSIONS, IMAGE_SIDECAR_EXTENSIONS
+        self.assertNotIn(".nfo", ASSOCIATED_EXTENSIONS,
+                         ".nfo must not be in ASSOCIATED_EXTENSIONS — the rename engine must not auto-rename NFO files")
+        self.assertNotIn(".nfo", IMAGE_SIDECAR_EXTENSIONS,
+                         ".nfo must not be in IMAGE_SIDECAR_EXTENSIONS")
+
 if __name__ == "__main__":
     unittest.main()

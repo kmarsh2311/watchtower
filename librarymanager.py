@@ -340,7 +340,12 @@ def configure_system_startup(enabled, server_connection, database_path):
         }
         with runner_path.open("wb") as handle:
             plistlib.dump(plist, handle)
-        subprocess.run(["/bin/launchctl", "bootstrap", domain, str(runner_path)], capture_output=True, check=True)
+        try:
+            subprocess.run(["/bin/launchctl", "bootstrap", domain, str(runner_path)], capture_output=True, check=True)
+        except subprocess.CalledProcessError as exc:
+            # Exit code 36 (EBUSY) means the service is already loaded — harmless on double-click.
+            if exc.returncode != 36:
+                raise
         return system_startup_status()
 
     elif sys.platform == "win32":
