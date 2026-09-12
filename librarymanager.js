@@ -439,6 +439,8 @@
     const inventory = data?.inventory;
     const monitor = data?.monitor || {};
     const unavailableRoots = monitor.unavailable_roots || [];
+    const isMonitorStale = monitor.is_stale === true || monitor.state === "stale";
+    const watcherWorking = monitor.state === "running" && !isMonitorStale;
     const filenamePreview = data?.filename_preview;
     const incoming = data?.incoming || {};
     const incomingFolder = data?.incoming_folder || {};
