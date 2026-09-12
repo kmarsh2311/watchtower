@@ -580,7 +580,7 @@ def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
         connection.close()
 
 
-def pending_filesystem_events(database_path: Path, limit: int = 20) -> list[dict]:
+def pending_filesystem_events(database_path: Path, limit: int = 50) -> list[dict]:
     """Return the exact unresolved events shown by the live dashboard."""
     connection = connect(database_path)
     try:

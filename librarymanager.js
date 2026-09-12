@@ -780,11 +780,12 @@
       const failedIncoming = allActive.filter(item => item.status === "failed");
       const unavailableRoots = monitor.unavailable_roots || [];
       const unresolved = data?.pending_events || [];
+      const unresolvedCount = monitor.pending_events != null ? monitor.pending_events : unresolved.length;
       const stream = (data?.activity || []).slice(0, 250);
       const isMonitorStale = monitor.is_stale === true || monitor.state === "stale";
       const watcherWorking = monitor.state === "running" && !isMonitorStale;
 
-      const totalProblems = failedIncoming.length + unavailableRoots.length + unresolved.length + (isMonitorStale ? 1 : 0);
+      const totalProblems = failedIncoming.length + unavailableRoots.length + unresolvedCount + (isMonitorStale ? 1 : 0);
 
       const problemsCount = stream.filter(r => r.severity === "error" || r.severity === "warning" || r.status === "failed" || r.status === "review").length;
       const addedCount = stream.filter(r => r.category === "incoming" && r.status === "imported").length;
@@ -856,12 +857,12 @@
                 disabled: !!busy,
                 onClick: () => handleDismissAllIncoming(failedIncoming.length)
               }, `✕ DISMISS ALL (${failedIncoming.length})`),
-              unresolved.length > 1 && React.createElement("button", {
+              unresolvedCount > 1 && React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn dismiss",
                 disabled: !!busy,
                 onClick: () => resolveAllPendingEvents("dismiss")
-              }, `✕ DISMISS ALL CHANGES (${unresolved.length})`))),
+              }, `✕ DISMISS ALL CHANGES (${unresolvedCount})`))),
 
           failedIncoming.map(item => React.createElement("div", { className: "lm-terminal-attention-item failed", key: item.path },
             React.createElement("div", { className: "lm-terminal-attention-title" },
