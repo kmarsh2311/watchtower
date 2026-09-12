@@ -1805,7 +1805,7 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
             if len(proposed.name.encode("utf-8")) > 255:
                 status, reason = "conflict", "Proposed filename exceeds 255 UTF-8 bytes"
             elif target_counts[normalized_target] > 1:
-                status, reason = "conflict", "Multiple Stash files would use the same target path"
+                status, reason = "conflict", "Safely skipped: Multiple files share the same filename target (collision protected)"
             elif proposed != current and proposed.exists():
                 status, reason = "conflict", "A different filesystem entry already uses the target path"
             elif proposed == current:

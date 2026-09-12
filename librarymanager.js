@@ -847,6 +847,7 @@
     }
 
     function readableKey(key) {
+      if (key === "conflicts" || key === "conflict_count") return "Protected / Skipped";
       return String(key).replaceAll("_", " ").replace(/\b\w/g, letter => letter.toUpperCase());
     }
 
@@ -1959,7 +1960,7 @@
                     return React.createElement("details", { key: index },
                       React.createElement("summary", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
                         React.createElement("div", { style: { display: "inline-flex", alignItems: "center", gap: "8px" } },
-                          React.createElement("span", { className: `lm-badge ${isVerified ? "ok" : isConflict ? "warn" : ""}` }, row.status || row.confidence || row.action || row.recommendation || `Finding ${index + 1}`),
+                          React.createElement("span", { className: `lm-badge ${isVerified ? "ok" : isConflict ? "warn" : ""}` }, row.status === "conflict" ? "Protected" : (row.status || row.confidence || row.action || row.recommendation || `Finding ${index + 1}`)),
                           row.scene_id && React.createElement("span", { className: "scene-card lm-scene-pill-card", onClick: e => e.stopPropagation() }, SceneLink(row.scene_id, `Scene ${row.scene_id}`, "lm-activity-scene-pill")),
                           React.createElement("span", { style: { fontSize: "0.82rem", color: "#8b949e", maxWidth: "450px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
                             row.candidate_path ? row.candidate_path.split("/").pop() : (row.reason || ""))
