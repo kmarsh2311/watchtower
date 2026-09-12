@@ -2495,7 +2495,8 @@ a.lm-activity-scene-pill:hover {
   opacity: 0 !important;
   pointer-events: none !important;
   visibility: hidden !important;
-  transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1), transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.22s ease !important;
+  /* Graceful exit transition on mouse leave (0ms delay) */
+  transition: opacity 0.18s cubic-bezier(0.4, 0, 1, 1) 0ms, transform 0.18s cubic-bezier(0.4, 0, 1, 1) 0ms, visibility 0.18s ease 0ms !important;
   z-index: 100 !important;
   transform: translateY(6px) !important;
 }
@@ -2523,8 +2524,10 @@ a.lm-activity-scene-pill:hover {
   border-style: solid !important;
   border-color: rgba(57, 255, 100, 0.45) transparent transparent transparent !important;
 }
+/* Intentional entrance with 150ms delay on mouse enter */
 .lm-wizard-feature-chip:hover .lm-wizard-chip-tooltip {
   opacity: 1 !important;
   visibility: visible !important;
   transform: translateY(0) !important;
+  transition: opacity 0.24s cubic-bezier(0.16, 1, 0.3, 1) 150ms, transform 0.24s cubic-bezier(0.16, 1, 0.3, 1) 150ms, visibility 0.24s ease 150ms !important;
 }
