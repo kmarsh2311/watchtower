@@ -568,8 +568,7 @@
     ];
 
     const modalElement = React.createElement("div", {
-      className: "lm-wizard-backdrop",
-      onClick: (e) => { if (e.target === e.currentTarget) onHide(); }
+      className: "lm-wizard-backdrop"
     },
       React.createElement("div", { className: "lm-wizard-dialog" },
         React.createElement("header", { className: "lm-wizard-header" },
@@ -584,12 +583,12 @@
               React.createElement("h2", null, "Watchtower Guided Setup")
             )
           ),
-          React.createElement("button", {
+          config.onboardingCompleted ? React.createElement("button", {
             type: "button",
             className: "lm-wizard-close-btn",
             onClick: onHide,
             title: "Close Setup Wizard"
-          }, "✕")
+          }, "✕") : null
         ),
         React.createElement("div", { className: "lm-wizard-stepper" },
           stepsList.map(s => {
@@ -802,7 +801,7 @@
   function Dashboard() {
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
-    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(false);
+    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(true);
     const [onboardingBannerDismissed, setOnboardingBannerDismissed] = React.useState(false);
     const [config, setConfig] = React.useState({});
     const [busy, setBusy] = React.useState("");
