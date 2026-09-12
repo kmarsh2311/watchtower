@@ -1912,6 +1912,7 @@
       panel("Advanced Diagnostic Tools", "Under-the-hood diagnostic scanners for library reconciliation and metadata repair. All preview tools are strictly read-only.",
         React.createElement("div", { className: "lm-task-list" },
           [[readOnlyTasks.inventory, "Refresh the SQLite inventory."],
+           [readOnlyTasks.filenames, "Preview filename changes across your entire library."],
            [readOnlyTasks.find, "Find safe candidates for missing paths."],
            [readOnlyTasks.plan, "Build a conflict-aware resolution plan."],
            [readOnlyTasks.merge, "Preview metadata that could be recovered."],
