@@ -433,20 +433,36 @@ def incoming_summary(database_path: Path) -> dict:
 
         for r_row in connection.execute(
             """SELECT scene_id,enqueued_at,available_at,status FROM rename_queue WHERE status IN ('pending','processing')"""
-        ):
+        ).fetchall():
             sc_id = r_row["scene_id"]
-            f_row = connection.execute("SELECT basename FROM files WHERE scene_id=? AND exists_on_disk=1 LIMIT 1", (sc_id,)).fetchone()
+            f_row = connection.execute("SELECT basename,path,title,studio,performers_json FROM files WHERE scene_id=? AND exists_on_disk=1 LIMIT 1", (sc_id,)).fetchone()
             bname = f_row["basename"] if f_row else f"Scene {sc_id}"
             is_proc = r_row["status"] == "processing"
             rem = 0 if is_proc else max(0, int(r_row["available_at"] - now))
+            
+            proposed_name = None
+            if f_row:
+                try:
+                    title = f_row["title"] or Path(f_row["path"]).stem
+                    studio = f_row["studio"]
+                    perfs = json.loads(f_row["performers_json"] or "[]")
+                    ext = Path(f_row["path"]).suffix
+                    stem = _proposed_stem(title, studio, perfs)
+                    if stem:
+                        proposed_name = stem + ext
+                except Exception:
+                    proposed_name = None
+
             active.append({
                 "path": f"scene://{sc_id}/{bname}",
                 "scene_id": str(sc_id),
+                "current_name": bname,
+                "proposed_name": proposed_name or bname,
                 "status": "renaming" if is_proc else "pending_rename",
                 "remaining_seconds": rem,
                 "stable_since": r_row["enqueued_at"],
                 "settle_seconds": int(r_row["available_at"] - r_row["enqueued_at"]),
-                "detail": "Applying filename in Stash" if is_proc else "Waiting for metadata edits to settle",
+                "detail": "Applying filename in Stash" if is_proc else (f"Proposed: {proposed_name}" if proposed_name else "Waiting for metadata edits to settle"),
                 "last_checked_at": r_row["enqueued_at"],
             })
         return {
@@ -771,6 +787,36 @@ def enqueue_rename(database_path: Path, scene_id: str, now_timestamp: float, deb
             connection.execute("UPDATE rename_worker_state SET scheduled=1 WHERE id=1")
         connection.commit()
         return should_schedule
+    finally:
+        connection.close()
+
+
+def cancel_pending_rename(database_path: Path, scene_id: str) -> bool:
+    connection = connect(database_path)
+    try:
+        connection.execute("DELETE FROM rename_queue WHERE scene_id=?", (str(scene_id),))
+        changes = connection.execute("SELECT changes()").fetchone()[0]
+        connection.commit()
+    finally:
+        connection.close()
+    if changes > 0:
+        record_activity(
+            database_path, "rename", "automatic rename", "cancelled",
+            scene_id=str(scene_id), detail="Pending rename cancelled by user; original filename preserved on disk"
+        )
+    return bool(changes)
+
+
+def make_pending_rename_due(database_path: Path, scene_id: str) -> bool:
+    connection = connect(database_path)
+    try:
+        connection.execute(
+            "UPDATE rename_queue SET available_at=? WHERE scene_id=? AND status='pending'",
+            (time.time() - 1.0, str(scene_id))
+        )
+        changes = connection.execute("SELECT changes()").fetchone()[0]
+        connection.commit()
+        return bool(changes)
     finally:
         connection.close()
 
@@ -1728,7 +1774,7 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
         else:
             status, reason = "ready", "Single-scene rename passed preflight"
         sidecars = []
-        if status == "ready":
+        if status == "ready" and current.parent.exists():
             for candidate in current.parent.iterdir():
                 if not candidate.is_file() or candidate == current:
                     continue

@@ -22,7 +22,7 @@ from librarymanager_core import (
                                  preview_manual_filename, preview_scene_filename, reconcile_missing_files, refresh_scene_inventory,
                                  release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
                                  reconcile_filesystem_events, pending_filesystem_events)
-from librarymanager_core import dashboard_data, incoming_summary, record_activity, recent_activity
+from librarymanager_core import dashboard_data, incoming_summary, record_activity, recent_activity, cancel_pending_rename, make_pending_rename_due
 
 
 QUERY = """
@@ -470,6 +470,10 @@ def main():
                   detail=f"Automatic filename changes are limited to Test Scene ID {config.get('testSceneId')}")
             print(json.dumps({"output": f"Automatic rename skipped: scene {scene_id} is outside Test Scene ID scope."}))
             return
+        try:
+            refresh_scene(stash, database_path, scene_id)
+        except Exception:
+            pass
         rename_settle = int(config.get("renameSettleSeconds") if config.get("renameSettleSeconds") is not None else 30)
         should_schedule = enqueue_rename(database_path, str(scene_id), time.time(), debounce_seconds=rename_settle)
         if should_schedule:
@@ -667,6 +671,19 @@ def main():
         result = configure_macos_startup(arguments.get("enabled") is True,
                                          plugin_input.get("server_connection") or {}, database_path)
         message = json.dumps(result, ensure_ascii=False)
+    elif mode == "cancel_pending_rename":
+        scene_id = str((plugin_input.get("args") or {}).get("scene_id") or "")
+        cancelled = cancel_pending_rename(database_path, scene_id)
+        message = json.dumps({"cancelled": cancelled, "scene_id": scene_id})
+    elif mode == "execute_pending_rename_now":
+        scene_id = str((plugin_input.get("args") or {}).get("scene_id") or "")
+        make_pending_rename_due(database_path, scene_id)
+        stash = StashInterface(plugin_input["server_connection"])
+        try:
+            job_id = stash.run_plugin_task("librarymanager", "Process Rename Queue")
+            message = json.dumps({"executed": True, "scene_id": scene_id, "job_id": job_id})
+        except Exception as e:
+            message = json.dumps({"executed": False, "error": str(e)})
     elif mode == "retry_incoming_file":
         arguments = plugin_input.get("args") or {}
         path = str(arguments.get("path") or "")

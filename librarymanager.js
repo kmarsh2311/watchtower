@@ -857,10 +857,82 @@
               } else if (isPendingRename || isRenaming) {
                 displayName = item.path.replace(/^scene:\/\/\d+\//, "");
               }
+
+              if (isPendingRename) {
+                const currentName = item.current_name || displayName;
+                const proposedName = item.proposed_name || displayName;
+                return React.createElement("div", {
+                  className: "lm-terminal-pending-rename-card",
+                  key: item.path,
+                  style: {
+                    margin: ".5rem 0",
+                    padding: ".65rem .85rem",
+                    border: "1px dashed rgba(32, 230, 74, .45)",
+                    borderRadius: "4px",
+                    background: "rgba(20, 210, 55, .05)"
+                  }
+                },
+                  React.createElement("div", {
+                    style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: ".4rem" }
+                  },
+                    React.createElement("span", { style: { fontWeight: "700", color: "#39ff64", fontSize: ".82rem" } },
+                      `⏳ PENDING RENAME (SCENE #${item.scene_id})`
+                    ),
+                    React.createElement("em", { style: { fontStyle: "normal", color: "#ffb52e", fontSize: ".8rem", fontWeight: "700" } },
+                      `SETTLES IN ${countdown(item)}`
+                    )
+                  ),
+                  React.createElement("div", { style: { fontSize: ".82rem", lineHeight: "1.45", overflowWrap: "anywhere" } },
+                    React.createElement("div", { style: { color: "rgba(32, 230, 74, .7)" } },
+                      React.createElement("span", { style: { opacity: .65 } }, "Current:  "),
+                      currentName
+                    ),
+                    React.createElement("div", { style: { color: "#39ff64", fontWeight: "600", marginTop: "2px" } },
+                      React.createElement("span", { style: { opacity: .65 } }, "Proposed: "),
+                      proposedName
+                    )
+                  ),
+                  React.createElement("div", { className: "lm-terminal-actions", style: { marginTop: ".55rem", gap: ".5rem" } },
+                    React.createElement("button", {
+                      type: "button",
+                      className: "lm-terminal-btn retry",
+                      disabled: !!busy,
+                      onClick: async () => {
+                        setBusy(`rename:${item.scene_id}`);
+                        setError("");
+                        try {
+                          await operation("execute_pending_rename_now", { scene_id: item.scene_id });
+                          await refresh();
+                        } catch (e) {
+                          setError(`Rename failed: ${e.message}`);
+                        } finally {
+                          setBusy("");
+                        }
+                      }
+                    }, "▶ RENAME NOW"),
+                    React.createElement("button", {
+                      type: "button",
+                      className: "lm-terminal-btn dismiss",
+                      disabled: !!busy,
+                      onClick: async () => {
+                        setBusy(`cancel:${item.scene_id}`);
+                        setError("");
+                        try {
+                          await operation("cancel_pending_rename", { scene_id: item.scene_id });
+                          await refresh();
+                        } catch (e) {
+                          setError(`Cancel failed: ${e.message}`);
+                        } finally {
+                          setBusy("");
+                        }
+                      }
+                    }, "✕ CANCEL RENAME")
+                  )
+                );
+              }
+
               const badgeText = isRenaming
                 ? "RENAMING"
-                : isPendingRename
-                ? "SETTLING"
                 : isDownloading
                 ? "DOWNLOADING"
                 : isScanning
@@ -870,8 +942,6 @@
                 : "FINISHING";
               const statusDetail = isRenaming
                 ? "APPLYING FILENAME IN STASH"
-                : isPendingRename
-                ? `RENAMING IN ${countdown(item)} (WAITING FOR EDITS)`
                 : isDownloading
                 ? "INCOMING DOWNLOAD (IN PROGRESS)"
                 : isScanning
