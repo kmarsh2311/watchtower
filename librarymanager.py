@@ -515,11 +515,29 @@ def main():
             generated_count = 0
             skipped_count = len(candidates) - len(missing)
             errors = []
+            total_missing = len(missing)
             for i, vid in enumerate(missing):
+                current_num = i + 1
+                remaining_num = total_missing - current_num
                 try:
-                    stash.progress((i + 1) / max(1, len(missing)))
+                    import stashapi.log as stash_log
+                    stash_log.progress(current_num / max(1, total_missing))
                 except Exception:
                     pass
+                try:
+                    con = connect(database_path)
+                    con.execute(
+                        "INSERT INTO incoming_files (path, file_size, last_modified, settle_until, status, detail) "
+                        "VALUES (?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(path) DO UPDATE SET status=excluded.status, detail=excluded.detail",
+                        (str(vid), vid.stat().st_size if vid.exists() else 0, time.time(), time.time(),
+                         "generating_sheet", f"Generating contact sheet {current_num} of {total_missing} ({remaining_num} remaining)")
+                    )
+                    con.commit()
+                    con.close()
+                except Exception:
+                    pass
+
                 res = generate_video_contact_sheet(
                     vid,
                     grid=grid,
@@ -527,6 +545,14 @@ def main():
                     adjust_vertical=adjust_vert,
                     custom_script=custom_script
                 )
+                try:
+                    con = connect(database_path)
+                    con.execute("DELETE FROM incoming_files WHERE path=?", (str(vid),))
+                    con.commit()
+                    con.close()
+                except Exception:
+                    pass
+
                 if res.get("status") == "generated":
                     generated_count += 1
                     try:
@@ -536,7 +562,7 @@ def main():
                             "contact sheet generated",
                             "recorded",
                             new_path=res.get("path"),
-                            detail=f"Generated {res.get('grid', grid)} contact sheet for {vid.name}"
+                            detail=f"[{current_num}/{total_missing}] Generated {res.get('grid', grid)} contact sheet for {vid.name}"
                         )
                     except Exception:
                         pass
