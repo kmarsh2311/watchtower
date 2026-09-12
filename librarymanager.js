@@ -555,7 +555,6 @@
     };
 
     const handleFinish = async (targetTab = "overview") => {
-      await updateSetting("onboardingCompleted", true);
       onHide();
       onNavigateTab(targetTab);
     };
@@ -2802,7 +2801,7 @@
           })
         ))),
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
-      (data !== null && config && config.onboardingCompleted !== true && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
+      (data !== null && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
         onStart: () => setShowOnboardingWizard(true),
         onDismiss: () => setOnboardingBannerDismissed(true)
       }) : null,
