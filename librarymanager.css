@@ -2126,6 +2126,13 @@ a.lm-activity-scene-pill:hover {
   }
 }
 
+.lm-blurred-background {
+  filter: blur(14px) brightness(0.55) !important;
+  transition: filter 0.3s ease !important;
+  pointer-events: none !important;
+  user-select: none !important;
+}
+
 .lm-wizard-backdrop {
   position: fixed !important;
   top: 0 !important;
@@ -2133,7 +2140,9 @@ a.lm-activity-scene-pill:hover {
   right: 0 !important;
   bottom: 0 !important;
   z-index: 999999 !important;
-  background: rgba(3, 7, 18, 0.85) !important;
+  background: rgba(3, 7, 18, 0.90) !important;
+  backdrop-filter: blur(18px) saturate(1.2) !important;
+  -webkit-backdrop-filter: blur(18px) saturate(1.2) !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;

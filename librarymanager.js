@@ -871,15 +871,7 @@
   function Dashboard() {
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
-    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(false);
-
-    React.useEffect(() => {
-      // Auto-open on page load for interactive testing
-      const timer = window.setTimeout(() => {
-        setShowOnboardingWizard(true);
-      }, 200);
-      return () => window.clearTimeout(timer);
-    }, []);
+    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(true);
     const [onboardingBannerDismissed, setOnboardingBannerDismissed] = React.useState(false);
     const [config, setConfig] = React.useState({});
     const [busy, setBusy] = React.useState("");
@@ -2859,7 +2851,7 @@
       );
     }
 
-    return React.createElement("main", { className: "lm-dashboard" },
+    return React.createElement("main", { className: `lm-dashboard ${showOnboardingWizard ? "lm-blurred-background" : ""}` },
       React.createElement("header", { className: "lm-header" }, React.createElement("div", { className: "lm-page-brand" },
         React.createElement("div", { className: "lm-brand-wrapper" },
           React.createElement("img", {
