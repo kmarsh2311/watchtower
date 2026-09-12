@@ -231,13 +231,13 @@ def get_configured_incoming_folders(config):
 
 def incoming_folder_status_item(folder_path_str, roots, enabled):
     if not folder_path_str:
-        return {"enabled": enabled, "valid": False, "path": "", "reason": "Choose an incoming folder first"}
+        return {"enabled": enabled, "valid": False, "exists": False, "path": "", "reason": "Choose an incoming folder first"}
     try:
         folder = Path(folder_path_str).expanduser().resolve()
     except Exception as exc:
-        return {"enabled": enabled, "valid": False, "path": folder_path_str, "reason": f"Invalid path: {exc}"}
+        return {"enabled": enabled, "valid": False, "exists": False, "path": folder_path_str, "reason": f"Invalid path: {exc}"}
     if not folder.is_dir():
-        return {"enabled": enabled, "valid": False, "path": str(folder), "reason": "The incoming folder is not currently available"}
+        return {"enabled": enabled, "valid": False, "exists": False, "path": str(folder), "reason": "The incoming folder is not currently available on disk"}
     inside_root = False
     for root in roots:
         try:
@@ -247,9 +247,9 @@ def incoming_folder_status_item(folder_path_str, roots, enabled):
         except (ValueError, OSError):
             continue
     if not inside_root:
-        return {"enabled": enabled, "valid": False, "path": str(folder),
+        return {"enabled": enabled, "valid": False, "exists": True, "path": str(folder),
                 "reason": "The incoming folder must be inside a folder configured in Stash"}
-    return {"enabled": enabled, "valid": True, "path": str(folder), "reason": "Ready to watch for completed videos"}
+    return {"enabled": enabled, "valid": True, "exists": True, "path": str(folder), "reason": "Ready to watch for completed videos"}
 
 
 def incoming_folders_status(config, roots):

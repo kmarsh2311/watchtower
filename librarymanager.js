@@ -800,9 +800,18 @@
             ),
             React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginBottom: "12px" } },
               incomingFoldersList.map((folder, idx) => {
-                const stat = statusFolders.find(f => f.path === folder);
-                const isConfigured = Boolean(folder && folder.trim());
-                const isMissing = isConfigured && stat && !stat.exists;
+                const cleanFolder = (folder || "").trim().replace(/\/+$/, "");
+                const stat = statusFolders.find(f => {
+                  if (!f || !f.path) return false;
+                  return f.path.trim().replace(/\/+$/, "") === cleanFolder;
+                }) || statusFolders[idx] || {};
+                const isConfigured = Boolean(cleanFolder);
+                const isValid = Boolean(stat?.valid);
+                const isMissing = isConfigured && stat && stat.exists === false;
+                const isOutside = isConfigured && stat && stat.exists === true && !stat.valid;
+                const statusLabel = !isConfigured ? "" : (isValid ? "✓ Valid" : (isOutside ? "⚠ Outside Root" : "⚠ Missing"));
+                const statusReason = stat?.reason || (isValid ? "Folder is accessible and inside library root" : "Directory not found on disk");
+
                 return React.createElement("div", {
                   key: idx,
                   style: { display: "flex", flexDirection: "column", gap: "4px" }
@@ -814,14 +823,21 @@
                       type: "text",
                       placeholder: "/path/to/downloads",
                       value: folder,
-                      style: { flex: 1, padding: "0.45rem 0.65rem", background: "var(--input-bg, #101827)", border: isMissing ? "1px solid #e09822" : "1px solid #52617c", borderRadius: "0.35rem", color: "inherit" },
+                      style: {
+                        flex: 1,
+                        padding: "0.45rem 0.65rem",
+                        background: "var(--input-bg, #101827)",
+                        border: isConfigured ? (isValid ? "1px solid #2fa66d" : "1px solid #e09822") : "1px solid #52617c",
+                        borderRadius: "0.35rem",
+                        color: "inherit"
+                      },
                       onChange: e => handleUpdateFolder(idx, e.target.value)
                     }),
                     isConfigured && React.createElement("span", {
-                      className: `lm-incoming-status-pill ${stat?.exists ? "ok" : "warn"}`,
+                      className: `lm-incoming-status-pill ${isValid ? "ok" : "warn"}`,
                       style: { padding: "0.35rem 0.6rem", fontSize: "0.78rem", cursor: "help" },
-                      title: stat?.exists ? "Folder exists and is accessible" : "Directory does not exist on disk at this path"
-                    }, stat?.exists ? "✓ Valid" : "⚠ Missing"),
+                      title: statusReason
+                    }, statusLabel),
                     incomingFoldersList.length > 1 && React.createElement("button", {
                       type: "button",
                       className: "btn btn-danger",
@@ -831,9 +847,9 @@
                       title: "Remove watched folder"
                     }, "✕")
                   ),
-                  isMissing && React.createElement("div", {
+                  isConfigured && !isValid && React.createElement("div", {
                     style: { fontSize: "0.76rem", color: "#ffb52e", display: "flex", alignItems: "center", gap: "4px", paddingLeft: "2px" }
-                  }, "⚠️ Folder not found on disk. Ensure external drives are mounted, create the folder in Finder, or update the path.")
+                  }, `⚠️ ${statusReason}`)
                 );
               })
             ),
