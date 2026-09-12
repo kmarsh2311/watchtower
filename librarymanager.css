@@ -2557,33 +2557,34 @@ a.lm-activity-scene-pill:hover {
   margin: 0 auto 1rem auto !important;
   overflow: hidden !important;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(57, 255, 100, 0.25) !important;
-  background: #000000 !important;
+  background: #020603 !important;
   display: block !important;
 }
 
 .lm-wizard-lighthouse-badge .lm-brand-wrapper {
   position: absolute !important;
-  left: -14px !important;
+  left: 0 !important;
   top: 0 !important;
-  width: 341.6px !important;
-  height: 72px !important;
+  width: 700px !important;
+  height: 147.5px !important;
+  transform: translate(-14.5px, 0) scale(0.488) !important;
+  transform-origin: 0 0 !important;
   pointer-events: none !important;
+  overflow: visible !important;
 }
 
 .lm-wizard-lighthouse-badge .lm-brand-lockup {
-  position: absolute !important;
-  left: 0 !important;
-  top: 0 !important;
-  width: 341.6px !important;
-  height: 72px !important;
-  object-fit: fill !important;
   display: block !important;
+  width: 700px !important;
+  height: 147.5px !important;
+  max-height: none !important;
+  object-fit: fill !important;
 }
 
 .lm-wizard-lighthouse-badge .lm-lighthouse-container {
   position: absolute !important;
   inset: 0 !important;
   pointer-events: none !important;
-  overflow: hidden !important;
+  overflow: visible !important;
   mix-blend-mode: screen !important;
 }
