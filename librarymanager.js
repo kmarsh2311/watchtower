@@ -7,6 +7,48 @@
   const { NavLink } = api.libraries.ReactRouterDOM;
   const { Button, Modal, Form } = api.libraries.Bootstrap;
   const PLUGIN_ID = "librarymanager";
+
+  function RestartIcon({ size = 15, className = "lm-btn-icon-svg", spinning = false }) {
+    return React.createElement("svg", {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: "2.75",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      className: `${className} ${spinning ? "spinning" : ""}`.trim()
+    },
+      React.createElement("path", { d: "M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" }),
+      React.createElement("path", { d: "M21 3v5h-5" })
+    );
+  }
+
+  function StopIcon({ size = 13, className = "lm-btn-icon-svg" }) {
+    return React.createElement("svg", {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "currentColor",
+      className: className
+    },
+      React.createElement("rect", { x: "4", y: "4", width: "16", height: "16", rx: "2" })
+    );
+  }
+
+  function StartIcon({ size = 14, className = "lm-btn-icon-svg" }) {
+    return React.createElement("svg", {
+      width: size,
+      height: size,
+      viewBox: "0 0 24 24",
+      fill: "currentColor",
+      className: className
+    },
+      React.createElement("polygon", { points: "6 3 20 12 6 21 6 3" })
+    );
+  }
+
   const PRODUCT_NAME = "Watchtower";
   const PATH = "/library-manager";
 
@@ -734,7 +776,7 @@
               title: "Refresh Watchtower telemetry, queue and activity feed",
               onClick: refresh
             },
-              React.createElement("span", { className: `lm-refresh-icon ${busy === "refresh" ? "spinning" : ""}` }, "⟳"),
+              React.createElement(RestartIcon, { size: 14, className: "lm-refresh-icon", spinning: busy === "refresh" }),
               busy === "refresh" ? " REFRESHING…" : " REFRESH"
             ),
             totalProblems > 0 && React.createElement("span", { className: "lm-terminal-header-alert" }, `⚠️ ${totalProblems} PROBLEM${totalProblems === 1 ? "" : "S"}`),
@@ -764,14 +806,14 @@
                   }
                 }
               },
-                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-restart" }, "⟳"),
+                React.createElement(RestartIcon, { size: 16 }),
                 "RESTART WATCHER"),
               failedIncoming.length > 1 && React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn retry",
                 disabled: !!busy,
                 onClick: handleRetryAllIncoming
-              }, `⟳ RETRY ALL (${failedIncoming.length})`),
+              }, React.createElement(React.Fragment, null, React.createElement(RestartIcon, { size: 13 }), ` RETRY ALL (${failedIncoming.length})`)),
               failedIncoming.length > 1 && React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn dismiss",
@@ -1228,7 +1270,7 @@
                   }
                 }
               },
-                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-restart" }, "⟳"),
+                React.createElement(RestartIcon, { size: 16 }),
                 "Restart Watcher"),
               React.createElement(Button, {
                 className: "lm-btn-stop",
@@ -1249,7 +1291,7 @@
                   }
                 }
               },
-                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-stop" }, "■"),
+                React.createElement(StopIcon, { size: 14 }),
                 "Stop Watcher")
             ) : isMonitorStale ? React.createElement(React.Fragment, null,
               React.createElement(Button, {
@@ -1272,7 +1314,7 @@
                   }
                 }
               },
-                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-restart" }, "⟳"),
+                React.createElement(RestartIcon, { size: 16 }),
                 "RESTART WATCHER"),
               React.createElement(Button, {
                 className: "lm-btn-stop",
@@ -1293,7 +1335,7 @@
                   }
                 }
               },
-                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-stop" }, "■"),
+                React.createElement(StopIcon, { size: 14 }),
                 "Stop Watcher")
             ) : React.createElement(Button, {
               variant: "primary",
@@ -1314,7 +1356,7 @@
                 }
               }
             },
-              React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-start" }, "▶"),
+              React.createElement(StartIcon, { size: 15 }),
               "Start Watcher"),
             React.createElement(TaskButton, { name: readOnlyTasks.events, label: "Reconcile Events (Read Only)", showResults: "reports" })))),
       panel("Watcher Automation & Behavior", "Configure external move reconciliation and system startup options.",

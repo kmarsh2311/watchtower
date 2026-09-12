@@ -1422,3 +1422,38 @@ a.lm-activity-scene-pill:hover {
 .lm-btn-glyph-start {
   font-size: 0.95rem;
 }
+
+/* Watcher Action Button & Terminal SVG Icons */
+.lm-btn-icon-svg {
+  display: inline-block;
+  vertical-align: -2.5px;
+  margin-right: 7px;
+  flex-shrink: 0;
+  transition: transform 0.25s ease;
+}
+
+.lm-btn-stop .lm-btn-icon-svg {
+  color: #ff7875;
+}
+
+.lm-btn-stop:hover:not(:disabled) .lm-btn-icon-svg {
+  color: #ffffff;
+}
+
+.lm-terminal-refresh-btn .lm-refresh-icon {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-right: 5px;
+  flex-shrink: 0;
+  transition: transform 0.25s ease;
+}
+
+.lm-terminal-refresh-btn:hover:not(:disabled) .lm-refresh-icon {
+  transform: rotate(90deg);
+}
+
+.lm-terminal-refresh-btn.refreshing .lm-refresh-icon,
+.lm-refresh-icon.spinning,
+.lm-btn-icon-svg.spinning {
+  animation: lm-spin 0.8s linear infinite;
+}
