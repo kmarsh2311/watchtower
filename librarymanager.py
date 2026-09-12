@@ -352,7 +352,7 @@ def process_rename_queue(stash, database_path):
                       metadata={"base_stem": result.get("base_stem")})
                 if result.get("action_performed"):
                     maybe_notify(config, f"Renamed scene {scene_id}: {Path(result['proposed_path']).name}", success=True)
-                    if config.get("generateContactSheets") is True:
+                    if config.get("generateContactSheets") is True and config.get("refreshContactSheetsOnRename") is not False:
                         scope = config.get("contactSheetScope") or "all"
                         should_generate = True
                         if scope == "incoming":

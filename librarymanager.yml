@@ -77,6 +77,10 @@ settings:
     displayName: Generate Visual Contact Sheets (CSM)
     description: Automatically generate a visual contact sheet companion image (.mp4.jpg) for new downloads in your incoming folder.
     type: BOOLEAN
+  refreshContactSheetsOnRename:
+    displayName: Refresh Contact Sheets on Metadata Edits
+    description: Re-render contact sheets with updated title/performer banners when scene metadata is edited in Stash. If disabled, existing contact sheets are kept and safely renamed with the video.
+    type: BOOLEAN
   contactSheetGrid:
     displayName: Contact Sheet Layout
     description: Grid layout for generated contact sheets, such as 4x4 (16 frames) or 4x5 (20 frames).
