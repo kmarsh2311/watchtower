@@ -207,6 +207,33 @@ class InventoryTests(unittest.TestCase):
             "Alex Smith Jamie Jones Example Scene Example Studio",
         )
 
+    def test_proposed_stem_deduplicates_performer_only_titles(self):
+        options = {
+            "filenameOrder": "title,studio,performers",
+            "filenameSectionSeparator": "dash",
+            "filenamePerformerSeparator": "comma",
+        }
+        # Title only contains performers without punctuation
+        self.assertEqual(
+            _proposed_stem("Silas Brooks Valentino Aston", None, ["Silas Brooks", "Valentino Aston"], options),
+            "Silas Brooks, Valentino Aston",
+        )
+        # Title contains performers with "and"
+        self.assertEqual(
+            _proposed_stem("Silas Brooks and Valentino Aston", None, ["Silas Brooks", "Valentino Aston"], options),
+            "Silas Brooks, Valentino Aston",
+        )
+        # Title contains performers with "&" and studio
+        self.assertEqual(
+            _proposed_stem("Silas Brooks & Valentino Aston", "OnlyFans", ["Silas Brooks", "Valentino Aston"], options),
+            "OnlyFans - Silas Brooks, Valentino Aston",
+        )
+        # Title has real name + performers
+        self.assertEqual(
+            _proposed_stem("Morning Visit - Silas Brooks & Valentino Aston", "OnlyFans", ["Silas Brooks", "Valentino Aston"], options),
+            "Morning Visit - OnlyFans - Silas Brooks, Valentino Aston",
+        )
+
     def test_expected_plugin_move_is_consumed_once(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"

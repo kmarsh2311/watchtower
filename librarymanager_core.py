@@ -1448,7 +1448,10 @@ def _strip_managed_metadata(base: str, studios, performers) -> str:
     cleaned = re.sub(r"(?:\s*-\s*){2,}", " - ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = cleaned.strip(" -_,&")
-    cleaned = re.sub(r"(?i)\s+(?:feat\.?|featuring|with|and|w/)\s*$", "", cleaned).strip(" -_,&")
+    cleaned = re.sub(r"(?i)\s+(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in)\s*$", "", cleaned).strip(" -_,&")
+    cleaned = re.sub(r"(?i)^\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in)\s+", "", cleaned).strip(" -_,&")
+    if re.fullmatch(r"(?i)\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in|&|\+|\-|,)+\s*", cleaned):
+        cleaned = ""
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -1662,6 +1665,30 @@ def _sanitize_filename_stem(stem: str) -> str:
     cleaned = re.sub(r'(?:\s*-\s*){2,}', ' - ', cleaned)
     return re.sub(r'\s+', ' ', cleaned).strip(' .')
 
+def _is_only_metadata_or_connectors(text: str, studio: str | None, performers: list[str]) -> bool:
+    """Check if text consists exclusively of studio, performers, and connective words/punctuation."""
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return True
+    names = []
+    if studio and str(studio).strip():
+        names.append(str(studio).strip())
+    for p in performers:
+        if p and str(p).strip():
+            names.append(str(p).strip())
+    names.sort(key=lambda s: len(s), reverse=True)
+    for name in names:
+        escaped = re.escape(name)
+        cleaned = re.sub(rf"(?i)\b{escaped}\b", " ", cleaned)
+        compact_escaped = "".join(re.escape(c) + r"\s*" for c in name if c.isalnum())
+        if compact_escaped:
+            cleaned = re.sub(rf"(?i)\b{compact_escaped}\b", " ", cleaned)
+
+    connectors = r"(?i)\b(and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in)\b|[&,+_–—\-\(\)\[\]\{\}\.\s]"
+    cleaned = re.sub(connectors, " ", cleaned)
+    return len(cleaned.strip()) == 0
+
+
 def _proposed_stem(base: str, studio: str | None, performers: list[str], options: dict | None = None) -> str:
     """Build one canonical filename from the stored base + current Stash metadata."""
     formatting = filename_format_options(options)
@@ -1671,13 +1698,10 @@ def _proposed_stem(base: str, studio: str | None, performers: list[str], options
         name.strip() for name in performers if str(name).strip()
     )
 
-    # De-duplicate if title already ends with studio or performers
-    if studio_val and title_val.lower().endswith(f" - {studio_val.lower()}"):
-        title_val = title_val[:-len(f" - {studio_val}")].rstrip()
-    if perf_val and title_val.lower().endswith(f" - {perf_val.lower()}"):
-        title_val = title_val[:-len(f" - {perf_val}")].rstrip()
-    if studio_val and title_val.lower().endswith(f" - {studio_val.lower()}"):
-        title_val = title_val[:-len(f" - {studio_val}")].rstrip()
+    if _is_only_metadata_or_connectors(title_val, studio_val, performers):
+        title_val = ""
+    else:
+        title_val = _strip_managed_metadata(title_val, [studio_val] if studio_val else [], performers)
 
     values = {
         "title": title_val,
