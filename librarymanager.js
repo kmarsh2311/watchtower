@@ -226,38 +226,20 @@
       if (!id) return;
       setLoading(true); setErrorMsg("");
       try {
-        const gqlRes = await gql(`query FetchPreviewScene($id: ID!) {
-          findScene(id: $id) { id title studio { name } performers { name } files { path basename } }
-        }`, { id });
+        const [gqlRes, backendRaw] = await Promise.all([
+          gql(`query FetchPreviewScene($id: ID!) {
+            findScene(id: $id) { id title studio { name } performers { name } files { path basename } }
+          }`, { id }),
+          operation("preview_test_rename", { scene_id: id }).catch(err => ({ error: err.message }))
+        ]);
         const scene = gqlRes?.findScene;
         if (!scene) throw new Error(`Scene ${id} not found in Stash`);
-        const currentBasename = scene.files?.[0]?.basename || scene.files?.[0]?.path?.split(/[\\/]/).pop() || "unknown.mp4";
-        const ext = currentBasename.includes(".") ? "." + currentBasename.split(".").pop() : ".mp4";
-
-        const diskStem = currentBasename.includes(".") ? currentBasename.substring(0, currentBasename.lastIndexOf(".")) : currentBasename;
-        const sourceMode = config.masterTitleSource || "stash_title";
-        let rawTitle = "";
-        if (sourceMode === "filename") {
-          rawTitle = diskStem;
-        } else if (sourceMode === "strict_title") {
-          rawTitle = scene.title || "";
-        } else {
-          rawTitle = scene.title || diskStem;
-        }
-
-        const performerLimit = Number(config.maxPerformersInFilename || 0);
-        let scenePerfs = (scene.performers || []).map(p => p.name);
-        if (performerLimit > 0) scenePerfs = scenePerfs.slice(0, performerLimit);
-
-        const parts = {
-          title: rawTitle,
-          studio: config.includeStudio !== false ? (scene.studio?.name || "") : "",
-          performers: config.includePerformers !== false ? scenePerfs.join(filenamePerformerCharacters[config.filenamePerformerSeparator] || ", ") : ""
-        };
-        const order = (config.filenameOrder || "title,studio,performers").split(",");
-        const proposedStem = order.map(p => parts[p]).filter(Boolean)
-          .join(filenameSectionCharacters[config.filenameSectionSeparator] || " - ");
-        const proposed = proposedStem ? proposedStem + ext : currentBasename;
+        
+        let backendResult = typeof backendRaw === "string" ? JSON.parse(backendRaw) : backendRaw;
+        const currentBasename = backendResult?.current_path?.split(/[\\/]/).pop() || scene.files?.[0]?.basename || scene.files?.[0]?.path?.split(/[\\/]/).pop() || "unknown.mp4";
+        const proposedBasename = backendResult?.proposed_path?.split(/[\\/]/).pop() || currentBasename;
+        const status = backendResult?.status || (currentBasename === proposedBasename ? "unchanged" : "ready");
+        const reason = backendResult?.reason || "";
 
         setPreviewResult({
           sceneId: id,
@@ -265,8 +247,11 @@
           studio: scene.studio?.name || "None",
           performers: (scene.performers || []).map(p => p.name).join(", ") || "None",
           current: currentBasename,
-          proposed: proposed,
-          matches: currentBasename === proposed
+          proposed: proposedBasename,
+          status: status,
+          reason: reason,
+          matches: status === "unchanged" || currentBasename === proposedBasename,
+          sidecars: backendResult?.associated_files || []
         });
       } catch (e) {
         setErrorMsg(e.message || String(e));
@@ -309,10 +294,15 @@
           React.createElement("span", null, React.createElement("b", null, "Studio: "), previewResult.studio),
           React.createElement("span", null, React.createElement("b", null, "Performers: "), previewResult.performers)),
         React.createElement("div", { className: "lm-real-scene-diff" },
-          React.createElement("div", null, React.createElement("b", null, "Current on disk: "), React.createElement("code", null, previewResult.current)),
-          React.createElement("div", null, React.createElement("b", null, "Proposed filename: "), React.createElement("code", { className: previewResult.matches ? "matches" : "proposed" }, previewResult.proposed)),
-          React.createElement("span", { className: `lm-badge ${previewResult.matches ? "ok" : "warn"}` },
-            previewResult.matches ? "Already matches current format" : "Would rename if automatic renaming enabled"))));
+          React.createElement("div", { className: "lm-real-scene-diff-row" },
+            React.createElement("span", { className: "lm-diff-label" }, "Current on disk:"),
+            React.createElement("code", { className: "lm-diff-code" }, previewResult.current)),
+          React.createElement("div", { className: "lm-real-scene-diff-row" },
+            React.createElement("span", { className: "lm-diff-label" }, "Proposed filename:"),
+            React.createElement("code", { className: `lm-diff-code ${previewResult.matches ? "matches" : "proposed"}` }, previewResult.proposed)),
+          React.createElement("div", { style: { marginTop: "6px" } },
+            React.createElement("span", { className: `lm-badge ${previewResult.matches ? "ok" : (previewResult.status === "blocked" ? "error" : "warn")}` },
+              previewResult.matches ? "✓ Already matches current format (No rename needed)" : (previewResult.status === "blocked" ? `Blocked: ${previewResult.reason}` : "Would rename if automatic renaming enabled"))))));
   }
 
   function Dashboard() {

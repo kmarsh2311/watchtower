@@ -965,23 +965,54 @@ a.lm-activity-scene-pill:hover {
 .lm-real-scene-diff {
   display: flex;
   flex-direction: column;
-  gap: .35rem;
+  gap: .45rem;
+  margin-top: .4rem;
 }
 
-.lm-real-scene-diff code {
-  padding: .15rem .4rem;
-  border-radius: 3px;
-  background: rgba(140, 155, 185, .15);
+.lm-real-scene-diff-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  align-items: center;
+  gap: .6rem;
+}
+
+.lm-diff-label {
+  font-weight: 600;
+  color: #94a3b8;
   font-size: .82rem;
+  white-space: nowrap;
 }
 
-.lm-real-scene-diff code.proposed {
-  color: #a4f5be;
-  background: rgba(32, 230, 74, .12);
+.lm-diff-code {
+  display: block;
+  padding: .35rem .6rem;
+  border-radius: 4px;
+  background: rgba(140, 155, 185, .15);
+  font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: .85rem;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  border: 1px solid rgba(140, 155, 185, .2);
 }
 
-.lm-real-scene-diff code.matches {
-  color: #93c5fd;
+.lm-diff-code.proposed {
+  color: #39ff64;
+  background: rgba(32, 230, 74, .1);
+  border-color: rgba(32, 230, 74, .35);
+  text-shadow: 0 0 6px rgba(32, 230, 74, .3);
+}
+
+.lm-diff-code.matches {
+  color: #45d38a;
+  background: rgba(69, 211, 138, .08);
+  border-color: rgba(69, 211, 138, .3);
+}
+
+@media(max-width: 700px) {
+  .lm-real-scene-diff-row {
+    grid-template-columns: 1fr;
+    gap: .2rem;
+  }
 }
 
 .lm-terminal-btn.danger {
