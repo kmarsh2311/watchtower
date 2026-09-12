@@ -138,10 +138,10 @@
 
   const sections = [
     ["overview", "Overview"],
-    ["manage", "Filename Management"],
     ["monitor", "Filesystem Monitor"],
     ["incoming", "Incoming Downloads"],
     ["csm", "Contact Sheets (CSM)"],
+    ["manage", "Filename Management"],
     ["activity", "Activity"],
     ["advanced", "Advanced Diagnostics"],
     ["help", "Help & Guide"]
