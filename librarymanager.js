@@ -441,10 +441,16 @@
 
   function OnboardingBanner({ onStart, onDismiss }) {
     return React.createElement("div", { className: "lm-onboarding-banner" },
-      React.createElement("div", { className: "lm-onboarding-banner-icon" }, "🚀"),
+      React.createElement("div", { className: "lm-onboarding-banner-icon-wrap" },
+        React.createElement("img", {
+          src: "/plugin/librarymanager/assets/watchtower-icon.png",
+          alt: "Watchtower",
+          className: "lm-onboarding-banner-icon"
+        })
+      ),
       React.createElement("div", { className: "lm-onboarding-banner-text" },
-        React.createElement("strong", null, "Welcome to Watchtower! Let's get your library configured."),
-        React.createElement("p", null, "Complete the 4-step guided setup to verify your storage drives, index your scene database, and preflight renaming safety rules.")
+        React.createElement("strong", null, "Welcome to Watchtower! Complete the initial library setup."),
+        React.createElement("p", null, "Walk through 4 quick steps to verify storage drives, index your scene database, and preflight renaming safety rules.")
       ),
       React.createElement("div", { className: "lm-onboarding-banner-actions" },
         React.createElement("button", {
@@ -455,8 +461,9 @@
         React.createElement("button", {
           type: "button",
           className: "btn btn-secondary lm-onboarding-dismiss-btn",
-          onClick: onDismiss
-        }, "Dismiss")
+          onClick: onDismiss,
+          title: "Dismiss and configure settings manually"
+        }, "✕ Dismiss")
       )
     );
   }
@@ -527,18 +534,28 @@
       { num: 5, label: "Complete" }
     ];
 
-    return React.createElement("div", { className: "lm-wizard-backdrop" },
+    const modalElement = React.createElement("div", {
+      className: "lm-wizard-backdrop",
+      onClick: (e) => { if (e.target === e.currentTarget) onHide(); }
+    },
       React.createElement("div", { className: "lm-wizard-dialog" },
         React.createElement("header", { className: "lm-wizard-header" },
-          React.createElement("div", { className: "lm-wizard-title-wrap" },
-            React.createElement("span", { className: "lm-wizard-badge" }, "SETUP WIZARD"),
-            React.createElement("h2", null, "Watchtower Library Onboarding")
+          React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "10px" } },
+            React.createElement("img", {
+              src: "/plugin/librarymanager/assets/watchtower-icon.png",
+              alt: "",
+              style: { width: "32px", height: "32px", borderRadius: "6px" }
+            }),
+            React.createElement("div", null,
+              React.createElement("span", { className: "lm-wizard-badge" }, `STEP ${step} OF 5`),
+              React.createElement("h2", null, "Watchtower Guided Setup")
+            )
           ),
           React.createElement("button", {
             type: "button",
             className: "lm-wizard-close-btn",
             onClick: onHide,
-            title: "Close Wizard"
+            title: "Close Setup Wizard"
           }, "✕")
         ),
         React.createElement("div", { className: "lm-wizard-stepper" },
@@ -547,7 +564,9 @@
             const isCurrent = step === s.num;
             return React.createElement("div", {
               key: s.num,
-              className: `lm-wizard-step-item ${isCurrent ? "current" : ""} ${isDone ? "done" : ""}`
+              className: `lm-wizard-step-item ${isCurrent ? "current" : ""} ${isDone ? "done" : ""}`,
+              onClick: () => { if (s.num < step) setStep(s.num); },
+              style: { cursor: s.num < step ? "pointer" : "default" }
             },
               React.createElement("div", { className: "lm-wizard-step-circle" }, isDone ? "✓" : s.num),
               React.createElement("span", { className: "lm-wizard-step-label" }, s.label)
@@ -562,7 +581,7 @@
             React.createElement("div", { className: "lm-wizard-roots-list" },
               libraryRoots.length > 0
                 ? libraryRoots.map((r, i) => React.createElement("div", { key: i, className: "lm-wizard-root-row" },
-                    React.createElement("span", { className: "lm-wizard-root-icon" }, "📁"),
+                    React.createElement("span", { style: { fontSize: "1.1rem" } }, "📁"),
                     React.createElement("code", { className: "lm-wizard-root-path" }, r),
                     React.createElement("span", { className: "lm-incoming-status-pill ok" }, "✓ Available")
                   ))
@@ -570,8 +589,8 @@
                     "⚠️ No library roots discovered in Stash. Make sure you have at least one folder configured in Stash Settings → Library.")
             ),
             React.createElement("div", { className: "lm-wizard-callout" },
-              React.createElement("strong", null, "💡 Pro Tip: "),
-              "Watchtower never deletes media files on disk. It maintains an event log to protect your metadata whenever files are moved externally.")
+              React.createElement("strong", null, "💡 Safe & Read-Only: "),
+              "Watchtower never deletes media files on disk. It maintains an event log in SQLite to protect your metadata whenever files are moved externally.")
           ),
           step === 2 && React.createElement("div", { className: "lm-wizard-pane" },
             React.createElement("h3", null, "2. Incoming Downloads & Auto-Ingest (Optional)"),
@@ -718,6 +737,11 @@
         )
       )
     );
+
+    // Mount to document.body via Portal so it is a true top-level popup over everything
+    return (window.ReactDOM && typeof window.ReactDOM.createPortal === "function")
+      ? window.ReactDOM.createPortal(modalElement, document.body)
+      : modalElement;
   }
 
   function Dashboard() {
@@ -2723,7 +2747,10 @@
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
       (!config.onboardingCompleted && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
         onStart: () => setShowOnboardingWizard(true),
-        onDismiss: () => setOnboardingBannerDismissed(true)
+        onDismiss: () => {
+          setOnboardingBannerDismissed(true);
+          updateSetting("onboardingCompleted", true);
+        }
       }) : null,
       React.createElement(OnboardingWizardModal, {
         show: showOnboardingWizard,
