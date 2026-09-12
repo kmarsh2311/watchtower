@@ -1034,8 +1034,8 @@
             tone: data?.rename_queue?.failed ? "warn" : "ok"
           })),
         SwitchIndicators()),
-      RetroStatus(),
       React.createElement(SummaryBanner),
+      RetroStatus(),
       showFilenamePreview && filenamePreview && panel("Filename preview",
         `${filenamePreview.run.examined_count} files checked: ${filenamePreview.run.proposed_count} would change, ${filenamePreview.run.unchanged_count} already match and ${filenamePreview.run.conflict_count} are blocked. Showing up to 200 changes or conflicts.`,
         React.createElement(React.Fragment, null,
