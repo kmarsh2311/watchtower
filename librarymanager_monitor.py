@@ -895,6 +895,31 @@ def update_status(database_path, token, pid, state, roots, unavailable):
         connection.close()
 
 
+def _reset_stale_failed_incoming(database_path: Path) -> None:
+    """On monitor startup, reset 'failed' incoming files that still exist on disk
+    back to 'waiting' so they get another scan attempt in the new session."""
+    connection = connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT path FROM incoming_files WHERE status='failed'"
+        ).fetchall()
+        paths_to_reset = [row["path"] for row in rows if Path(row["path"]).is_file()]
+        if paths_to_reset:
+            now = time.time()
+            for p in paths_to_reset:
+                connection.execute(
+                    """UPDATE incoming_files SET status='waiting', attempts=0,
+                       stable_since=?, detail='Auto-retry on monitor startup'
+                       WHERE path=?""",
+                    (now, p),
+                )
+            connection.commit()
+    except Exception:
+        pass  # Startup reset is best-effort; don't block monitor launch
+    finally:
+        connection.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", required=True)
@@ -935,6 +960,9 @@ def main():
                         old_path=root, detail="Root was unavailable when monitoring started")
     if unavailable:
         notify(runtime.get("mac_notifications") is True, f"{len(unavailable)} library root(s) unavailable")
+    # Reset any 'failed' incoming files from a previous session so the worker
+    # will retry them automatically (up to max_attempts) without user action.
+    _reset_stale_failed_incoming(database_path)
     worker.start()
     incoming_worker.start()
     observer.start()
