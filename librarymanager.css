@@ -2111,14 +2111,45 @@ a.lm-activity-scene-pill:hover {
   }
 }
 
-@keyframes lmPaneFadeIn {
+@keyframes lmPaneSlideForward {
   0% {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateX(20px);
   }
   100% {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes lmPaneSlideBackward {
+  0% {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes lmFadeOutBackdrop {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes lmDialogExit {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(18px) scale(0.96);
   }
 }
 
@@ -2139,6 +2170,12 @@ a.lm-activity-scene-pill:hover {
   box-sizing: border-box !important;
   animation: lmFadeInBackdrop 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
 }
+
+.lm-wizard-backdrop.lm-exiting {
+  animation: lmFadeOutBackdrop 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  pointer-events: none !important;
+}
+
 .lm-wizard-dialog button, .lm-wizard-preset-card, .lm-wizard-step-item {
   touch-action: manipulation !important;
   user-select: none !important;
@@ -2160,6 +2197,19 @@ a.lm-activity-scene-pill:hover {
   -moz-osx-font-smoothing: grayscale !important;
   text-rendering: optimizeLegibility !important;
   transform: none !important;
+}
+
+.lm-wizard-dialog.lm-exiting {
+  animation: lmDialogExit 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  pointer-events: none !important;
+}
+
+.lm-wizard-pane.lm-pane-forward {
+  animation: lmPaneSlideForward 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+}
+
+.lm-wizard-pane.lm-pane-backward {
+  animation: lmPaneSlideBackward 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
 }
 .lm-wizard-pane {
   animation: lmPaneFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;

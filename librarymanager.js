@@ -504,8 +504,11 @@
         return () => window.clearTimeout(chimeTimer);
       }
     }, [show]);
+
     // step 0 is the Welcome Screen, steps 1..4 are setup, step 5 is complete
     const [step, setStep] = React.useState(0);
+    const [stepDirection, setStepDirection] = React.useState("forward");
+    const [isExiting, setIsExiting] = React.useState(false);
     const [indexing, setIndexing] = React.useState(false);
     const [indexResult, setIndexResult] = React.useState(null);
     const [indexError, setIndexError] = React.useState("");
@@ -524,6 +527,20 @@
     const incomingFoldersList = rawFolders.length > 0 ? rawFolders : [""];
     const multiStatus = data?.incoming_folders || { folders: [], valid_count: 0, total_count: 0, all_valid: false };
     const statusFolders = multiStatus.folders || [];
+
+    const goToStep = (nextStep) => {
+      setStepDirection(nextStep >= step ? "forward" : "backward");
+      setStep(nextStep);
+    };
+
+    const handleCloseGracefully = (targetTab = null) => {
+      setIsExiting(true);
+      window.setTimeout(() => {
+        onHide();
+        setIsExiting(false);
+        if (targetTab) onNavigateTab(targetTab);
+      }, 280);
+    };
 
     const handleUpdateFolder = (index, val) => {
       const next = [...incomingFoldersList];
@@ -593,8 +610,7 @@
     const handleFinish = async (targetTab = "overview") => {
       await updateSetting("onboardingCompleted", true);
       window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
-      onHide();
-      onNavigateTab(targetTab);
+      handleCloseGracefully(targetTab);
     };
 
     const stepsList = [
@@ -606,9 +622,9 @@
     ];
 
     const modalElement = React.createElement("div", {
-      className: "lm-wizard-backdrop"
+      className: `lm-wizard-backdrop ${isExiting ? "lm-exiting" : ""}`
     },
-      React.createElement("div", { className: "lm-wizard-dialog" },
+      React.createElement("div", { className: `lm-wizard-dialog ${isExiting ? "lm-exiting" : ""}` },
         React.createElement("header", { className: "lm-wizard-header" },
           React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "10px" } },
             React.createElement("img", {
@@ -624,7 +640,7 @@
           React.createElement("button", {
             type: "button",
             className: "lm-wizard-close-btn",
-            onClick: (e) => { e.preventDefault(); e.stopPropagation(); onHide(); },
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleCloseGracefully(); },
             title: "Close Setup Wizard"
           }, "✕")
         ),
@@ -635,7 +651,7 @@
             return React.createElement("div", {
               key: s.num,
               className: `lm-wizard-step-item ${isCurrent ? "current" : ""} ${isDone ? "done" : ""}`,
-              onClick: () => { if (s.num < step) setStep(s.num); },
+              onClick: () => { if (s.num < step) goToStep(s.num); },
               style: { cursor: s.num < step ? "pointer" : "default" }
             },
               React.createElement("div", { className: "lm-wizard-step-circle" }, isDone ? "✓" : s.num),
@@ -644,7 +660,7 @@
           })
         ),
         React.createElement("div", { className: "lm-wizard-body" },
-          step === 0 && React.createElement("div", { className: "lm-wizard-pane", style: { textAlign: "center", padding: "1rem 0.5rem" } },
+          step === 0 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}`, style: { textAlign: "center", padding: "1rem 0.5rem" } },
             React.createElement("img", {
               src: "/plugin/librarymanager/assets/watchtower-icon.png",
               alt: "Watchtower",
@@ -658,7 +674,7 @@
                 React.createElement("span", { style: { fontSize: "1.25rem" } }, "🛡️"),
                 React.createElement("div", null,
                   React.createElement("strong", null, "Zero-Collision Safeguards"),
-                  React.createElement("p", null, "Safely renames video files, artwork, and subtitles with built-in collision prevention.")
+                  React.createElement("p", null, "Safely coordinates filenames, artwork, and subtitles with collision prevention.")
                 )
               ),
               React.createElement("div", { className: "lm-wizard-feature-chip" },
@@ -676,76 +692,62 @@
                 )
               )
             ),
-            React.createElement("p", { style: { fontSize: "0.82rem", color: "var(--text-muted, #aab3c5)", margin: 0 } },
-              "⏱️ Guided setup takes about 2 minutes.")
+            React.createElement("div", { style: { textAlign: "center", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
+              "⏱️ Guided setup takes about 2 minutes."
+            )
           ),
-          step === 1 && React.createElement("div", { className: "lm-wizard-pane" },
-            React.createElement("h3", null, "1. Verify Stash Library Storage Roots"),
+          step === 1 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
+            React.createElement("h3", null, "1. Verify Library Storage Roots"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "Watchtower connects to your Stash instance and automatically monitors all active library roots for file creations, moves, and renames."),
+              "Watchtower uses your Stash-configured library directories to monitor files and coordinate safe disk operations."),
             React.createElement("div", { className: "lm-wizard-roots-list" },
               libraryRoots.length > 0
-                ? libraryRoots.map((r, i) => React.createElement("div", { key: i, className: "lm-wizard-root-row" },
-                    React.createElement("span", { style: { fontSize: "1.1rem" } }, "📁"),
-                    React.createElement("code", { className: "lm-wizard-root-path" }, r),
-                    React.createElement("span", { className: "lm-incoming-status-pill ok" }, "✓ Available")
+                ? libraryRoots.map(r => React.createElement("div", { key: r.path, className: "lm-wizard-root-row" },
+                    React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "📁 Root:"),
+                    React.createElement("span", { className: "lm-wizard-root-path", title: r.path }, r.path),
+                    React.createElement("span", { className: `lm-badge ${r.exists ? "ok" : "err"}` }, r.exists ? "Online" : "Missing")
                   ))
-                : React.createElement("div", { className: "lm-wizard-empty-roots" },
-                    "⚠️ No library roots discovered in Stash. Make sure you have at least one folder configured in Stash Settings → Library.")
+                : React.createElement("p", { style: { color: "#ffb52e" } }, "No library folders detected from Stash.")
             ),
             React.createElement("div", { className: "lm-wizard-callout" },
-              React.createElement("strong", null, "ℹ️ Stash Managed Roots: "),
-              "Storage roots are automatically discovered from Stash. To add or remove storage folders, adjust your paths in Stash Settings → Library.")
+              "💡 Storage roots are read directly from Stash. To add or adjust library folders, go to Stash Settings → Library.")
           ),
-          step === 2 && React.createElement("div", { className: "lm-wizard-pane" },
-            React.createElement("h3", null, "2. Incoming Downloads & Auto-Ingest (Optional)"),
+          step === 2 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
+            React.createElement("h3", null, "2. Configure Automated Ingest / Incoming Staging"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "Configure up to 5 staging folders where downloaders (Torrents, Usenet, JDownloader, AirDrop) save files. Watchtower can monitor them, wait for downloads to settle, and automatically import them into Stash."),
-            React.createElement("div", { className: "lm-wizard-option-card", style: { marginBottom: "14px" } },
-              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
-                React.createElement("div", null,
-                  React.createElement("strong", null, "Automatically Add Completed Videos"),
-                  React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
-                    "Leave existing files alone and auto-import new settled videos into Stash.")
-                ),
-                React.createElement("input", {
-                  type: "checkbox",
-                  style: { width: "1.2rem", height: "1.2rem", cursor: "pointer" },
-                  checked: config.automaticIncomingScan === true,
-                  onChange: e => updateSetting("automaticIncomingScan", e.target.checked)
-                })
-              )
+              "Watch up to 5 incoming download directories. When downloaded videos finish settling, Watchtower moves them safely into Stash."),
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
+              React.createElement("strong", null, `Watched Folders (${incomingFoldersList.length}/5)`),
+              incomingFoldersList.length < 5 && React.createElement("button", {
+                type: "button",
+                className: "btn btn-secondary",
+                style: { padding: "0.25rem 0.65rem", fontSize: "0.82rem" },
+                onClick: handleAddFolder
+              }, "+ Add Folder")
             ),
-            React.createElement("div", { className: "lm-incoming-list-container" },
-              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" } },
-                React.createElement("strong", { style: { fontSize: "0.88rem" } }, `Watched Incoming Folders (${incomingFoldersList.length}/5)`),
-                React.createElement("button", {
-                  type: "button",
-                  className: "btn btn-secondary btn-sm lm-incoming-add-btn",
-                  disabled: incomingFoldersList.length >= 5,
-                  onClick: handleAddFolder,
-                  title: incomingFoldersList.length >= 5 ? "Maximum 5 folders reached" : "Add another incoming staging folder"
-                }, incomingFoldersList.length >= 5 ? "Max 5 Folders" : "+ Add Folder")
-              ),
-              incomingFoldersList.map((folderPath, idx) => {
-                const folderStatus = statusFolders[idx] || {};
-                const isConfigured = Boolean((folderPath || "").trim());
-                const isValid = Boolean(folderStatus.valid);
-                return React.createElement("div", { key: idx, className: "lm-incoming-row" },
-                  React.createElement("span", { className: "lm-incoming-row-num" }, `#${idx + 1}`),
+            React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "6px", marginBottom: "12px" } },
+              incomingFoldersList.map((folder, idx) => {
+                const stat = statusFolders.find(f => f.path === folder);
+                const isConfigured = Boolean(folder && folder.trim());
+                return React.createElement("div", {
+                  key: idx,
+                  style: { display: "flex", gap: "6px", alignItems: "center" }
+                },
                   React.createElement("input", {
-                    value: folderPath || "",
-                    className: "lm-incoming-row-input",
-                    onChange: event => handleUpdateFolder(idx, event.target.value),
-                    placeholder: `/Volumes/Library/Incoming${idx > 0 ? `_${idx + 1}` : ""}`
+                    type: "text",
+                    placeholder: "/path/to/downloads",
+                    value: folder,
+                    style: { flex: 1, padding: "0.45rem 0.65rem", background: "var(--input-bg, #101827)", border: "1px solid #52617c", borderRadius: "0.35rem", color: "inherit" },
+                    onChange: e => handleUpdateFolder(idx, e.target.value)
                   }),
-                  isConfigured ? React.createElement("span", {
-                    className: `lm-incoming-status-pill ${isValid ? "ok" : "warn"}`
-                  }, isValid ? "✓ Inside Library" : "Outside Library") : null,
-                  React.createElement("button", {
+                  isConfigured && React.createElement("span", {
+                    className: `lm-incoming-status-pill ${stat?.exists ? "ok" : "warn"}`,
+                    style: { padding: "0.35rem 0.6rem", fontSize: "0.78rem" }
+                  }, stat?.exists ? "✓ Valid" : "⚠ Missing"),
+                  incomingFoldersList.length > 1 && React.createElement("button", {
                     type: "button",
-                    className: "lm-incoming-row-remove",
-                    title: incomingFoldersList.length > 1 ? "Remove this incoming folder" : "Clear folder path",
+                    className: "btn btn-danger",
+                    style: { width: "32px", height: "32px", padding: 0, display: "inline-flex", alignItems: "center", justifyContent: "center" },
                     onMouseDown: event => event.preventDefault(),
                     onClick: () => handleRemoveFolder(idx)
                   }, "✕")
@@ -753,11 +755,11 @@
               })
             )
           ),
-          step === 3 && React.createElement("div", { className: "lm-wizard-pane" },
+          step === 3 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
             React.createElement("h3", null, "3. Build Baseline SQLite Inventory Database"),
             React.createElement("p", { className: "lm-wizard-desc" },
               "Watchtower indexes all scenes, cryptographic hashes (oshash), and companion files into its local SQLite database (watchtower.db) for instant collision protection and fast diagnostics. This single scan completes everything needed to initialize your library."),
-            React.createElement("div", { className: "lm-wizard-index-box", style: { textAlign: "center", padding: "1.6rem 1rem" } },
+            React.createElement("div", { className: "lm-wizard-index-box", style: { textAlign: "center", padding: "1.4rem 1rem" } },
               totalScenes > 0
                 ? React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" } },
                     React.createElement("div", { style: { fontSize: "2.2rem", color: "#39ff64" } }, "✓"),
@@ -788,55 +790,43 @@
               indexError && React.createElement("div", { className: "lm-message error", style: { marginTop: "12px" } }, indexError)
             )
           ),
-          step === 4 && React.createElement("div", { className: "lm-wizard-pane" },
-            React.createElement("h3", null, "4. Automated Filename Standardization"),
-            React.createElement("p", { className: "lm-wizard-desc" },
-              "Watchtower can automatically keep your physical filenames organized and synchronized with Stash metadata."),
-            React.createElement("div", {
-              className: "lm-wizard-callout",
-              style: { marginBottom: "14px", background: "rgba(33, 134, 87, 0.12)", borderColor: "rgba(47, 166, 109, 0.4)" }
-            },
-              React.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "flex-start" } },
-                React.createElement("span", { style: { fontSize: "1.15rem" } }, "🛡️"),
-                React.createElement("div", null,
-                  React.createElement("strong", { style: { color: "#39ff64" } }, "Non-Destructive & Safe"),
-                  React.createElement("p", { style: { margin: "2px 0 0 0", fontSize: "0.82rem", color: "#ccd6ea", lineHeight: 1.4 } },
-                    "When enabled, video renames automatically sync companion artwork (.jpg/.png) and subtitles (.vtt/.srt) with collision prevention and automatic rollback.")
-                )
-              )
-            ),
+          step === 4 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
+            React.createElement("h3", null, "4. Filename Standardization & Naming Style"),
+            React.createElement("p", { className: "lm-wizard-desc", style: { marginBottom: "10px" } },
+              "Coordinate physical filenames with Stash metadata. Video renames always sync companion artwork and subtitles with collision protection."),
             React.createElement("div", {
               className: "lm-wizard-option-card",
               style: {
-                marginBottom: "14px",
+                marginBottom: "10px",
+                padding: "0.6rem 0.85rem",
                 borderColor: config.automaticRenaming === true ? "#2fa66d" : "rgba(140, 155, 185, 0.25)",
                 background: config.automaticRenaming === true ? "rgba(47, 166, 109, 0.1)" : "rgba(0, 0, 0, 0.25)"
               }
             },
-              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" } },
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" } },
                 React.createElement("div", null,
-                  React.createElement("strong", { style: { fontSize: "0.95rem" } }, "Enable Automatic Renaming?"),
-                  React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.83rem" } },
+                  React.createElement("strong", { style: { fontSize: "0.9rem" } }, "Automatic Live Renaming"),
+                  React.createElement("p", { style: { margin: "1px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.8rem" } },
                     config.automaticRenaming === true
-                      ? "Active — Stash metadata edits will automatically standardize filenames on disk."
-                      : "Disabled (Recommended for setup) — Files remain untouched. You can test single scenes first in Filename Management before turning this on.")
+                      ? "Active — Stash metadata edits will rename matching files on disk."
+                      : "OFF by default — Your files remain untouched until you choose to activate it.")
                 ),
                 React.createElement("button", {
                   type: "button",
                   className: `btn ${config.automaticRenaming === true ? "btn-primary" : "btn-secondary"}`,
-                  style: { minWidth: "90px", fontWeight: 700, padding: "0.4rem 0.8rem", fontSize: "0.84rem" },
+                  style: { minWidth: "84px", fontWeight: 700, padding: "0.32rem 0.7rem", fontSize: "0.82rem" },
                   onClick: (e) => {
                     e.preventDefault();
                     e.stopPropagation();
                     updateSetting("automaticRenaming", !(config.automaticRenaming === true));
                   }
-                }, config.automaticRenaming === true ? "✓ Enabled" : "Disabled (Off)")
+                }, config.automaticRenaming === true ? "✓ Active" : "Disabled (Off)")
               )
             ),
-            React.createElement("strong", { style: { display: "block", marginBottom: "8px", fontSize: "0.88rem", color: "#e9edf5" } },
-              "Preferred Naming Style Format:"
+            React.createElement("strong", { style: { display: "block", marginBottom: "6px", fontSize: "0.84rem", color: "#e9edf5" } },
+              "Preferred Naming Template:"
             ),
-            React.createElement("div", { className: "lm-wizard-presets-grid" },
+            React.createElement("div", { className: "lm-wizard-presets-grid", style: { gap: "0.45rem" } },
               [
                 { id: "standard", title: "Standard (Recommended)", example: "Studio Name - 2024-05-12 - Scene Title (Performer One, Performer Two).mp4" },
                 { id: "performer_first", title: "Performer Focus", example: "Performer One, Performer Two - 2024-05-12 - Scene Title (Studio Name).mp4" },
@@ -844,19 +834,20 @@
               ].map(p => React.createElement("div", {
                 key: p.id,
                 className: `lm-wizard-preset-card ${namingPreset === p.id ? "active" : ""}`,
+                style: { padding: "0.55rem 0.8rem" },
                 onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleApplyPreset(p.id); }
               },
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
-                  React.createElement("strong", null, p.title),
-                  namingPreset === p.id && React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ SELECTED")
+                  React.createElement("strong", { style: { fontSize: "0.86rem" } }, p.title),
+                  namingPreset === p.id && React.createElement("span", { style: { color: "#39ff64", fontWeight: "700", fontSize: "0.78rem" } }, "✓ SELECTED")
                 ),
-                React.createElement("code", { className: "lm-wizard-preset-example" }, p.example)
+                React.createElement("code", { className: "lm-wizard-preset-example", style: { fontSize: "0.76rem" } }, p.example)
               ))
             ),
-            React.createElement("p", { style: { marginTop: "14px", fontSize: "0.82rem", color: "var(--text-muted, #aab3c5)" } },
-              "💡 You can fine-tune separators, title cleaning rules, and test single scenes safely in the Filename Management tab anytime.")
+            React.createElement("p", { style: { marginTop: "10px", fontSize: "0.8rem", color: "var(--text-muted, #aab3c5)" } },
+              "💡 You can test single scenes safely in the Filename Management sandbox before enabling library-wide.")
           ),
-          step === 5 && React.createElement("div", { className: "lm-wizard-pane", style: { textAlign: "center", padding: "1.6rem 0.5rem" } },
+          step === 5 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}`, style: { textAlign: "center", padding: "1.4rem 0.5rem" } },
             React.createElement("div", { style: { fontSize: "3.5rem", marginBottom: "0.4rem" } }, "🎉"),
             React.createElement("h3", { style: { fontSize: "1.45rem", color: "#39ff64" } }, "You're All Set!"),
             React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "520px", margin: "0.4rem auto 1.4rem" } },
@@ -875,18 +866,18 @@
             type: "button",
             className: "btn btn-primary",
             style: { marginLeft: "auto", padding: "0.55rem 1.4rem", fontSize: "0.95rem", fontWeight: 700, background: "#218657", borderColor: "#2da76f" },
-            onClick: (e) => { e.preventDefault(); e.stopPropagation(); setStep(1); }
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(1); }
           }, "🚀 Get Started ➔"),
           step > 0 && step < 5 && React.createElement("button", {
             type: "button",
             className: "btn btn-secondary",
-            onClick: (e) => { e.preventDefault(); e.stopPropagation(); setStep(prev => prev - 1); }
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(step - 1); }
           }, step === 1 ? "⬅ Back to Welcome" : "⬅ Back"),
           step > 0 && step < 5 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
             style: { marginLeft: "auto" },
-            onClick: (e) => { e.preventDefault(); e.stopPropagation(); setStep(prev => prev + 1); }
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(step + 1); }
           }, step === 4 ? "Review & Complete ➔" : "Next ➔"),
           step === 5 && React.createElement("button", {
             type: "button",
@@ -904,7 +895,6 @@
         ? api.ReactDOM.createPortal(modalElement, document.body)
         : modalElement;
   }
-
   function Dashboard() {
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
