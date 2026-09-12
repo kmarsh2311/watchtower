@@ -710,7 +710,17 @@
           React.createElement("strong", { className: "lm-terminal-brand" },
             React.createElement("img", { src: "/plugin/librarymanager/assets/watchtower-icon.png", alt: "" }),
             `${PRODUCT_NAME.toUpperCase()} // LIVE`),
-          React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "1rem" } },
+          React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "0.75rem" } },
+            React.createElement("button", {
+              type: "button",
+              className: `lm-terminal-refresh-btn ${busy === "refresh" ? "refreshing" : ""}`,
+              disabled: !!busy,
+              title: "Refresh Watchtower telemetry, queue and activity feed",
+              onClick: refresh
+            },
+              React.createElement("span", { className: `lm-refresh-icon ${busy === "refresh" ? "spinning" : ""}` }, "⟳"),
+              busy === "refresh" ? " REFRESHING…" : " REFRESH"
+            ),
             totalProblems > 0 && React.createElement("span", { className: "lm-terminal-header-alert" }, `⚠️ ${totalProblems} PROBLEM${totalProblems === 1 ? "" : "S"}`),
             React.createElement("span", { className: watcherWorking ? "online" : "offline" }, watcherWorking ? "● LISTENING" : (isMonitorStale ? "● STALE" : "● STOPPED")))),
 
@@ -1461,8 +1471,7 @@
             onClick: toggleHeaderArt
           })
         ),
-        React.createElement("p", null, "Inventory, safe renaming, monitoring and recovery in one place.")),
-        React.createElement(Button, { variant: "secondary", disabled: !!busy, onClick: refresh }, busy === "refresh" ? "Refreshing…" : "Refresh")),
+        React.createElement("p", null, "Inventory, safe renaming, monitoring and recovery in one place."))),
       error && React.createElement("div", { className: "lm-message error" }, error),
       notice && React.createElement("div", { className: "lm-message" }, notice),
       React.createElement("div", { className: "lm-layout" },
