@@ -37,6 +37,27 @@
     );
   }
 
+  
+  function Toast({ notice, error, onClose }) {
+    const message = error || notice;
+    const isError = !!error;
+    if (!message) return null;
+
+    return React.createElement("div", {
+      className: `lm-toast-notification ${isError ? "error" : "success"}`,
+      role: "alert"
+    },
+      React.createElement("span", { className: "lm-toast-icon" }, isError ? "✕" : "✓"),
+      React.createElement("span", { className: "lm-toast-msg" }, message),
+      React.createElement("button", {
+        type: "button",
+        className: "lm-toast-close",
+        onClick: onClose,
+        title: "Dismiss"
+      }, "✕")
+    );
+  }
+
   function StartIcon({ size = 14, className = "lm-btn-icon-svg" }) {
     return React.createElement("svg", {
       width: size,
@@ -280,6 +301,18 @@
     const [terminalFilter, setTerminalFilter] = React.useState("all");
     const [sceneHover, setSceneHover] = React.useState(null);
     const sceneHoverCache = React.useRef(new Map());
+
+    React.useEffect(() => {
+      if (!notice) return;
+      const timer = window.setTimeout(() => setNotice(""), 3200);
+      return () => window.clearTimeout(timer);
+    }, [notice]);
+
+    React.useEffect(() => {
+      if (!error) return;
+      const timer = window.setTimeout(() => setError(""), 6000);
+      return () => window.clearTimeout(timer);
+    }, [error]);
     const sceneHoverTimer = React.useRef(null);
     const [useOriginalHeader, setUseOriginalHeader] = React.useState(() => {
       try {
@@ -1596,8 +1629,7 @@
             onClick: toggleHeaderArt
           })
         ))),
-      error && React.createElement("div", { className: "lm-message error" }, error),
-      notice && React.createElement("div", { className: "lm-message" }, notice),
+      React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
       React.createElement("div", { className: "lm-layout" },
         React.createElement("nav", { className: "lm-tabs" },
           sections.map(([id, label]) => React.createElement("button", {
