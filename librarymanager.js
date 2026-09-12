@@ -556,7 +556,7 @@
         { label: "Auto-Rename", key: "automaticRenaming", active: config.automaticRenaming === true, state: config.testSceneId ? `TEST ${config.testSceneId}` : (config.automaticRenaming === true ? "ON" : "OFF"), help: config.testSceneId ? `Active (Limited to Test Scene ${config.testSceneId})` : "Automatically renames files when metadata is edited", tab: "manage" },
         { label: "Incoming", key: "automaticIncomingScan", active: config.automaticIncomingScan === true, state: config.automaticIncomingScan === true ? "ON" : "OFF", help: "Watches incoming folder and adds completed downloads", tab: "incoming" },
         { label: "Clean Titles", key: "stripMetadataFromTitle", active: config.stripMetadataFromTitle !== false, state: config.stripMetadataFromTitle !== false ? "ON" : "OFF", help: "Removes duplicate studio/performers from generated filenames", tab: "manage" },
-        { label: "Login Startup", key: "startAtLogin", active: config.startAtLogin === true, state: config.startAtLogin === true ? "ON" : "OFF", help: "Runs watcher in background on macOS login", tab: "monitor" },
+        { label: "Login Startup", key: "startAtLogin", active: config.startAtLogin === true, state: config.startAtLogin === true ? "ON" : "OFF", help: `Runs watcher in background on ${data?.startup?.platform_label || "OS"} login`, tab: "monitor" },
         { label: "Sheets", key: "generateContactSheets", active: config.generateContactSheets === true, state: config.generateContactSheets === true ? (config.contactSheetGrid || "ON") : "OFF", help: "Generates multi-frame contact sheets with CSM", tab: "csm" },
         { label: "Scope", key: "contactSheetScope", active: true, state: isIncomingScope ? "INCOMING" : "ALL", help: isIncomingScope ? "Contact sheets restricted to incoming folder" : "Contact sheets generated for entire library", tab: "csm" },
         { label: "Alerts", key: "macNotifications", active: config.macNotifications === true, state: config.macNotifications === true ? "ON" : "OFF", help: "Sends macOS desktop notifications for important warnings and failures", tab: "advanced" }
@@ -1425,8 +1425,13 @@
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "automaticMoveReconciliation", label: "Reconcile Verified External Moves",
             help: "When a file is moved outside of Stash and verified by size/hash, ask Stash to scan the new path and reconnect it." }),
-          data?.startup?.supported && React.createElement(Switch, { setting: "startAtLogin", label: "Start Monitoring with macOS",
-            help: data.startup.enabled ? "The watcher starts with macOS and waits for Stash if necessary." : "Start the background watcher at login and retry once a minute until Stash is available." }))),
+          data?.startup?.supported && React.createElement(Switch, {
+            setting: "startAtLogin",
+            label: `Start Monitoring with ${data.startup.platform_label || "OS"}`,
+            help: data.startup.enabled
+              ? `The watcher starts with ${data.startup.platform_label || "your OS"} and waits for Stash if necessary.`
+              : `Start the background watcher at login and retry once a minute until Stash is available.`
+          }))),
       panel("Monitored Library Roots", "All configured Stash scene library folders tracked by the background filesystem monitor.",
         React.createElement("div", { className: "lm-info-list" },
           (data?.library_roots || []).length ? (data.library_roots || []).map(root => {

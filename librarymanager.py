@@ -205,44 +205,108 @@ def incoming_folder_status(config, roots):
     return {"enabled": enabled, "valid": True, "path": str(folder), "reason": "Ready to watch for completed videos"}
 
 
-def macos_startup_paths():
-    label = "com.stash.librarymanager"
-    return label, Path.home() / "Library" / "LaunchAgents" / f"{label}.plist", Path(__file__).with_name("startup-runtime.json")
+def system_startup_paths():
+    runtime_path = Path(__file__).with_name("startup-runtime.json")
+    if sys.platform == "darwin":
+        label = "com.stash.librarymanager"
+        return "macOS", Path.home() / "Library" / "LaunchAgents" / f"{label}.plist", runtime_path
+    elif sys.platform == "win32":
+        appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        startup_dir = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+        return "Windows", startup_dir / "stash-librarymanager-startup.vbs", runtime_path
+    else:  # Linux / Unix
+        autostart_dir = Path.home() / ".config" / "autostart"
+        return "Linux", autostart_dir / "stash-librarymanager.desktop", runtime_path
 
 
-def macos_startup_status():
-    label, plist_path, runtime_path = macos_startup_paths()
-    return {"supported": sys.platform == "darwin", "enabled": plist_path.is_file() and runtime_path.is_file(),
-            "label": label, "plist_path": str(plist_path)}
-
-
-def configure_macos_startup(enabled, server_connection, database_path):
-    if sys.platform != "darwin":
-        raise ValueError("Start with macOS is available only on a Mac")
-    label, plist_path, runtime_path = macos_startup_paths()
-    domain = f"gui/{os.getuid()}"
-    subprocess.run(["/bin/launchctl", "bootout", domain, str(plist_path)], capture_output=True, check=False)
-    if not enabled:
-        plist_path.unlink(missing_ok=True)
-        runtime_path.unlink(missing_ok=True)
-        return macos_startup_status()
-    plist_path.parent.mkdir(parents=True, exist_ok=True)
-    runtime_path.write_text(json.dumps({"server_connection": server_connection or {},
-                                        "database": str(database_path)}), encoding="utf-8")
-    runtime_path.chmod(0o600)
-    plist = {
-        "Label": label,
-        "ProgramArguments": [sys.executable, str(Path(__file__).with_name("librarymanager_startup.py")),
-                             "--runtime", str(runtime_path)],
-        "RunAtLoad": True,
-        "StartInterval": 60,
-        "StandardOutPath": str(Path(__file__).with_name("librarymanager-startup.log")),
-        "StandardErrorPath": str(Path(__file__).with_name("librarymanager-startup.log")),
+def system_startup_status():
+    label, runner_path, runtime_path = system_startup_paths()
+    return {
+        "supported": True,
+        "enabled": runner_path.is_file() and runtime_path.is_file(),
+        "platform_label": label,
+        "path": str(runner_path),
+        "plist_path": str(runner_path)
     }
-    with plist_path.open("wb") as handle:
-        plistlib.dump(plist, handle)
-    subprocess.run(["/bin/launchctl", "bootstrap", domain, str(plist_path)], capture_output=True, check=True)
-    return macos_startup_status()
+
+
+macos_startup_paths = system_startup_paths
+macos_startup_status = system_startup_status
+
+
+def configure_system_startup(enabled, server_connection, database_path):
+    label, runner_path, runtime_path = system_startup_paths()
+
+    if sys.platform == "darwin":
+        domain = f"gui/{os.getuid()}"
+        subprocess.run(["/bin/launchctl", "bootout", domain, str(runner_path)], capture_output=True, check=False)
+        if not enabled:
+            runner_path.unlink(missing_ok=True)
+            runtime_path.unlink(missing_ok=True)
+            return system_startup_status()
+        runner_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(json.dumps({"server_connection": server_connection or {},
+                                            "database": str(database_path)}), encoding="utf-8")
+        try:
+            runtime_path.chmod(0o600)
+        except OSError:
+            pass
+        plist = {
+            "Label": "com.stash.librarymanager",
+            "ProgramArguments": [sys.executable, str(Path(__file__).with_name("librarymanager_startup.py")),
+                                 "--runtime", str(runtime_path)],
+            "RunAtLoad": True,
+            "StartInterval": 60,
+            "StandardOutPath": str(Path(__file__).with_name("librarymanager-startup.log")),
+            "StandardErrorPath": str(Path(__file__).with_name("librarymanager-startup.log")),
+        }
+        with runner_path.open("wb") as handle:
+            plistlib.dump(plist, handle)
+        subprocess.run(["/bin/launchctl", "bootstrap", domain, str(runner_path)], capture_output=True, check=True)
+        return system_startup_status()
+
+    elif sys.platform == "win32":
+        if not enabled:
+            runner_path.unlink(missing_ok=True)
+            runtime_path.unlink(missing_ok=True)
+            return system_startup_status()
+        runner_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(json.dumps({"server_connection": server_connection or {},
+                                            "database": str(database_path)}), encoding="utf-8")
+        py_exec = sys.executable
+        if py_exec.lower().endswith("python.exe"):
+            pyw_exec = py_exec[:-10] + "pythonw.exe"
+            if Path(pyw_exec).exists():
+                py_exec = pyw_exec
+        script_path = str(Path(__file__).with_name("librarymanager_startup.py"))
+        escaped_cmd = f'"{py_exec}" "{script_path}" --runtime "{runtime_path}"'.replace('"', '""')
+        vbs_script = 'Set WshShell = CreateObject("WScript.Shell")\r\nWshShell.Run "' + escaped_cmd + '", 0, False\r\n'
+        runner_path.write_text(vbs_script, encoding="utf-8")
+        return system_startup_status()
+
+    else:  # Linux / Unix
+        if not enabled:
+            runner_path.unlink(missing_ok=True)
+            runtime_path.unlink(missing_ok=True)
+            return system_startup_status()
+        runner_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text(json.dumps({"server_connection": server_connection or {},
+                                            "database": str(database_path)}), encoding="utf-8")
+        script_path = str(Path(__file__).with_name("librarymanager_startup.py"))
+        desktop_entry = "\n".join([
+            "[Desktop Entry]",
+            "Type=Application",
+            "Name=Watchtower Stash Monitor",
+            f'Exec="{sys.executable}" "{script_path}" --runtime "{runtime_path}"',
+            "Hidden=false",
+            "NoDisplay=true",
+            "X-GNOME-Autostart-enabled=true"
+        ]) + "\n"
+        runner_path.write_text(desktop_entry, encoding="utf-8")
+        return system_startup_status()
+
+
+configure_macos_startup = configure_system_startup
 
 
 def start_filesystem_monitor(stash, database_path, server_connection=None):
