@@ -1,7 +1,7 @@
 ||||
 |-|-|-|
 :placard: | **Summary** | 24/7 background filesystem watcher, automated multi-folder download ingest, zero-rescan external move tracking, and atomic renaming engine for Stash with companion sidecar rollback and visual contact sheets.
-:link: | **Repository** | https://github.com/kmarsh2311/my-stash-plugins
+:link: | **Repository** | https://github.com/kmarsh2311/watchtower
 :information_source: | **Source URL** | https://kmarsh2311.github.io/my-stash-plugins/index.yml
 :open_book: | **Install** | [How to install a plugin?](https://discourse.stashapp.cc/t/-/1015)
 
