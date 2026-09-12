@@ -1376,8 +1376,7 @@
             React.createElement(TaskButton, {
               name: "Generate Missing Contact Sheets for Incoming Folder",
               label: "🎞️ Generate Missing Contact Sheets for Incoming Folder",
-              help: "Safely process existing videos in your incoming folder that are currently missing a contact sheet.",
-              afterTab: "advanced"
+              help: "Safely process existing videos in your incoming folder that are currently missing a contact sheet."
             })))),
       panel("Incoming Downloads", "One folder inside your Stash library where new downloads arrive before you organise them.",
         React.createElement(React.Fragment, null,

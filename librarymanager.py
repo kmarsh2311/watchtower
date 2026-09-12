@@ -492,6 +492,7 @@ def main():
             print(json.dumps({"output": f"Scene {scene_id} coalesced into the pending rename queue."}))
         return
     elif mode == "generate_incoming_contact_sheets":
+        stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
         incoming_folder_str = config.get("incomingFolder") or ""
         incoming_path = Path(incoming_folder_str) if incoming_folder_str else None
@@ -546,7 +547,7 @@ def main():
                 f"Generated {generated_count} contact sheet(s) in {incoming_path.name}. "
                 f"{skipped_count} already had artwork.{err_str}"
             )
-    if mode == "inventory":
+    elif mode == "inventory":
         stash = StashInterface(plugin_input["server_connection"])
         scenes = fetch_scenes(stash)
         summary = inventory(database_path, scenes)
