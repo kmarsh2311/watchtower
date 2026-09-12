@@ -697,21 +697,11 @@
         ),
         React.createElement("div", { className: "lm-wizard-body" },
           step === 0 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}`, style: { textAlign: "center", padding: "1rem 0.5rem" } },
-            React.createElement("div", { className: "lm-wizard-lighthouse-badge" },
-              React.createElement("div", { className: "lm-brand-wrapper" },
-                React.createElement("img", {
-                  src: "/plugin/librarymanager/assets/watchtower-header-v2.png",
-                  alt: "Watchtower",
-                  className: "lm-brand-lockup"
-                }),
-                React.createElement("div", { className: "lm-lighthouse-container" },
-                  React.createElement("div", { className: "lm-lighthouse-beam-left" }),
-                  React.createElement("div", { className: "lm-lighthouse-beam-right" }),
-                  React.createElement("div", { className: "lm-lighthouse-flare-streak" }),
-                  React.createElement("div", { className: "lm-lighthouse-core" })
-                )
-              )
-            ),
+            React.createElement("img", {
+              src: "/plugin/librarymanager/assets/watchtower-icon.png",
+              alt: "Watchtower",
+              style: { width: "72px", height: "72px", borderRadius: "14px", marginBottom: "1rem", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }
+            }),
             React.createElement("h2", { style: { fontSize: "1.5rem", color: "#ffffff", marginBottom: "0.45rem" } }, "Welcome to Watchtower"),
             React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "520px", margin: "0 auto 1.4rem auto" } },
               "Your intelligent library manager, companion file synchronizer, and live monitor for Stash."),
