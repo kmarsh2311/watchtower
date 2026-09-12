@@ -1910,8 +1910,8 @@ a.lm-activity-scene-pill:hover {
 .lm-incoming-list-container {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  padding: 0.95rem;
+  gap: 0.65rem;
+  padding: 0.85rem;
   background: rgba(10, 20, 34, 0.35);
   border: 1px solid rgba(140, 155, 185, 0.2);
   border-radius: 0.45rem;
@@ -1919,69 +1919,84 @@ a.lm-activity-scene-pill:hover {
 .lm-incoming-row {
   display: flex;
   align-items: center;
-  gap: 0.65rem;
+  gap: 0.6rem;
 }
 .lm-incoming-row-num {
-  font-size: 0.8rem;
+  font-size: 0.78rem;
   font-weight: 700;
   color: var(--text-muted, #aab3c5);
   background: rgba(255, 255, 255, 0.08);
   padding: 0.35rem 0.55rem;
   border-radius: 0.35rem;
   flex-shrink: 0;
+  min-width: 2.2rem;
+  text-align: center;
 }
 .lm-incoming-row-input {
   flex: 1 1 auto;
   min-width: 0;
-  height: 38px;
+  height: 36px;
+  box-sizing: border-box;
+  padding: 0.45rem 0.75rem;
+  background: var(--input-bg, #101827) !important;
+  border: 1px solid #52617c !important;
+  color: var(--text-color, #eee) !important;
+  border-radius: 0.35rem;
+  font-size: 0.88rem;
 }
-.lm-incoming-folder-badge {
+.lm-incoming-row-input:focus {
+  border-color: #36b879 !important;
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(54, 184, 121, 0.25);
+}
+.lm-incoming-status-pill {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
+  gap: 0.3rem;
   font-size: 0.76rem;
-  font-weight: 700;
-  line-height: 1;
-  padding: 0.45rem 0.65rem;
+  font-weight: 600;
+  height: 36px;
+  box-sizing: border-box;
+  padding: 0 0.75rem;
   border-radius: 0.35rem;
   white-space: nowrap;
 }
-.lm-incoming-folder-badge.ready {
-  background: #198754 !important;
-  color: #ffffff !important;
-  border: 1px solid #146c43 !important;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+.lm-incoming-status-pill.ok {
+  background: rgba(47, 168, 111, 0.18);
+  color: #39ff64;
+  border: 1px solid rgba(47, 168, 111, 0.45);
 }
-.lm-incoming-folder-badge.warning {
-  background: #b45309 !important;
-  color: #ffffff !important;
-  border: 1px solid #92400e !important;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+.lm-incoming-status-pill.warn {
+  background: rgba(216, 154, 37, 0.18);
+  color: #ffb52e;
+  border: 1px solid rgba(216, 154, 37, 0.45);
 }
 .lm-incoming-row-remove {
   flex-shrink: 0;
-  padding: 0.35rem 0.65rem;
-  font-size: 0.82rem;
-  font-weight: 700;
-  line-height: 1;
-  height: 38px;
+  width: 36px;
+  height: 36px;
+  box-sizing: border-box;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #dc3545;
-  border: 1px solid #b02a37;
-  color: #ffffff;
-  cursor: pointer;
+  padding: 0;
+  background: rgba(220, 53, 69, 0.18);
+  border: 1px solid rgba(220, 53, 69, 0.45);
+  color: #ff6b77;
+  font-size: 0.95rem;
   border-radius: 0.35rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
 }
 .lm-incoming-row-remove:hover {
-  background: #bb2d3b;
-  border-color: #a52834;
+  background: #dc3545;
+  border-color: #dc3545;
   color: #ffffff;
 }
 .lm-incoming-add-btn {
   font-size: 0.82rem;
-  padding: 0.3rem 0.75rem;
+  padding: 0.25rem 0.65rem;
 }
 @media (max-width: 700px) {
   .lm-incoming-row {
@@ -1991,7 +2006,7 @@ a.lm-activity-scene-pill:hover {
     width: 100%;
     order: 2;
   }
-  .lm-incoming-folder-badge {
+  .lm-incoming-status-pill {
     order: 3;
   }
   .lm-incoming-row-remove {

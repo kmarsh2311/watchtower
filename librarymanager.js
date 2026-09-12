@@ -1875,7 +1875,7 @@
                   React.createElement("span", { className: "lm-incoming-row-num" }, `#${idx + 1}`),
                   React.createElement("input", {
                     value: folderPath || "",
-                    className: "form-control lm-incoming-row-input",
+                    className: "lm-incoming-row-input",
                     onChange: event => handleUpdateFolder(idx, event.target.value),
                     onBlur: event => {
                       const next = [...incomingFoldersList];
@@ -1885,11 +1885,11 @@
                     placeholder: `/Volumes/Library/Incoming${idx > 0 ? `_${idx + 1}` : ""}`
                   }),
                   isConfigured ? React.createElement("span", {
-                    className: `lm-incoming-folder-badge ${isValid ? "ready" : "warning"}`
+                    className: `lm-incoming-status-pill ${isValid ? "ok" : "warn"}`
                   }, isValid ? "✓ Inside Library" : (folderStatus.reason || "Outside Library")) : null,
                   React.createElement("button", {
                     type: "button",
-                    className: "btn btn-danger btn-sm lm-incoming-row-remove",
+                    className: "lm-incoming-row-remove",
                     title: incomingFoldersList.length > 1 ? "Remove this incoming folder" : "Clear folder path",
                     onMouseDown: event => event.preventDefault(),
                     onClick: () => handleRemoveFolder(idx)
