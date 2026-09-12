@@ -721,7 +721,7 @@
           step === 3 && React.createElement("div", { className: "lm-wizard-pane" },
             React.createElement("h3", null, "3. Build Baseline SQLite Inventory Database"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "Watchtower indexes all scenes, cryptographic hashes (oshash), and companion artwork/subtitles into its local SQLite database (watchtower.db) for instant collision protection and fast diagnostics."),
+              "Watchtower indexes all scenes, cryptographic hashes (oshash), and companion files into its local SQLite database (watchtower.db) for instant collision protection and fast diagnostics. This single scan completes everything needed to initialize your library."),
             React.createElement("div", { className: "lm-wizard-index-box", style: { textAlign: "center", padding: "1.6rem 1rem" } },
               totalScenes > 0
                 ? React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" } },
@@ -742,13 +742,13 @@
                   className: "btn btn-primary",
                   style: { padding: "0.55rem 1.4rem", fontSize: "0.95rem", fontWeight: 700 },
                   disabled: indexing,
-                  onClick: handleRunIndex
+                  onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleRunIndex(); }
                 }, indexing ? "⚡ Indexing Collection…" : (totalScenes > 0 ? "🔄 Re-Index Database" : "⚡ Build Initial Inventory Now")),
                 indexing && React.createElement("span", { style: { color: "#39ff64", fontSize: "0.88rem" } }, "Scanning Stash scenes into SQLite…")
               ),
               indexResult && React.createElement("div", { className: "lm-wizard-index-result", style: { marginTop: "14px", display: "inline-block" } },
                 React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ Indexing Complete: "),
-                `Inventoried ${indexResult.scenes || 0} scenes and ${indexResult.files || 0} files.`
+                `Inventoried ${indexResult.scenes || 0} scenes and ${indexResult.files || 0} files into watchtower.db.`
               ),
               indexError && React.createElement("div", { className: "lm-message error", style: { marginTop: "12px" } }, indexError)
             )
@@ -756,7 +756,7 @@
           step === 4 && React.createElement("div", { className: "lm-wizard-pane" },
             React.createElement("h3", null, "4. Choose Naming Convention & Safety Rules"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "How would you like Watchtower to format filenames when scene metadata is edited? Automatic Renaming is OFF by default so you can test safely."),
+              "Select your preferred naming style below. Automatic Renaming is OFF by default to keep your existing files completely safe until you choose to enable it in Settings."),
             React.createElement("div", { className: "lm-wizard-presets-grid" },
               [
                 { id: "standard", title: "Standard (Recommended)", example: "Studio Name - 2024-05-12 - Scene Title (Performer One, Performer Two).mp4" },
@@ -765,34 +765,17 @@
               ].map(p => React.createElement("div", {
                 key: p.id,
                 className: `lm-wizard-preset-card ${namingPreset === p.id ? "active" : ""}`,
-                onClick: () => handleApplyPreset(p.id)
+                onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleApplyPreset(p.id); }
               },
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
                   React.createElement("strong", null, p.title),
-                  namingPreset === p.id && React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ ACTIVE")
+                  namingPreset === p.id && React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ SELECTED")
                 ),
                 React.createElement("code", { className: "lm-wizard-preset-example" }, p.example)
               ))
             ),
-            React.createElement("div", { className: "lm-wizard-safety-toggles", style: { marginTop: "14px" } },
-              React.createElement("div", { className: "lm-wizard-option-card" },
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
-                  React.createElement("div", null,
-                    React.createElement("strong", null, "Desktop Notifications for Warnings & Offline Drives"),
-                    React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
-                      "Recommended ON. Sends native OS alerts if an external move fails or a drive goes offline.")
-                  ),
-                  React.createElement("input", {
-                    type: "checkbox",
-                    style: { width: "1.2rem", height: "1.2rem", cursor: "pointer" },
-                    checked: config.macNotifications !== false,
-                    onChange: e => updateSetting("macNotifications", e.target.checked)
-                  })
-                )
-              )
-            ),
-            React.createElement("p", { style: { marginTop: "12px", fontSize: "0.82rem", color: "var(--text-muted, #aab3c5)" } },
-              "💡 You can fine-tune separators, title cleaning, and contact sheets in the Settings tabs.")
+            React.createElement("p", { style: { marginTop: "16px", fontSize: "0.84rem", color: "var(--text-muted, #aab3c5)" } },
+              "💡 You can customize separators, multi-performer caps, title cleaning rules, and desktop notifications anytime in the Settings tab.")
           ),
           step === 5 && React.createElement("div", { className: "lm-wizard-pane", style: { textAlign: "center", padding: "1.6rem 0.5rem" } },
             React.createElement("div", { style: { fontSize: "3.5rem", marginBottom: "0.4rem" } }, "🎉"),
@@ -813,24 +796,24 @@
             type: "button",
             className: "btn btn-primary",
             style: { marginLeft: "auto", padding: "0.55rem 1.4rem", fontSize: "0.95rem", fontWeight: 700, background: "#218657", borderColor: "#2da76f" },
-            onClick: () => setStep(1)
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); setStep(1); }
           }, "🚀 Get Started ➔"),
           step > 0 && step < 5 && React.createElement("button", {
             type: "button",
             className: "btn btn-secondary",
-            onClick: () => setStep(step - 1)
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); setStep(prev => prev - 1); }
           }, step === 1 ? "⬅ Back to Welcome" : "⬅ Back"),
           step > 0 && step < 5 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
             style: { marginLeft: "auto" },
-            onClick: () => setStep(step + 1)
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); setStep(prev => prev + 1); }
           }, step === 4 ? "Review & Complete ➔" : "Next ➔"),
           step === 5 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
             style: { marginLeft: "auto", background: "#218657", borderColor: "#2da76f", fontWeight: 700 },
-            onClick: () => handleFinish("overview")
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleFinish("overview"); }
           }, "🚀 Finish & Go to Overview")
         )
       )

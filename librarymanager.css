@@ -2103,6 +2103,11 @@ a.lm-activity-scene-pill:hover {
   padding: 1.5rem !important;
   box-sizing: border-box !important;
 }
+.lm-wizard-dialog button, .lm-wizard-preset-card, .lm-wizard-step-item {
+  touch-action: manipulation !important;
+  user-select: none !important;
+  cursor: pointer !important;
+}
 .lm-wizard-dialog {
   width: 100%;
   max-width: 660px;
