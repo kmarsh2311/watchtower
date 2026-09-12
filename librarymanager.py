@@ -686,7 +686,14 @@ def main():
                 activity_logger().error("notification failed: %s", notify_error)
     elif mode == "ensure_monitor":
         stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
         result = start_filesystem_monitor(stash, database_path, plugin_input["server_connection"])
+        if result.get("message") == "Read-only filesystem monitor started":
+            unavailable = result.get("unavailable_roots", [])
+            detail = f"Filesystem watcher started: {len(result.get('roots', []))} roots active" + (f", {len(unavailable)} unavailable" if unavailable else "")
+            audit(database_path, "monitor", "start", "warning" if unavailable else "running",
+                  severity="warning" if unavailable else "info", detail=detail,
+                  metadata={"roots": result.get("roots", []), "unavailable_roots": unavailable})
         message = result["message"]
     elif mode == "record_config_change":
         changes = plugin_input.get("args", {}).get("changes") or {}
@@ -697,8 +704,8 @@ def main():
                 audit(database_path, "config", "automatic renaming", status, detail=detail)
             elif key == "autoStartMonitor":
                 status = "enabled" if val else "disabled"
-                detail = f"Watcher auto-start was {status} by user in settings"
-                audit(database_path, "config", "watcher auto-start", status, detail=detail)
+                detail = f"Filesystem watcher was {status} by user in settings"
+                audit(database_path, "config", "filesystem watcher", status, detail=detail)
             elif key == "automaticMoveReconciliation":
                 status = "enabled" if val else "disabled"
                 detail = f"External move reconciliation was {status} by user in settings"
@@ -733,7 +740,7 @@ def main():
     elif mode == "stop_monitor":
         result = stop_filesystem_monitor(database_path)
         message = result["message"]
-        audit(database_path, "monitor", "stop", result.get("state", "stopped"), detail=message)
+        audit(database_path, "monitor", "stop", result.get("state", "stopped"), detail="Filesystem watcher was stopped by user")
     elif mode == "monitor_status":
         result = filesystem_monitor_summary(database_path)
         message = (f"Filesystem monitor: {result['state']}; PID {result.get('pid')}; "
