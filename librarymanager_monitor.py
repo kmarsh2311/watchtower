@@ -934,8 +934,13 @@ def main():
     available = [root for root in roots if Path(root).is_dir()]
     unavailable = [root for root in roots if root not in available]
     runtime_path = Path(args.runtime)
-    runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
-    runtime_path.unlink(missing_ok=True)
+    runtime = {}
+    if runtime_path.is_file():
+        try:
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            runtime_path.unlink(missing_ok=True)
+        except Exception:
+            pass
     stash = StashInterface(runtime["server_connection"])
     worker = MoveWorker(database_path, stash, runtime.get("automatic_move_reconciliation") is True,
                         runtime.get("mac_notifications") is True)
