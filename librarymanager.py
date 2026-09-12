@@ -1135,24 +1135,26 @@ def main():
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
         arguments = plugin_input.get("args") or {}
-        scene_id = str(arguments.get("scene_id") or config.get("testSceneId") or "").strip()
+        override_config = arguments.get("config") or arguments.get("filename_options") or {}
+        active_config = {**config, **override_config}
+        scene_id = str(arguments.get("scene_id") or active_config.get("testSceneId") or "").strip()
         if not scene_id:
             raise ValueError("Set Test Scene ID in the Stash Library Manager settings first")
         refresh_scene(stash, database_path, scene_id)
         if mode == "preview_test_rename":
-            result = preview_scene_filename(database_path, scene_id, config)
+            result = preview_scene_filename(database_path, scene_id, active_config)
         else:
             result = apply_scene_filename(
                 database_path, scene_id,
                 lambda file_id, folder, basename: stash.move_files({"ids": [file_id], "destination_folder": folder,
                                                                     "destination_basename": basename}),
-                config,
+                active_config,
             )
             audit(database_path, "rename", "test scene rename", result.get("status", "unknown"),
                   scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
                   new_path=result.get("proposed_path"), detail=result.get("reason", ""))
             if result.get("status") in ("renamed", "ready") or result.get("action_performed"):
-                refresh_scene_contact_sheet(database_path, result.get("proposed_path"), scene_id, config)
+                refresh_scene_contact_sheet(database_path, result.get("proposed_path"), scene_id, active_config)
         result_path = Path(__file__).with_name("test-rename-result.json")
         result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         message = json.dumps(result, ensure_ascii=False)

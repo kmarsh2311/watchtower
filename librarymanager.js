@@ -221,46 +221,76 @@
     const [searchResults, setSearchResults] = React.useState([]);
     const [loading, setLoading] = React.useState(false);
     const [errorMsg, setErrorMsg] = React.useState("");
+    const activeSceneIdRef = React.useRef(null);
 
-    const runPreviewForSceneId = async (id) => {
+    const runPreviewForSceneId = async (id, isLiveUpdate = false) => {
       if (!id) return;
-      setLoading(true); setErrorMsg(""); setSearchResults([]);
+      activeSceneIdRef.current = String(id);
+      if (!isLiveUpdate) {
+        setLoading(true);
+        setErrorMsg("");
+        setSearchResults([]);
+      }
       try {
         const [gqlRes, backendRaw] = await Promise.all([
-          gql(`query FetchPreviewScene($id: ID!) {
-            findScene(id: $id) { id title studio { name } performers { name } files { path basename } paths { screenshot preview } }
-          }`, { id }),
-          operation("preview_test_rename", { scene_id: id }).catch(err => ({ error: err.message }))
+          (!previewResult || previewResult.sceneId !== String(id))
+            ? gql(`query FetchPreviewScene($id: ID!) {
+                findScene(id: $id) { id title studio { name } performers { name } files { path basename } paths { screenshot preview } }
+              }`, { id })
+            : Promise.resolve({ findScene: previewResult }),
+          operation("preview_test_rename", { scene_id: id, config: config }).catch(err => ({ error: err.message }))
         ]);
         const scene = gqlRes?.findScene;
         if (!scene) throw new Error(`Scene ${id} not found in Stash`);
         
         let backendResult = typeof backendRaw === "string" ? JSON.parse(backendRaw) : backendRaw;
-        const currentBasename = backendResult?.current_path?.split(/[\\/]/).pop() || scene.files?.[0]?.basename || scene.files?.[0]?.path?.split(/[\\/]/).pop() || "unknown.mp4";
+        const currentBasename = backendResult?.current_path?.split(/[\\/]/).pop() || scene.current || scene.files?.[0]?.basename || scene.files?.[0]?.path?.split(/[\\/]/).pop() || "unknown.mp4";
         const proposedBasename = backendResult?.proposed_path?.split(/[\\/]/).pop() || currentBasename;
         const status = backendResult?.status || (currentBasename === proposedBasename ? "unchanged" : "ready");
         const reason = backendResult?.reason || "";
 
-        setPreviewResult({
-          sceneId: id,
-          title: scene.title || "Untitled",
-          studio: scene.studio?.name || "None",
-          performers: (scene.performers || []).map(p => p.name).join(", ") || "None",
-          screenshot: scene.paths?.screenshot || null,
+        setPreviewResult(prev => ({
+          sceneId: String(id),
+          title: scene.title || prev?.title || "Untitled",
+          studio: (typeof scene.studio === "string" ? scene.studio : scene.studio?.name) || prev?.studio || "None",
+          performers: Array.isArray(scene.performers) ? (typeof scene.performers[0] === "string" ? scene.performers.join(", ") : scene.performers.map(p => p.name).join(", ")) : (prev?.performers || "None"),
+          screenshot: scene.paths?.screenshot || scene.screenshot || prev?.screenshot || null,
           current: currentBasename,
           proposed: proposedBasename,
           status: status,
           reason: reason,
           matches: status === "unchanged" || currentBasename === proposedBasename,
           sidecars: backendResult?.associated_files || []
-        });
+        }));
       } catch (e) {
-        setErrorMsg(e.message || String(e));
-        setPreviewResult(null);
+        if (!isLiveUpdate) {
+          setErrorMsg(e.message || String(e));
+          setPreviewResult(null);
+        }
       } finally {
-        setLoading(false);
+        if (!isLiveUpdate) setLoading(false);
       }
     };
+
+    // Real-time live update when naming or cleaning rules change
+    React.useEffect(() => {
+      if (activeSceneIdRef.current) {
+        runPreviewForSceneId(activeSceneIdRef.current, true);
+      }
+    }, [
+      config.filenameOrder,
+      config.filenameSectionSeparator,
+      config.filenamePerformerSeparator,
+      config.maxPerformersInFilename,
+      config.masterTitleSource,
+      config.includeStudio,
+      config.includePerformers,
+      config.cleanPerformerOnlyTitles,
+      config.stripStudioFromTitle,
+      config.stripPerformersFromTitle,
+      config.stripConnectiveWords,
+      config.collapseMultipleDashes
+    ]);
 
     const handleSearchOrTest = async (queryText) => {
       const q = String(queryText !== undefined ? queryText : sceneIdInput).trim();
