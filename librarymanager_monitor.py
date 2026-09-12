@@ -2,6 +2,7 @@
 """Background filesystem watcher for Stash Library Manager."""
 
 import argparse
+import logging
 import json
 import os
 import signal
@@ -23,6 +24,9 @@ from librarymanager_core import (
     expect_filesystem_create, expect_filesystem_move, fingerprint_value,
                                  opensubtitles_hash, record_activity, record_filesystem_event,
                                  resolve_filesystem_event, refresh_scene_inventory, utc_now)
+
+
+logger = logging.getLogger("librarymanager.monitor")
 
 
 VIDEO_EXTENSIONS = {
@@ -546,8 +550,8 @@ class CompletedDownloadWorker(threading.Thread):
                 sheet_p = f"{path}.jpg"
                 try:
                     self._save_state(sheet_p, "generating_sheet", detail=f"Creating contact sheet for scene {scene['id']}")
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("save_state before CSM generation failed: %s", exc)
                 try:
                     expect_filesystem_create(self.database_path, sheet_p)
                     csm_res = generate_video_contact_sheet(
@@ -582,11 +586,12 @@ class CompletedDownloadWorker(threading.Thread):
                         notify(self.notifications, f"Contact sheet created & paired: {Path(sheet_p).name} → Scene {scene['id']}")
                     else:
                         self._save_state(sheet_p, "gone", detail="Contact sheet generation skipped")
-                except Exception:
+                except Exception as exc:
+                    logger.debug("Contact sheet generation failed for %s: %s", path, exc)
                     try:
                         self._save_state(sheet_p, "gone", detail="Contact sheet generation failed")
-                    except Exception:
-                        pass
+                    except Exception as save_exc:
+                        logger.debug("save_state after contact sheet failure failed: %s", save_exc)
 
             return True
         except Exception as error:
@@ -642,8 +647,8 @@ class CompletedDownloadWorker(threading.Thread):
 
                 try:
                     self.stash.metadata_scan(paths=[str(target_path)])
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Stash metadata_scan failed for %s: %s", target_path, exc)
 
                 self._save_state(c_path, "paired", detail=f"Paired with scene {scene['id']} at {target_path.name}")
                 record_activity(self.database_path, "companion", "auto-paired companion", "recorded",
@@ -699,8 +704,8 @@ class CompletedDownloadWorker(threading.Thread):
 
                 try:
                     self.stash.metadata_scan(paths=[str(target_path)])
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Stash metadata_scan failed for late companion %s: %s", target_path, exc)
 
                 self._save_state(path, "paired", detail=f"Paired with scene {row['scene_id']} at {target_path.name}")
                 record_activity(self.database_path, "companion", "auto-paired late companion", "recorded",
@@ -944,8 +949,8 @@ def main():
         try:
             runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
             runtime_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to read runtime config from %s: %s", runtime_path, exc)
     stash = StashInterface(runtime["server_connection"])
     worker = MoveWorker(database_path, stash, runtime.get("automatic_move_reconciliation") is True,
                         runtime.get("mac_notifications") is True)

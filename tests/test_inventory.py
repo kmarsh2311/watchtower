@@ -568,7 +568,7 @@ class InventoryTests(unittest.TestCase):
                      "files": [{"id": "20", "path": str(video), "size": 5}]}
             inventory(database, [scene])
             _, report = preview_safe_filenames(database)
-            self.assertTrue(report[0]["proposed_path"].endswith("Scene- A-B-.mp4"))
+            self.assertTrue(report[0]["proposed_path"].endswith("Scene- A-B.mp4"))
 
     def test_single_scene_apply_uses_callback_and_moves_sidecar(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

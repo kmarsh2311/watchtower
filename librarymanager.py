@@ -319,7 +319,14 @@ def reload_monitor_runtime(stash, database_path):
                 "contact_sheet_script": config.get("contactSheetScript") or "",
             }
         }), encoding="utf-8")
-        return True
+        # Poll until the daemon consumes the control file (it deletes it after processing).
+        # This gives a lightweight acknowledgement without any schema changes.
+        # Timeout 3s — one full 2s poll cycle plus margin. Non-fatal if it times out.
+        for _ in range(30):
+            time.sleep(0.1)
+            if not control_path.exists():
+                return True  # daemon consumed the file — reload acknowledged
+        return True  # timed out but file was written; daemon will process it next cycle
     except Exception:
         return False
 

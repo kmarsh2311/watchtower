@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS inventory_events (
 );
 CREATE INDEX IF NOT EXISTS idx_files_scene_id ON files(scene_id);
 CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+CREATE INDEX IF NOT EXISTS idx_files_basename ON files(basename);
 CREATE INDEX IF NOT EXISTS idx_events_run_id ON inventory_events(run_id);
 CREATE TABLE IF NOT EXISTS reconciliation_runs (
     id INTEGER PRIMARY KEY,
