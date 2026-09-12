@@ -21,9 +21,37 @@ settings:
     displayName: Contact Sheet Location Scope
     description: Choose whether contact sheets are generated across all library folders or restricted to your incoming folder.
     type: STRING
-  stripMetadataFromTitle:
-    displayName: Clean Embedded Performers & Studio from Titles
-    description: Automatically clean duplicate studio or performer names from titles when generating filenames.
+  cleanPerformerOnlyTitles:
+    displayName: Deduplicate Performer-Only Titles
+    description: When the Stash title consists only of performer names, omit the duplicate title component from the filename.
+    type: BOOLEAN
+  stripStudioFromTitle:
+    displayName: Strip Studio from Titles
+    description: Automatically remove embedded studio names from the Stash title before generating filenames.
+    type: BOOLEAN
+  stripPerformersFromTitle:
+    displayName: Strip Performers from Titles
+    description: Automatically remove embedded performer names from the Stash title before generating filenames.
+    type: BOOLEAN
+  stripConnectiveWords:
+    displayName: Strip Connective Words & Punctuation
+    description: Clean leftover linking words (and, &, with, feat., vs.) and trailing symbols left behind after metadata stripping.
+    type: BOOLEAN
+  includeStudio:
+    displayName: Include Studio in Filename
+    description: Include the scene's studio name when generating filenames.
+    type: BOOLEAN
+  includePerformers:
+    displayName: Include Performers in Filename
+    description: Include tagged performer names when generating filenames.
+    type: BOOLEAN
+  maxPerformersInFilename:
+    displayName: Maximum Performers in Filename
+    description: Limit the number of performers included in filenames (e.g. first 2). Set to 0 for all.
+    type: NUMBER
+  collapseMultipleDashes:
+    displayName: Collapse Multiple Separators & Spaces
+    description: Clean duplicate dashes and spaces created during title formatting.
     type: BOOLEAN
   renameSettleSeconds:
     displayName: Rename & Contact Sheet Settle Delay

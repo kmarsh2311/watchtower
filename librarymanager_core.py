@@ -1420,8 +1420,9 @@ def _metadata_name_pattern(name: str) -> str | None:
     return r"(?<!\w)" + r"[\W_]*".join(re.escape(part) for part in parts) + r"(?!\w)"
 
 
-def _strip_managed_metadata(base: str, studios, performers) -> str:
+def _strip_managed_metadata(base: str, studios, performers, options: dict | None = None) -> str:
     """Remove only studio/performer names that Stash currently or previously identified as metadata."""
+    opts = options or {}
     cleaned = str(base or "").strip()
     names = []
     seen = set()
@@ -1443,15 +1444,20 @@ def _strip_managed_metadata(base: str, studios, performers) -> str:
     cleaned = re.sub(r"\(\s*[,;&-]*\s*\)", " ", cleaned)
     cleaned = re.sub(r"\[\s*\]|\{\s*\}", " ", cleaned)
     cleaned = re.sub(r"\s*,\s*,+", ", ", cleaned)
-    cleaned = re.sub(r"\s*-\s*[,;&+]*\s*(?:and|feat\.?|featuring|with|w/)?\s*[,;&+]*\s*-\s*", " - ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*-\s*[,;&+]*\s*(?:and|feat\.?|featuring|with|w/)?\s*[,;&+]*\s*(?=\s*[\(\[{]|$)", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"(?:\s*-\s*){2,}", " - ", cleaned)
+    
+    if opts.get("stripConnectiveWords") is not False:
+        cleaned = re.sub(r"\s*-\s*[,;&+]*\s*(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in)?\s*[,;&+]*\s*-\s*", " - ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*-\s*[,;&+]*\s*(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in)?\s*[,;&+]*\s*(?=\s*[\(\[{]|$)", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"(?i)\s+(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in)\s*$", "", cleaned).strip(" -_,&")
+        cleaned = re.sub(r"(?i)^\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in)\s+", "", cleaned).strip(" -_,&")
+        if re.fullmatch(r"(?i)\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in|&|\+|\-|,)+\s*", cleaned):
+            cleaned = ""
+
+    if opts.get("collapseMultipleDashes") is not False:
+        cleaned = re.sub(r"(?:\s*-\s*){2,}", " - ", cleaned)
+
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = cleaned.strip(" -_,&")
-    cleaned = re.sub(r"(?i)\s+(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in)\s*$", "", cleaned).strip(" -_,&")
-    cleaned = re.sub(r"(?i)^\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in)\s+", "", cleaned).strip(" -_,&")
-    if re.fullmatch(r"(?i)\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in|&|\+|\-|,)+\s*", cleaned):
-        cleaned = ""
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
@@ -1653,29 +1659,30 @@ def filename_format_options(config: dict | None = None) -> dict:
 
 
 
-def _sanitize_filename_stem(stem: str) -> str:
+def _sanitize_filename_stem(stem: str, options: dict | None = None) -> str:
     """Remove or replace illegal filesystem characters with clean punctuation."""
-    # Drop question marks, quotes, and asterisks so punctuation does not turn into hyphens
+    opts = options or {}
     cleaned = re.sub(r'[?"*]', '', str(stem or ''))
-    # Replace path separators, colons, brackets, pipes with hyphen
-    cleaned = re.sub(r'[-<>:/\|]', '-', cleaned)
-    # If a hyphen ended up directly before punctuation like ! or . or ,, remove the hyphen
-    cleaned = re.sub(r'\s*-\s*([!.,;])', r'', cleaned)
-    # Collapse multiple hyphens or spaces
-    cleaned = re.sub(r'(?:\s*-\s*){2,}', ' - ', cleaned)
+    cleaned = re.sub(r'[/\:<>|]', '-', cleaned)
+    cleaned = re.sub(r'\s*-\s*([!.,;])', r' \1', cleaned)
+    if opts.get("collapseMultipleDashes") is not False:
+        cleaned = re.sub(r'(?:\s*-\s*){2,}', ' - ', cleaned)
     return re.sub(r'\s+', ' ', cleaned).strip(' .')
 
-def _is_only_metadata_or_connectors(text: str, studio: str | None, performers: list[str]) -> bool:
+
+def _is_only_metadata_or_connectors(text: str, studio: str | None, performers: list[str], options: dict | None = None) -> bool:
     """Check if text consists exclusively of studio, performers, and connective words/punctuation."""
+    opts = options or {}
     cleaned = str(text or "").strip()
     if not cleaned:
         return True
     names = []
-    if studio and str(studio).strip():
+    if studio and str(studio).strip() and opts.get("stripStudioFromTitle") is not False:
         names.append(str(studio).strip())
-    for p in performers:
-        if p and str(p).strip():
-            names.append(str(p).strip())
+    if opts.get("stripPerformersFromTitle") is not False:
+        for p in performers:
+            if p and str(p).strip():
+                names.append(str(p).strip())
     names.sort(key=lambda s: len(s), reverse=True)
     for name in names:
         escaped = re.escape(name)
@@ -1692,18 +1699,30 @@ def _is_only_metadata_or_connectors(text: str, studio: str | None, performers: l
 def _proposed_stem(base: str, studio: str | None, performers: list[str], options: dict | None = None) -> str:
     """Build one canonical filename from the stored base + current Stash metadata."""
     formatting = filename_format_options(options)
+    opts = options or {}
+    
     title_val = str(base or "").strip()
-    studio_val = str(studio or "").strip()
-    perf_val = formatting["performer_separator"].join(
-        name.strip() for name in performers if str(name).strip()
-    )
+    
+    include_studio = opts.get("includeStudio") is not False
+    studio_val = str(studio or "").strip() if include_studio else ""
+    
+    include_performers = opts.get("includePerformers") is not False
+    raw_performers = [name.strip() for name in performers if str(name).strip()]
+    max_perfs = int(opts.get("maxPerformersInFilename") or 0)
+    if max_perfs > 0:
+        raw_performers = raw_performers[:max_perfs]
+    
+    perf_val = formatting["performer_separator"].join(raw_performers) if include_performers else ""
 
-    should_strip = (options or {}).get("stripMetadataFromTitle") is not False
-    if should_strip:
-        if _is_only_metadata_or_connectors(title_val, studio_val, performers):
-            title_val = ""
-        else:
-            title_val = _strip_managed_metadata(title_val, [studio_val] if studio_val else [], performers)
+    # Check granular title cleaning rules
+    clean_perfs_only = opts.get("cleanPerformerOnlyTitles") is not False
+    if clean_perfs_only and _is_only_metadata_or_connectors(title_val, studio_val, raw_performers, opts):
+        title_val = ""
+    else:
+        studios_to_strip = [studio.strip()] if (opts.get("stripStudioFromTitle") is not False and studio and str(studio).strip()) else []
+        perfs_to_strip = raw_performers if opts.get("stripPerformersFromTitle") is not False else []
+        if studios_to_strip or perfs_to_strip:
+            title_val = _strip_managed_metadata(title_val, studios_to_strip, perfs_to_strip, opts)
 
     values = {
         "title": title_val,
@@ -1712,7 +1731,8 @@ def _proposed_stem(base: str, studio: str | None, performers: list[str], options
     }
     parts = [values[field] for field in formatting["order"] if values[field]]
     proposed = formatting["section_separator"].join(parts)
-    return _sanitize_filename_stem(proposed)
+    return _sanitize_filename_stem(proposed, opts)
+
 
 def preview_safe_filenames(database_path: Path, filename_options: dict | None = None) -> tuple[dict, list[dict]]:
     """Persist stable clean bases and calculate proposed paths; never rename a file."""

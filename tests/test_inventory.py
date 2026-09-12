@@ -234,6 +234,56 @@ class InventoryTests(unittest.TestCase):
             "Morning Visit - OnlyFans - Silas Brooks, Valentino Aston",
         )
 
+    def test_proposed_stem_granular_rules(self):
+        # 1. includeStudio=False
+        opts_no_studio = {'includeStudio': False}
+        self.assertEqual(
+            _proposed_stem('Morning Coffee', 'Big Studio', ['Jane Doe'], opts_no_studio),
+            'Morning Coffee - Jane Doe'
+        )
+
+        # 2. includePerformers=False
+        opts_no_perfs = {'includePerformers': False}
+        self.assertEqual(
+            _proposed_stem('Morning Coffee', 'Big Studio', ['Jane Doe'], opts_no_perfs),
+            'Morning Coffee - Big Studio'
+        )
+
+        # 3. maxPerformersInFilename limit
+        opts_max_perfs = {'maxPerformersInFilename': 2}
+        self.assertEqual(
+            _proposed_stem('Big Scene', 'Studio', ['Performer 1', 'Performer 2', 'Performer 3', 'Performer 4'], opts_max_perfs),
+            'Big Scene - Studio - Performer 1, Performer 2'
+        )
+
+        # 4. cleanPerformerOnlyTitles=False with stripPerformersFromTitle=False (preserves performer-only title completely)
+        opts_no_dedup = {'cleanPerformerOnlyTitles': False, 'stripPerformersFromTitle': False}
+        self.assertEqual(
+            _proposed_stem('Silas Brooks and Valentino Aston', None, ['Silas Brooks', 'Valentino Aston'], opts_no_dedup),
+            'Silas Brooks and Valentino Aston - Silas Brooks, Valentino Aston'
+        )
+
+        # 4b. Real title with performer name: strips performer from title when stripPerformersFromTitle=True
+        opts_strip_perf = {'stripPerformersFromTitle': True}
+        self.assertEqual(
+            _proposed_stem('Silas Brooks In The Summer', None, ['Silas Brooks'], opts_strip_perf),
+            'The Summer - Silas Brooks'
+        )
+
+        # 5. stripStudioFromTitle=False (keeps embedded studio in title)
+        opts_keep_studio = {'stripStudioFromTitle': False}
+        self.assertEqual(
+            _proposed_stem('Studio Name Episode 1', 'Studio Name', ['Performer A'], opts_keep_studio),
+            'Studio Name Episode 1 - Studio Name - Performer A'
+        )
+
+        # 6. stripPerformersFromTitle=False (keeps embedded performer in title)
+        opts_keep_perf = {'stripPerformersFromTitle': False}
+        self.assertEqual(
+            _proposed_stem('Performer A at Beach', 'Studio Name', ['Performer A'], opts_keep_perf),
+            'Performer A at Beach - Studio Name - Performer A'
+        )
+
     def test_expected_plugin_move_is_consumed_once(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"

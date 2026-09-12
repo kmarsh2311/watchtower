@@ -166,6 +166,14 @@
   ];
   const sectionSeparators = [["dash", "Dash"], ["comma", "Comma"], ["space", "Space"], ["underscore", "Underscore"]];
   const performerSeparators = [["comma", "Comma"], ["space", "Space"], ["dash", "Dash"], ["ampersand", "And sign (&)"]];
+  const performerCountLimits = [
+    [0, "All tagged performers"],
+    [1, "First 1 performer only"],
+    [2, "First 2 performers only"],
+    [3, "First 3 performers only"],
+    [4, "First 4 performers only"],
+    [5, "First 5 performers only"]
+  ];
 
   function ChoiceField({ label, help, value, choices, disabled, onChange }) {
     const [open, setOpen] = React.useState(false);
@@ -567,10 +575,13 @@
       config.automaticMoveReconciliation === true && !config.testSceneId;
     const filenameSectionCharacters = { dash: " - ", comma: ", ", space: " ", underscore: "_" };
     const filenamePerformerCharacters = { comma: ", ", space: " ", dash: " - ", ampersand: " & " };
+    const performerLimit = Number(config.maxPerformersInFilename || 0);
+    const samplePerformers = ["Alex Smith", "Jamie Jones"];
+    const limitedPerformers = performerLimit > 0 ? samplePerformers.slice(0, performerLimit) : samplePerformers;
     const exampleParts = {
       title: "Example Scene",
-      studio: "Example Studio",
-      performers: ["Alex Smith", "Jamie Jones"].join(filenamePerformerCharacters[config.filenamePerformerSeparator] || ", ")
+      studio: config.includeStudio !== false ? "Example Studio" : "",
+      performers: config.includePerformers !== false ? limitedPerformers.join(filenamePerformerCharacters[config.filenamePerformerSeparator] || ", ") : ""
     };
     const exampleFilename = (config.filenameOrder || "title,studio,performers").split(",")
       .map(part => exampleParts[part]).filter(Boolean)
@@ -1332,13 +1343,35 @@
             `Testing limit active: automatic renaming applies only to Scene ${config.testSceneId}. Configure under Advanced Diagnostics.`))),
       panel("How Filenames Look", "Choose a clear style for future filename changes. Saving these choices does not rename your existing library.",
         React.createElement(React.Fragment, null,
-          React.createElement(Switch, { setting: "stripMetadataFromTitle", defaultValue: true,
-            label: "Clean Embedded Performers & Studio from Titles",
-            help: "Automatically removes performer and studio names from the Stash title when building filenames to prevent duplicate names." }),
-          React.createElement("div", { className: "lm-filename-style-grid" },
-            React.createElement(ChoiceField, { label: "Information Order", help: "Choose what appears first, second and third.", value: config.filenameOrder || "title,studio,performers", choices: filenameOrders,  onChange: value => updateSetting("filenameOrder", value) }),
-            React.createElement(ChoiceField, { label: "Between the Main Parts", help: "Choose what appears between the title, studio and performer list.", value: config.filenameSectionSeparator || "dash", choices: sectionSeparators,  onChange: value => updateSetting("filenameSectionSeparator", value) }),
-            React.createElement(ChoiceField, { label: "Between Performer Names", help: "Choose what appears between two or more performer names.", value: config.filenamePerformerSeparator || "comma", choices: performerSeparators,  onChange: value => updateSetting("filenamePerformerSeparator", value) })),
+          React.createElement("div", { className: "lm-filename-style-grid", style: { gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))" } },
+            React.createElement(ChoiceField, { label: "Information Order", help: "Choose what appears first, second and third.", value: config.filenameOrder || "title,studio,performers", choices: filenameOrders, onChange: value => updateSetting("filenameOrder", value) }),
+            React.createElement(ChoiceField, { label: "Between the Main Parts", help: "Choose what appears between the title, studio and performer list.", value: config.filenameSectionSeparator || "dash", choices: sectionSeparators, onChange: value => updateSetting("filenameSectionSeparator", value) }),
+            React.createElement(ChoiceField, { label: "Between Performer Names", help: "Choose what appears between two or more performer names.", value: config.filenamePerformerSeparator || "comma", choices: performerSeparators, onChange: value => updateSetting("filenamePerformerSeparator", value) }),
+            React.createElement(ChoiceField, { label: "Maximum Performers", help: "Limit how many performers are included in filenames.", value: Number(config.maxPerformersInFilename || 0), choices: performerCountLimits, onChange: value => updateSetting("maxPerformersInFilename", Number(value)) })),
+          React.createElement("div", { className: "lm-subpanel", style: { marginTop: "14px", padding: "12px 14px", border: "1px solid rgba(140, 155, 185, 0.2)", borderRadius: "6px", background: "rgba(10, 20, 34, 0.25)" } },
+            React.createElement("strong", { style: { display: "block", marginBottom: "8px", fontSize: "0.95rem", color: "var(--lm-accent-green, #39ff64)" } }, "Filename Inclusion & Title Cleaning Rules"),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "10px 18px" } },
+              React.createElement(Switch, { setting: "includeStudio", defaultValue: true,
+                label: "Include Studio Name in Filename",
+                help: "Include the studio name when constructing new filenames. If disabled, studio is omitted from filenames." }),
+              React.createElement(Switch, { setting: "includePerformers", defaultValue: true,
+                label: "Include Performers in Filename",
+                help: "Include tagged performer names when constructing new filenames. If disabled, performers are omitted." }),
+              React.createElement(Switch, { setting: "cleanPerformerOnlyTitles", defaultValue: true,
+                label: "Deduplicate Performer-Only Titles",
+                help: "When the Stash title is only performer names (or joined by 'and', '&', 'feat.', 'vs.'), omit the duplicate title component from the filename." }),
+              React.createElement(Switch, { setting: "stripStudioFromTitle", defaultValue: true,
+                label: "Strip Studio from Scene Titles",
+                help: "Automatically remove embedded studio names from the title component to prevent repeating the studio twice." }),
+              React.createElement(Switch, { setting: "stripPerformersFromTitle", defaultValue: true,
+                label: "Strip Performers from Scene Titles",
+                help: "Automatically remove embedded performer names from the title component to prevent duplicate performer tags." }),
+              React.createElement(Switch, { setting: "stripConnectiveWords", defaultValue: true,
+                label: "Strip Connective Words & Punctuation",
+                help: "Clean leftover conjunctions (and, &, with, feat., vs.) and trailing symbols left behind when metadata is stripped." }),
+              React.createElement(Switch, { setting: "collapseMultipleDashes", defaultValue: true,
+                label: "Collapse Multiple Separators & Spaces",
+                help: "Automatically merge duplicate dashes, spaces, and punctuation generated during title cleanup into single clean separators." }))),
           React.createElement("div", { className: "lm-filename-example" },
             React.createElement("small", null, "Example filename"),
             React.createElement("strong", null, exampleFilename),
