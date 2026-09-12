@@ -277,6 +277,12 @@ class InventoryTests(unittest.TestCase):
             'Studio Name Episode 1 - Studio Name - Performer A'
         )
 
+        # 7. Leftover conjunction with hyphen (e.g. 8TB Devin Lewis & Jimmy Andrews - Wet & Wild FHD)
+        self.assertEqual(
+            _proposed_stem('8TB Devin Lewis & Jimmy Andrews - Wet & Wild FHD', '8teenBoy', ['Jimmy Andrews', 'Devin Lewis'], {}),
+            '8TB - Wet & Wild FHD - 8teenBoy - Jimmy Andrews, Devin Lewis'
+        )
+
         # 6. stripPerformersFromTitle=False (keeps embedded performer in title)
         opts_keep_perf = {'stripPerformersFromTitle': False}
         self.assertEqual(

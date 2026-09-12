@@ -1446,10 +1446,11 @@ def _strip_managed_metadata(base: str, studios, performers, options: dict | None
     cleaned = re.sub(r"\s*,\s*,+", ", ", cleaned)
     
     if opts.get("stripConnectiveWords") is not False:
-        cleaned = re.sub(r"\s*-\s*[,;&+]*\s*(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in)?\s*[,;&+]*\s*-\s*", " - ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*[,;&+]*\s*(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in|&|\+)\s*[,;&+]*\s*-\s*", " - ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*-\s*[,;&+]*\s*(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in|&|\+)\s*[,;&+]*\s*", " - ", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s*-\s*[,;&+]*\s*(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in)?\s*[,;&+]*\s*(?=\s*[\(\[{]|$)", " ", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"(?i)\s+(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in)\s*$", "", cleaned).strip(" -_,&")
-        cleaned = re.sub(r"(?i)^\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in)\s+", "", cleaned).strip(" -_,&")
+        cleaned = re.sub(r"(?i)\s+(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in|&|\+)\s*$", "", cleaned).strip(" -_,&")
+        cleaned = re.sub(r"(?i)^\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in|&|\+)\s+", "", cleaned).strip(" -_,&")
         if re.fullmatch(r"(?i)\s*(?:feat\.?|featuring|with|and|w/|vs\.?|versus|presents|in|&|\+|\-|,)+\s*", cleaned):
             cleaned = ""
 
