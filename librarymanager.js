@@ -1202,27 +1202,106 @@
               value: monitor.pending_events || 0,
               detail: "Audited in SQLite"
             })),
-          React.createElement("div", { className: "lm-actions", style: { marginTop: "14px", display: "flex", gap: "10px" } },
-            React.createElement(Button, {
+          React.createElement("div", { className: "lm-actions", style: { marginTop: "14px", display: "flex", gap: "10px", alignItems: "center" } },
+            watcherWorking ? React.createElement(React.Fragment, null,
+              React.createElement(Button, {
+                variant: "secondary",
+                disabled: !!busy,
+                title: "Restart the running background watcher daemon",
+                onClick: async () => {
+                  setBusy("restart_monitor");
+                  setError("");
+                  try {
+                    await operation("stop_monitor");
+                    await updateSetting("autoStartMonitor", true);
+                    await operation("ensure_monitor");
+                    await refresh();
+                    setNotice("Filesystem watcher restarted successfully.");
+                  } catch (err) {
+                    setError(`Restart failed: ${err.message}`);
+                  } finally {
+                    setBusy("");
+                  }
+                }
+              }, "⟳ Restart Watcher"),
+              React.createElement(Button, {
+                variant: "danger",
+                disabled: !!busy,
+                title: "Stop the background watcher daemon",
+                onClick: async () => {
+                  setBusy("stop_monitor");
+                  setError("");
+                  try {
+                    await updateSetting("autoStartMonitor", false);
+                    await operation("stop_monitor");
+                    await refresh();
+                    setNotice("Filesystem watcher stopped.");
+                  } catch (err) {
+                    setError(`Stop failed: ${err.message}`);
+                  } finally {
+                    setBusy("");
+                  }
+                }
+              }, "⏹ Stop Watcher")
+            ) : isMonitorStale ? React.createElement(React.Fragment, null,
+              React.createElement(Button, {
+                variant: "primary",
+                disabled: !!busy,
+                title: "Revive and restart the stale background watcher daemon",
+                onClick: async () => {
+                  setBusy("restart_monitor");
+                  setError("");
+                  try {
+                    await operation("stop_monitor");
+                    await updateSetting("autoStartMonitor", true);
+                    await operation("ensure_monitor");
+                    await refresh();
+                    setNotice("Filesystem watcher restarted successfully.");
+                  } catch (err) {
+                    setError(`Restart failed: ${err.message}`);
+                  } finally {
+                    setBusy("");
+                  }
+                }
+              }, "⟳ RESTART WATCHER"),
+              React.createElement(Button, {
+                variant: "secondary",
+                disabled: !!busy,
+                title: "Stop the stale watcher daemon",
+                onClick: async () => {
+                  setBusy("stop_monitor");
+                  setError("");
+                  try {
+                    await updateSetting("autoStartMonitor", false);
+                    await operation("stop_monitor");
+                    await refresh();
+                    setNotice("Filesystem watcher stopped.");
+                  } catch (err) {
+                    setError(`Stop failed: ${err.message}`);
+                  } finally {
+                    setBusy("");
+                  }
+                }
+              }, "⏹ Stop")
+            ) : React.createElement(Button, {
               variant: "primary",
               disabled: !!busy,
-              title: "Restart the background watcher daemon",
+              title: "Start the background watcher daemon",
               onClick: async () => {
-                setBusy("restart_monitor");
+                setBusy("start_monitor");
                 setError("");
                 try {
-                  await operation("stop_monitor");
                   await updateSetting("autoStartMonitor", true);
                   await operation("ensure_monitor");
                   await refresh();
-                  setNotice("Filesystem watcher restarted successfully.");
+                  setNotice("Filesystem watcher started successfully.");
                 } catch (err) {
-                  setError(`Restart failed: ${err.message}`);
+                  setError(`Start failed: ${err.message}`);
                 } finally {
                   setBusy("");
                 }
               }
-            }, "⟳ Restart Watcher"),
+            }, "▶ Start Watcher"),
             React.createElement(TaskButton, { name: readOnlyTasks.events, label: "Reconcile Events (Read Only)", showResults: "reports" })))),
       panel("Watcher Settings & Automation", "Control continuous monitoring, external move reconciliation, and system startup.",
         React.createElement(React.Fragment, null,
