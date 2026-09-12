@@ -91,13 +91,18 @@ def audit(database_path, category, action, status, **fields):
 
 def send_macos_notification(title, message):
     """Send safely without a shell, so metadata cannot become AppleScript code."""
-    result = subprocess.run([
-        "/usr/bin/osascript", "-e", "on run argv", "-e",
-        "display notification (item 1 of argv) with title (item 2 of argv)",
-        "-e", "end run", "--", str(message), str(title),
-    ], capture_output=True, text=True, timeout=10, check=False)
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or f"osascript exited {result.returncode}")
+    if sys.platform != "darwin":
+        return
+    try:
+        result = subprocess.run([
+            "/usr/bin/osascript", "-e", "on run argv", "-e",
+            "display notification (item 1 of argv) with title (item 2 of argv)",
+            "-e", "end run", "--", str(message), str(title),
+        ], capture_output=True, text=True, timeout=10, check=False)
+        if result.returncode:
+            activity_logger().debug("osascript notification returned %s: %s", result.returncode, result.stderr)
+    except Exception as exc:
+        activity_logger().debug("osascript notification failed: %s", exc)
 
 
 def maybe_notify(config, message, *, success=False):

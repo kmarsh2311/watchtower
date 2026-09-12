@@ -137,12 +137,15 @@ query LibraryManagerSceneByPath($path: String!) {
 
 
 def notify(enabled, message):
-    if not enabled:
+    if not enabled or sys.platform != "darwin":
         return
-    subprocess.run(["/usr/bin/osascript", "-e", "on run argv", "-e",
-                    "display notification (item 1 of argv) with title (item 2 of argv)",
-                    "-e", "end run", "--", str(message), "Stash Library Manager"],
-                   capture_output=True, text=True, timeout=10, check=False)
+    try:
+        subprocess.run(["/usr/bin/osascript", "-e", "on run argv", "-e",
+                        "display notification (item 1 of argv) with title (item 2 of argv)",
+                        "-e", "end run", "--", str(message), "Stash Library Manager"],
+                       capture_output=True, text=True, timeout=10, check=False)
+    except Exception:
+        pass
 
 
 def tracked_move(database_path, source, destination):

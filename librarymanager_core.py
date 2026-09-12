@@ -2041,12 +2041,12 @@ def generate_video_contact_sheet(
         except Exception as e:
             return {"status": "error", "error": f"Custom script error: {e}"}
 
-    # Locate ffmpeg, ffprobe, magick
-    ffmpeg_bin = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
-    ffprobe_bin = shutil.which("ffprobe") or "/opt/homebrew/bin/ffprobe"
-    magick_bin = shutil.which("magick") or "/opt/homebrew/bin/magick"
+    # Locate ffmpeg, ffprobe, magick across macOS, Linux, and Windows
+    ffmpeg_bin = shutil.which("ffmpeg") or ("/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else "/usr/bin/ffmpeg" if os.path.exists("/usr/bin/ffmpeg") else "ffmpeg")
+    ffprobe_bin = shutil.which("ffprobe") or ("/opt/homebrew/bin/ffprobe" if os.path.exists("/opt/homebrew/bin/ffprobe") else "/usr/bin/ffprobe" if os.path.exists("/usr/bin/ffprobe") else "ffprobe")
+    magick_bin = shutil.which("magick") or ("/opt/homebrew/bin/magick" if os.path.exists("/opt/homebrew/bin/magick") else "/usr/bin/magick" if os.path.exists("/usr/bin/magick") else "magick")
 
-    if not os.path.exists(ffmpeg_bin) or not os.path.exists(ffprobe_bin) or not os.path.exists(magick_bin):
+    if not (shutil.which(ffmpeg_bin) or os.path.exists(ffmpeg_bin)) or not (shutil.which(ffprobe_bin) or os.path.exists(ffprobe_bin)) or not (shutil.which(magick_bin) or os.path.exists(magick_bin)):
         return {"status": "error", "error": "ffmpeg, ffprobe or magick not found on system"}
 
     # Probe metadata
