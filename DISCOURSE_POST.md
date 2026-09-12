@@ -1,11 +1,9 @@
 ||||
 |-|-|-|
-:placard: | **Summary** | 24/7 background filesystem watcher, automated multi-folder download ingest, zero-rescan external move tracking, and atomic renaming engine with companion sidecar rollback and visual contact sheets.
+:placard: | **Summary** | 24/7 background filesystem watcher, automated multi-folder download ingest, zero-rescan external move tracking, and atomic renaming engine for Stash with companion sidecar rollback and visual contact sheets.
 :link: | **Repository** | https://github.com/kmarsh2311/my-stash-plugins
-:information_source: | **Source URL** | `https://kmarsh2311.github.io/my-stash-plugins/index.yml`
+:information_source: | **Source URL** | https://kmarsh2311.github.io/my-stash-plugins/index.yml
 :open_book: | **Install** | [How to install a plugin?](https://discourse.stashapp.cc/t/-/1015)
-
----
 
 <div align="center">
 
@@ -15,7 +13,7 @@
 
 </div>
 
-**Watchtower** is a 24/7 background system guardian and automated media ingest pipeline designed from the ground up for Stash.
+**Watchtower** is a 24/7 background system guardian and automated media ingest pipeline designed from the ground up for Stash. 
 
 Instead of waiting for slow manual library sweeps or worrying if external file moves broke your scene links, Watchtower continuously listens to your storage drives in real-time. Drop downloads into incoming folders and watch them automatically verify, settle, generate visual contact sheets, and import into Stash the moment they finish. Reorganize files in Finder or Explorer without fear—Watchtower detects moves by size and `OSHash` and reconnects scenes instantly without destructive rescans.
 
@@ -32,7 +30,7 @@ Instead of waiting for slow manual library sweeps or worrying if external file m
 
 ### 📥 2. Automated Multi-Folder Download Ingest & Settle Pipeline
 * **Zero-Touch Ingest:** Configure up to 5 incoming download folders. Drop new videos in and let Watchtower handle everything from verification to import.
-* **Partial Download Protection:** Actively filters out in-progress downloads (`.part`, `.partial`, `.crdownload`, `.download`, `.tmp`).
+* **Partial Download Filter:** Actively ignores in-progress downloads (`.part`, `.partial`, `.crdownload`, `.download`, `.tmp`).
 * **Dynamic Stability Settle Timers:** Watches file size and `mtime` continuously. The import timer (configurable 1–30 mins) automatically resets if a transfer is still writing.
 * **Targeted Automated Scans:** Once a video is 100% stable, Watchtower triggers an exact-path Stash scan with thumbnail, sprite, and perceptual-hash generation—importing only the new file in seconds.
 * **Subfolder Discovery:** Automatically discovers and processes videos nested inside newly downloaded subfolders.
