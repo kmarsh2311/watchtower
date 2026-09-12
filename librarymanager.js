@@ -469,7 +469,8 @@
   }
 
   function OnboardingWizardModal({ show, onHide, data, config, updateSetting, updateSettings, operation, refresh, onNavigateTab }) {
-    const [step, setStep] = React.useState(1);
+    // step 0 is the Welcome Screen, steps 1..4 are setup, step 5 is complete
+    const [step, setStep] = React.useState(0);
     const [indexing, setIndexing] = React.useState(false);
     const [indexResult, setIndexResult] = React.useState(null);
     const [indexError, setIndexError] = React.useState("");
@@ -555,6 +556,7 @@
     };
 
     const handleFinish = async (targetTab = "overview") => {
+      await updateSetting("onboardingCompleted", true);
       onHide();
       onNavigateTab(targetTab);
     };
@@ -579,7 +581,7 @@
               style: { width: "32px", height: "32px", borderRadius: "6px" }
             }),
             React.createElement("div", null,
-              React.createElement("span", { className: "lm-wizard-badge" }, `STEP ${step} OF 5`),
+              React.createElement("span", { className: "lm-wizard-badge" }, step === 0 ? "WELCOME" : `STEP ${step} OF 5`),
               React.createElement("h2", null, "Watchtower Guided Setup")
             )
           ),
@@ -590,7 +592,7 @@
             title: "Close Setup Wizard"
           }, "✕") : null
         ),
-        React.createElement("div", { className: "lm-wizard-stepper" },
+        step > 0 && React.createElement("div", { className: "lm-wizard-stepper" },
           stepsList.map(s => {
             const isDone = step > s.num;
             const isCurrent = step === s.num;
@@ -606,6 +608,41 @@
           })
         ),
         React.createElement("div", { className: "lm-wizard-body" },
+          step === 0 && React.createElement("div", { className: "lm-wizard-pane", style: { textAlign: "center", padding: "1rem 0.5rem" } },
+            React.createElement("img", {
+              src: "/plugin/librarymanager/assets/watchtower-icon.png",
+              alt: "Watchtower",
+              style: { width: "72px", height: "72px", borderRadius: "14px", marginBottom: "1rem", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }
+            }),
+            React.createElement("h2", { style: { fontSize: "1.5rem", color: "#ffffff", marginBottom: "0.45rem" } }, "Welcome to Watchtower"),
+            React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "520px", margin: "0 auto 1.4rem auto" } },
+              "Your automated scene library manager, sidecar synchronizer, and filesystem monitor for Stash."),
+            React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "0.65rem", textAlign: "left", maxWidth: "520px", margin: "0 auto 1.4rem auto" } },
+              React.createElement("div", { className: "lm-wizard-feature-chip" },
+                React.createElement("span", { style: { fontSize: "1.25rem" } }, "🛡️"),
+                React.createElement("div", null,
+                  React.createElement("strong", null, "Zero-Collision Safeguards"),
+                  React.createElement("p", null, "Safely renames video files, artwork, and subtitles with built-in collision prevention.")
+                )
+              ),
+              React.createElement("div", { className: "lm-wizard-feature-chip" },
+                React.createElement("span", { style: { fontSize: "1.25rem" } }, "⚡"),
+                React.createElement("div", null,
+                  React.createElement("strong", null, "External Move Reconciliation"),
+                  React.createElement("p", null, "Tracks files moved or renamed outside Stash and syncs paths without losing tags or metadata.")
+                )
+              ),
+              React.createElement("div", { className: "lm-wizard-feature-chip" },
+                React.createElement("span", { style: { fontSize: "1.25rem" } }, "📥"),
+                React.createElement("div", null,
+                  React.createElement("strong", null, "Automated Downloads Ingest"),
+                  React.createElement("p", null, "Monitors download folders and automatically imports completed videos into Stash.")
+                )
+              )
+            ),
+            React.createElement("p", { style: { fontSize: "0.82rem", color: "var(--text-muted, #aab3c5)", margin: 0 } },
+              "⏱️ Guided setup takes about 2 minutes.")
+          ),
           step === 1 && React.createElement("div", { className: "lm-wizard-pane" },
             React.createElement("h3", null, "1. Verify Stash Library Storage Roots"),
             React.createElement("p", { className: "lm-wizard-desc" },
@@ -771,12 +808,18 @@
           )
         ),
         React.createElement("footer", { className: "lm-wizard-footer" },
-          step > 1 && step < 5 && React.createElement("button", {
+          step === 0 && React.createElement("button", {
+            type: "button",
+            className: "btn btn-primary",
+            style: { marginLeft: "auto", padding: "0.55rem 1.4rem", fontSize: "0.95rem", fontWeight: 700, background: "#218657", borderColor: "#2da76f" },
+            onClick: () => setStep(1)
+          }, "🚀 Get Started ➔"),
+          step > 0 && step < 5 && React.createElement("button", {
             type: "button",
             className: "btn btn-secondary",
             onClick: () => setStep(step - 1)
-          }, "⬅ Back"),
-          step < 5 && React.createElement("button", {
+          }, step === 1 ? "⬅ Back to Welcome" : "⬅ Back"),
+          step > 0 && step < 5 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
             style: { marginLeft: "auto" },
@@ -792,7 +835,6 @@
       )
     );
 
-    // Mount to document.body via Portal so it is a true top-level popup over everything
     return (window.ReactDOM && typeof window.ReactDOM.createPortal === "function")
       ? window.ReactDOM.createPortal(modalElement, document.body)
       : modalElement;
@@ -801,7 +843,15 @@
   function Dashboard() {
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
-    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(true);
+    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(false);
+
+    React.useEffect(() => {
+      // Gentle entrance delay on load so page renders smoothly
+      const timer = window.setTimeout(() => {
+        setShowOnboardingWizard(true);
+      }, 250);
+      return () => window.clearTimeout(timer);
+    }, []);
     const [onboardingBannerDismissed, setOnboardingBannerDismissed] = React.useState(false);
     const [config, setConfig] = React.useState({});
     const [busy, setBusy] = React.useState("");

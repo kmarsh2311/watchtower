@@ -2331,3 +2331,25 @@ a.lm-activity-scene-pill:hover {
     display: none !important;
   }
 }
+
+.lm-wizard-feature-chip {
+  display: flex !important;
+  align-items: flex-start !important;
+  gap: 0.85rem !important;
+  padding: 0.75rem 1rem !important;
+  background: rgba(0, 0, 0, 0.28) !important;
+  border: 1px solid rgba(140, 155, 185, 0.18) !important;
+  border-radius: 0.45rem !important;
+}
+.lm-wizard-feature-chip strong {
+  display: block !important;
+  color: #ffffff !important;
+  font-size: 0.9rem !important;
+  margin-bottom: 0.15rem !important;
+}
+.lm-wizard-feature-chip p {
+  margin: 0 !important;
+  color: var(--text-muted, #aab3c5) !important;
+  font-size: 0.82rem !important;
+  line-height: 1.35 !important;
+}
