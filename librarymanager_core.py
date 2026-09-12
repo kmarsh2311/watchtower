@@ -13,6 +13,7 @@ import subprocess
 import shutil
 import glob
 import time
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -303,32 +304,59 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Per-process sentinel: schema migrations run exactly once per database path,
+# even when connect() is called many times by a long-running monitor.
+_schema_applied: set[str] = set()
+_schema_lock = threading.Lock()
+
+
+def _safe_alter(connection: "sqlite3.Connection", table: str, column: str, ddl: str) -> None:
+    """Apply an ALTER TABLE only if the column is absent; silently handles concurrent-process races."""
+    existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    if column in existing:
+        return
+    try:
+        connection.execute(ddl)
+        connection.commit()
+    except sqlite3.OperationalError as exc:
+        # Another process added the column between our check and our execute — harmless.
+        if "duplicate column" not in str(exc).lower():
+            raise
+
+
+def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> None:
+    """Run CREATE TABLE / ALTER TABLE migrations exactly once per process per database."""
+    key = str(database_path.resolve())
+    if key in _schema_applied:
+        return
+    with _schema_lock:
+        if key in _schema_applied:
+            return  # Another thread beat us here
+        connection.executescript(SCHEMA)
+        _safe_alter(connection, "files", "scene_metadata_json",
+                    "ALTER TABLE files ADD COLUMN scene_metadata_json TEXT NOT NULL DEFAULT '{}'")
+        _safe_alter(connection, "filename_state", "manual_studio",
+                    "ALTER TABLE filename_state ADD COLUMN manual_studio TEXT")
+        _safe_alter(connection, "filename_state", "manual_performers_json",
+                    "ALTER TABLE filename_state ADD COLUMN manual_performers_json TEXT NOT NULL DEFAULT '[]'")
+        _safe_alter(connection, "incoming_files", "attempts",
+                    "ALTER TABLE incoming_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+        _safe_alter(connection, "incoming_files", "settle_seconds",
+                    "ALTER TABLE incoming_files ADD COLUMN settle_seconds INTEGER NOT NULL DEFAULT 300")
+        _safe_alter(connection, "inventory_runs", "stash_scene_count",
+                    "ALTER TABLE inventory_runs ADD COLUMN stash_scene_count INTEGER NOT NULL DEFAULT 0")
+        connection.execute(
+            """UPDATE inventory_runs SET stash_scene_count=(SELECT COUNT(DISTINCT scene_id) FROM files)
+               WHERE status='complete' AND stash_scene_count=0"""
+        )
+        connection.commit()
+        _schema_applied.add(key)
+
+
 def connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path, timeout=30)
     connection.row_factory = sqlite3.Row
-    connection.executescript(SCHEMA)
-    file_columns = {row[1] for row in connection.execute("PRAGMA table_info(files)")}
-    if "scene_metadata_json" not in file_columns:
-        connection.execute("ALTER TABLE files ADD COLUMN scene_metadata_json TEXT NOT NULL DEFAULT '{}'")
-        connection.commit()
-    state_columns = {row[1] for row in connection.execute("PRAGMA table_info(filename_state)")}
-    if "manual_studio" not in state_columns:
-        connection.execute("ALTER TABLE filename_state ADD COLUMN manual_studio TEXT")
-    if "manual_performers_json" not in state_columns:
-        connection.execute("ALTER TABLE filename_state ADD COLUMN manual_performers_json TEXT NOT NULL DEFAULT '[]'")
-    incoming_columns = {row[1] for row in connection.execute("PRAGMA table_info(incoming_files)")}
-    if "attempts" not in incoming_columns:
-        connection.execute("ALTER TABLE incoming_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
-    if "settle_seconds" not in incoming_columns:
-        connection.execute("ALTER TABLE incoming_files ADD COLUMN settle_seconds INTEGER NOT NULL DEFAULT 300")
-    inventory_columns = {row[1] for row in connection.execute("PRAGMA table_info(inventory_runs)")}
-    if "stash_scene_count" not in inventory_columns:
-        connection.execute("ALTER TABLE inventory_runs ADD COLUMN stash_scene_count INTEGER NOT NULL DEFAULT 0")
-    connection.execute(
-        """UPDATE inventory_runs SET stash_scene_count=(SELECT COUNT(DISTINCT scene_id) FROM files)
-           WHERE status='complete' AND stash_scene_count=0"""
-    )
-    connection.commit()
+    _ensure_schema(connection, database_path)
     return connection
 
 
@@ -728,10 +756,22 @@ def release_worker_schedule(database_path: Path):
         connection.close()
 
 
+# Renames left in 'processing' longer than this are considered orphaned
+# (e.g. monitor was force-quit mid-rename) and are reset to 'pending'.
+_STALE_PROCESSING_SECONDS = 90
+
+
 def claim_due_rename(database_path: Path, now_timestamp: float):
     connection = connect(database_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        # Recover any renames stranded in 'processing' by a previously crashed worker.
+        stale_cutoff = now_timestamp - _STALE_PROCESSING_SECONDS
+        connection.execute(
+            """UPDATE rename_queue SET status='pending'
+               WHERE status='processing' AND enqueued_at <= ?""",
+            (stale_cutoff,),
+        )
         row = connection.execute(
             "SELECT scene_id FROM rename_queue WHERE status='pending' AND available_at<=? ORDER BY available_at LIMIT 1",
             (now_timestamp,),
@@ -1932,6 +1972,7 @@ def generate_video_contact_sheet(
     with tempfile.TemporaryDirectory(prefix="watchtower_csm_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
 
+        _csm_errors: list[str] = []
         for i, ts in enumerate(timestamps):
             frame_path = tmp_dir / f"frame_{i:03d}.jpg"
             cmd = taskpolicy_prefix + [
@@ -1943,7 +1984,12 @@ def generate_video_contact_sheet(
                 "-vframes", "1",
                 str(frame_path)
             ]
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            _fr = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            if _fr.returncode != 0 and not frame_path.is_file():
+                _csm_errors.append(
+                    f"frame {i} @{ts:.1f}s: ffmpeg rc={_fr.returncode} "
+                    + _fr.stderr.decode(errors="replace").strip()[-100:]
+                )
 
             if frame_path.is_file():
                 ts_str = format_csm_duration(ts)
@@ -1957,11 +2003,18 @@ def generate_video_contact_sheet(
                     "-annotate", "+12+12", ts_str,
                     str(frame_path)
                 ]
-                subprocess.run(stamp_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                _sr = subprocess.run(stamp_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                if _sr.returncode != 0:
+                    _csm_errors.append(
+                        f"stamp {i}: magick rc={_sr.returncode} "
+                        + _sr.stderr.decode(errors="replace").strip()[-80:]
+                    )
 
         frames = sorted(glob.glob(str(tmp_dir / "frame_*.jpg")))
         if len(frames) < max(2, total_frames // 2):
-            return {"status": "error", "error": f"Failed to extract enough frames ({len(frames)}/{total_frames})"}
+            err_detail = "; ".join(_csm_errors[:3]) if _csm_errors else "unknown"
+            return {"status": "error",
+                    "error": f"Failed to extract enough frames ({len(frames)}/{total_frames}): {err_detail}"}
 
         # Montage assembly
         temp_out = tmp_dir / "montage.jpg"
@@ -1975,10 +2028,12 @@ def generate_video_contact_sheet(
             "-strip", "-quality", "85",
             str(temp_out)
         ]
-        subprocess.run(montage_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _mr = subprocess.run(montage_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
         if not temp_out.is_file():
-            return {"status": "error", "error": "Montage creation failed"}
+            _merr = _mr.stderr.decode(errors="replace").strip()[-200:]
+            return {"status": "error",
+                    "error": f"Montage creation failed: {_merr or 'unknown magick error'}"}
 
         # Banner addition
         if include_banner:
@@ -2010,7 +2065,7 @@ def generate_video_contact_sheet(
                 "-append", "-strip", "-quality", "85",
                 str(temp_out)
             ]
-            subprocess.run(banner_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(banner_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
             footer_cmd = taskpolicy_prefix + [
                 magick_bin, str(temp_out),
@@ -2018,7 +2073,7 @@ def generate_video_contact_sheet(
                 "-append", "-strip", "-quality", "85",
                 str(temp_out)
             ]
-            subprocess.run(footer_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(footer_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
         shutil.copy2(temp_out, dest_path)
 
