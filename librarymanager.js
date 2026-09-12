@@ -640,8 +640,8 @@
       {
         icon: "🖼️",
         title: "Contact Sheet Previews",
-        short: "Creates multi-frame contact sheets (CSM) automatically.",
-        details: "Generates multi-frame storyboard previews with customizable grid layouts, embedded timestamps, and lossless compression.",
+        short: "Saves video storyboard sheets in video folders (not in Stash).",
+        details: "Generates multi-frame storyboard sheets (.jpg) saved directly to disk in each video's folder. Because they are saved as companion files on your drive, they never clutter your Stash image database.",
         side: "left"
       },
       {
@@ -937,7 +937,7 @@
           step === 6 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
             React.createElement("h3", null, "6. Contact Sheet Previews (CSM)"),
             React.createElement("p", { className: "lm-wizard-desc", style: { marginBottom: "12px" } },
-              "Watchtower can automatically generate high-resolution video storyboard contact sheets when new scenes are indexed or added to Stash."),
+              "Watchtower can generate high-resolution video storyboard sheets and save them directly on disk in each video's folder (stored as companion files, not added to Stash's image library)."),
             React.createElement("div", {
               className: "lm-wizard-option-card",
               style: {
@@ -952,7 +952,7 @@
                   React.createElement("strong", { style: { fontSize: "0.95rem" } }, "Enable Automatic Contact Sheets?"),
                   React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.83rem" } },
                     config.generateContactSheets === true
-                      ? "Active — Storyboard contact sheets will be generated automatically for new videos."
+                      ? "Active — Contact sheets (.jpg) will be saved in each video's folder on disk for quick desktop previewing."
                       : "OFF by default — Generate contact sheets manually on demand, or enable whenever ready.")
                 ),
                 React.createElement("button", {
@@ -971,9 +971,9 @@
               className: "lm-wizard-callout",
               style: { background: "rgba(52, 86, 164, 0.15)", borderColor: "rgba(77, 113, 199, 0.4)" }
             },
-              React.createElement("strong", { style: { color: "#79a2ff", display: "block", marginBottom: "4px" } }, "🖼️ Customize in Contact Sheets (CSM)"),
+              React.createElement("strong", { style: { color: "#79a2ff", display: "block", marginBottom: "4px" } }, "📁 Saved to Video Folders (Zero Stash Image Clutter)"),
               React.createElement("p", { style: { margin: 0, fontSize: "0.83rem", color: "#ccd6ea", lineHeight: 1.45 } },
-                "Grid layouts (e.g. 4x4, 5x4), header banners with video codecs/duration, auto-adjustment for vertical 9:16 phone videos, and custom generator scripts can be configured anytime in the Contact Sheets tab.")
+                "Contact sheets are saved directly beside the video file on your drive so you can inspect scenes in Finder or Explorer. They are managed as companion files and are not imported into Stash's image database. Grid layouts (e.g. 4x4, 5x4) and banner styling can be customized in the Contact Sheets tab.")
             )
           ),
           step === 7 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}`, style: { textAlign: "center", padding: "1.4rem 0.5rem" } },
