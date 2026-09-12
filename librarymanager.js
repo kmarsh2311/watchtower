@@ -138,7 +138,7 @@
 
   const sections = [
     ["overview", "Overview"],
-    ["manage", "File Management"],
+    ["manage", "Filename Management"],
     ["monitor", "Filesystem Monitor"],
     ["incoming", "Incoming Downloads"],
     ["csm", "Contact Sheets (CSM)"],
@@ -748,7 +748,7 @@
         { label: "Alerts", key: "macNotifications", active: config.macNotifications === true, state: config.macNotifications === true ? "ON" : "OFF", help: "Sends system desktop notifications for important warnings and failures", tab: "advanced" }
       ];
 
-      return React.createElement("div", { className: "lm-switch-indicators", title: "File Management feature switches (click to configure)" },
+      return React.createElement("div", { className: "lm-switch-indicators", title: "Filename Management feature switches (click to configure)" },
         switches.map(sw => React.createElement("button", {
           key: sw.key,
           type: "button",
