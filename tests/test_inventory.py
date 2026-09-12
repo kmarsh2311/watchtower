@@ -264,23 +264,23 @@ class InventoryTests(unittest.TestCase):
         }
         # Title only contains performers without punctuation
         self.assertEqual(
-            _proposed_stem("Silas Brooks Valentino Aston", None, ["Silas Brooks", "Valentino Aston"], options),
-            "Silas Brooks, Valentino Aston",
+            _proposed_stem("Performer One Performer Two", None, ["Performer One", "Performer Two"], options),
+            "Performer One, Performer Two",
         )
         # Title contains performers with "and"
         self.assertEqual(
-            _proposed_stem("Silas Brooks and Valentino Aston", None, ["Silas Brooks", "Valentino Aston"], options),
-            "Silas Brooks, Valentino Aston",
+            _proposed_stem("Performer One and Performer Two", None, ["Performer One", "Performer Two"], options),
+            "Performer One, Performer Two",
         )
         # Title contains performers with "&" and studio
         self.assertEqual(
-            _proposed_stem("Silas Brooks & Valentino Aston", "OnlyFans", ["Silas Brooks", "Valentino Aston"], options),
-            "OnlyFans - Silas Brooks, Valentino Aston",
+            _proposed_stem("Performer One & Performer Two", "Studio Alpha", ["Performer One", "Performer Two"], options),
+            "Studio Alpha - Performer One, Performer Two",
         )
         # Title has real name + performers
         self.assertEqual(
-            _proposed_stem("Morning Visit - Silas Brooks & Valentino Aston", "OnlyFans", ["Silas Brooks", "Valentino Aston"], options),
-            "Morning Visit - OnlyFans - Silas Brooks, Valentino Aston",
+            _proposed_stem("Morning Visit - Performer One & Performer Two", "Studio Alpha", ["Performer One", "Performer Two"], options),
+            "Morning Visit - Studio Alpha - Performer One, Performer Two",
         )
 
     def test_proposed_stem_granular_rules(self):
@@ -308,15 +308,15 @@ class InventoryTests(unittest.TestCase):
         # 4. cleanPerformerOnlyTitles=False with stripPerformersFromTitle=False (preserves performer-only title completely)
         opts_no_dedup = {'cleanPerformerOnlyTitles': False, 'stripPerformersFromTitle': False}
         self.assertEqual(
-            _proposed_stem('Silas Brooks and Valentino Aston', None, ['Silas Brooks', 'Valentino Aston'], opts_no_dedup),
-            'Silas Brooks and Valentino Aston - Silas Brooks, Valentino Aston'
+            _proposed_stem('Performer One and Performer Two', None, ['Performer One', 'Performer Two'], opts_no_dedup),
+            'Performer One and Performer Two - Performer One, Performer Two'
         )
 
         # 4b. Real title with performer name: strips performer from title when stripPerformersFromTitle=True
         opts_strip_perf = {'stripPerformersFromTitle': True}
         self.assertEqual(
-            _proposed_stem('Silas Brooks In The Summer', None, ['Silas Brooks'], opts_strip_perf),
-            'The Summer - Silas Brooks'
+            _proposed_stem('Performer One In The Summer', None, ['Performer One'], opts_strip_perf),
+            'The Summer - Performer One'
         )
 
         # 5. stripStudioFromTitle=False (keeps embedded studio in title)
@@ -326,16 +326,16 @@ class InventoryTests(unittest.TestCase):
             'Studio Name Episode 1 - Studio Name - Performer A'
         )
 
-        # 8. Partially tagged performers consuming attached conjunction (e.g. Scene 5555 DBB Benvi & Ty Roderick)
+        # 8. Partially tagged performers consuming attached conjunction (e.g. Prefix PerformerB & PerformerA)
         self.assertEqual(
-            _proposed_stem('DBB Benvi & Ty Roderick Born Slave Ch3', 'Dream Boy Bondage', ['Ty Roderick'], {}),
-            'DBB Benvi Born Slave Ch3 - Dream Boy Bondage - Ty Roderick'
+            _proposed_stem('Prefix PerformerB & PerformerA Episode 3', 'Example Studio', ['PerformerA'], {}),
+            'Prefix PerformerB Episode 3 - Example Studio - PerformerA'
         )
 
-        # 7. Leftover conjunction with hyphen (e.g. 8TB Devin Lewis & Jimmy Andrews - Wet & Wild FHD)
+        # 7. Leftover conjunction with hyphen (e.g. Prefix PerformerOne & PerformerTwo - Scene Title FHD)
         self.assertEqual(
-            _proposed_stem('8TB Devin Lewis & Jimmy Andrews - Wet & Wild FHD', '8teenBoy', ['Jimmy Andrews', 'Devin Lewis'], {}),
-            '8TB - Wet & Wild FHD - 8teenBoy - Jimmy Andrews, Devin Lewis'
+            _proposed_stem('Prefix PerformerOne & PerformerTwo - Scene Title FHD', 'Example Studio', ['PerformerTwo', 'PerformerOne'], {}),
+            'Prefix - Scene Title FHD - Example Studio - PerformerTwo, PerformerOne'
         )
 
         # 6. stripPerformersFromTitle=False (keeps embedded performer in title)
@@ -625,18 +625,18 @@ class InventoryTests(unittest.TestCase):
     def test_filename_preview_replaces_compact_bracketed_studio_with_display_name(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            video = root / "[mydirtiestfantasy] Scene.mp4"
+            video = root / "[examplestudio] Scene.mp4"
             video.write_bytes(b"video")
             database = root / "inventory.sqlite3"
-            scene = {"id": "10", "title": "", "studio": {"name": "My Dirtiest Fantasy"},
+            scene = {"id": "10", "title": "", "studio": {"name": "Example Studio"},
                      "performers": [], "files": [{"id": "20", "path": str(video), "size": 5}]}
             inventory(database, [scene])
             _, first = preview_safe_filenames(database)
             self.assertEqual(first[0]["base_stem"], "Scene")
-            self.assertTrue(first[0]["proposed_path"].endswith("Scene - My Dirtiest Fantasy.mp4"))
+            self.assertTrue(first[0]["proposed_path"].endswith("Scene - Example Studio.mp4"))
             # Previously persisted filename bases are cleaned as well.
             with sqlite3.connect(database) as connection:
-                connection.execute("UPDATE filename_state SET base_stem='[mydirtiestfantasy] Scene'")
+                connection.execute("UPDATE filename_state SET base_stem='[examplestudio] Scene'")
             _, second = preview_safe_filenames(database)
             self.assertEqual(second[0]["base_stem"], "Scene")
 
@@ -670,7 +670,7 @@ class InventoryTests(unittest.TestCase):
             video.write_bytes(b"video")
             database = root / "inventory.sqlite3"
             scene = {"id": "10", "title": "", "studio": None,
-                     "performers": [{"id": "1", "name": "Aaron Aurora"}],
+                     "performers": [{"id": "1", "name": "Alex Morgan"}],
                      "files": [{"id": "20", "path": str(video), "size": 5}]}
             inventory(database, [scene])
 
@@ -681,7 +681,7 @@ class InventoryTests(unittest.TestCase):
                 video = destination
                 return True
 
-            result = apply_manual_filename(database, "10", "Test Big Bunny (Aaron Aurora).mp4", fake_move)
+            result = apply_manual_filename(database, "10", "Test Big Bunny (Alex Morgan).mp4", fake_move)
             self.assertEqual(result["status"], "renamed")
             scene["performers"] = []
             scene["files"][0]["path"] = str(video)

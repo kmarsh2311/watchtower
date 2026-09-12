@@ -2816,7 +2816,7 @@
             React.createElement("h3", { key: "h3_1" }, "Active Hooks & Behaviors"),
             React.createElement("ul", { key: "ul1" },
               React.createElement("li", null, React.createElement("strong", null, "Scene.Update.Post: "), "Fires when saving a scene title, studio, performers, date, or tags in the Stash UI, scrapers, or FastTag."),
-              React.createElement("li", null, React.createElement("strong", null, "Performer.Update.Post: "), "When you rename a performer entity or fix a typo in the Performers tab (e.g. \"Ty Roderik\" -> \"Ty Roderick\"), Watchtower automatically queries all scenes containing that performer and queues them for background renaming."),
+              React.createElement("li", null, React.createElement("strong", null, "Performer.Update.Post: "), "When you rename a performer entity or fix a typo in the Performers tab (e.g. \"Jane Dowe\" -> \"Jane Doe\"), Watchtower automatically queries all scenes containing that performer and queues them for background renaming."),
               React.createElement("li", null, React.createElement("strong", null, "Studio.Update.Post: "), "When you rename a studio in the Studios tab, Watchtower automatically updates filenames for all associated scenes.")
             ),
             React.createElement("h3", { key: "h3_2" }, "FastTag & Bulk Edit Integration"),
