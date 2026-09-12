@@ -555,7 +555,7 @@
           }
         }
         setNotice("Pruning orphaned records in Stash...");
-        const data = await gql(`mutation Clean { metadataClean(input: {}) }`);
+        const data = await gql(`mutation Clean { metadataClean(input: { dryRun: false }) }`);
         if (data?.metadataClean) {
           await waitForJob(data.metadataClean);
         }
