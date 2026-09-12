@@ -536,10 +536,25 @@
     }, [tab]);
 
     async function handleCleanStash() {
-      if (!window.confirm("Run Stash Clean? This will safely remove database references for missing files that no longer exist on disk. No media files will ever be deleted.")) return;
+      if (!window.confirm("Run Safe Auto-Clean? Any verified renamed files will be safely linked to their scenes first to preserve all metadata, then dead references will be pruned.")) return;
       setBusy("clean"); setError("");
       try {
-        setNotice("Running Stash Clean to prune missing records...");
+        const verifiedPaths = [];
+        for (const rep of (reports || [])) {
+          for (const row of (rep.rows || [])) {
+            if (row.confidence === "verified" && row.candidate_path && !verifiedPaths.includes(row.candidate_path)) {
+              verifiedPaths.push(row.candidate_path);
+            }
+          }
+        }
+        if (verifiedPaths.length > 0) {
+          setNotice(`Reconciling ${verifiedPaths.length} verified renamed file(s) first to preserve metadata...`);
+          const scanRes = await gql(`mutation Scan($paths: [String!]) { metadataScan(input: { paths: $paths }) }`, { paths: verifiedPaths });
+          if (scanRes?.metadataScan) {
+            await waitForJob(scanRes.metadataScan);
+          }
+        }
+        setNotice("Pruning orphaned records in Stash...");
         const data = await gql(`mutation Clean { metadataClean(input: {}) }`);
         if (data?.metadataClean) {
           await waitForJob(data.metadataClean);
@@ -551,9 +566,9 @@
         if (findJob) await waitForJob(findJob);
         await loadReports();
         await refresh();
-        setNotice("Clean complete! Orphaned records were pruned and reports refreshed.");
+        setNotice("Resolution complete! Verified files were re-linked and dead records were cleanly pruned.");
       } catch (err) {
-        setError(`Clean failed: ${err.message || err}`);
+        setError(`Safe clean failed: ${err.message || err}`);
       } finally {
         setBusy("");
       }
@@ -1926,7 +1941,7 @@
         React.createElement(React.Fragment, null,
           React.createElement("div", { className: "lm-actions", style: { display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" } },
             React.createElement(Button, { variant: "secondary", onClick: loadReports, disabled: !!busy }, "Refresh Reports"),
-            React.createElement(Button, { variant: "secondary", onClick: handleCleanStash, disabled: !!busy }, busy === "clean" ? "Cleaning Stash…" : "🧹 Run Stash Clean (Prune Phantoms)")),
+            React.createElement(Button, { variant: "secondary", onClick: handleCleanStash, disabled: !!busy }, busy === "clean" ? "Resolving & Cleaning…" : "⚡ Safe Auto-Resolve (Reconcile & Clean)")),
           React.createElement("div", { className: "lm-report-list" },
             reports.map(report =>
               React.createElement("details", { key: report.name, className: "lm-report", open: report.available },
