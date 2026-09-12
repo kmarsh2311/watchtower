@@ -535,6 +535,54 @@
       return () => { stopped = true; window.clearInterval(pollTimer); window.clearInterval(clockTimer); };
     }, [tab]);
 
+    async function handleCleanStash() {
+      if (!window.confirm("Run Stash Clean? This will safely remove database references for missing files that no longer exist on disk. No media files will ever be deleted.")) return;
+      setBusy("clean"); setError("");
+      try {
+        setNotice("Running Stash Clean to prune missing records...");
+        const data = await gql(`mutation Clean { metadataClean(input: {}) }`);
+        if (data?.metadataClean) {
+          await waitForJob(data.metadataClean);
+        }
+        setNotice("Updating Watchtower reports...");
+        const invJob = await runTask(readOnlyTasks.inventory);
+        if (invJob) await waitForJob(invJob);
+        const findJob = await runTask(readOnlyTasks.find);
+        if (findJob) await waitForJob(findJob);
+        await loadReports();
+        await refresh();
+        setNotice("Clean complete! Orphaned records were pruned and reports refreshed.");
+      } catch (err) {
+        setError(`Clean failed: ${err.message || err}`);
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleReconcilePath(candidatePath) {
+      if (!candidatePath) return;
+      setBusy("reconcile-item"); setError("");
+      try {
+        setNotice(`Scanning ${candidatePath.split("/").pop()} in Stash...`);
+        const data = await gql(`mutation Scan($paths: [String!]) { metadataScan(input: { paths: $paths }) }`, { paths: [candidatePath] });
+        if (data?.metadataScan) {
+          await waitForJob(data.metadataScan);
+        }
+        setNotice("Updating Watchtower reports...");
+        const invJob = await runTask(readOnlyTasks.inventory);
+        if (invJob) await waitForJob(invJob);
+        const findJob = await runTask(readOnlyTasks.find);
+        if (findJob) await waitForJob(findJob);
+        await loadReports();
+        await refresh();
+        setNotice(`Successfully reconciled ${candidatePath.split("/").pop()} in Stash!`);
+      } catch (err) {
+        setError(`Reconciliation failed: ${err.message || err}`);
+      } finally {
+        setBusy("");
+      }
+    }
+
     async function task(name, dangerous, afterTab, showResults) {
       if (dangerous && !window.confirm(`Run “${name}”? Review the preview first. This can rename files.`)) return;
       setBusy(name); setError("");
@@ -1876,8 +1924,9 @@
           React.createElement("small", null, "Automatically synchronizes video filenames whenever scene, performer, or studio metadata is updated."))),
       reports && reports.length ? panel("Diagnostic Results", "Technical diagnostic scan output.",
         React.createElement(React.Fragment, null,
-          React.createElement("div", { className: "lm-actions" },
-            React.createElement(Button, { variant: "secondary", onClick: loadReports, disabled: busy === "reports" }, "Refresh Reports")),
+          React.createElement("div", { className: "lm-actions", style: { display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" } },
+            React.createElement(Button, { variant: "secondary", onClick: loadReports, disabled: !!busy }, "Refresh Reports"),
+            React.createElement(Button, { variant: "secondary", onClick: handleCleanStash, disabled: !!busy }, busy === "clean" ? "Cleaning Stash…" : "🧹 Run Stash Clean (Prune Phantoms)")),
           React.createElement("div", { className: "lm-report-list" },
             reports.map(report =>
               React.createElement("details", { key: report.name, className: "lm-report", open: report.available },
@@ -1888,11 +1937,30 @@
                 report.available ? React.createElement("div", { className: "lm-report-body" },
                   React.createElement("div", { className: "lm-report-summary" }, Object.entries(report.summary || {}).map(([key, value]) =>
                     React.createElement("span", { key }, React.createElement("small", null, readableKey(key)), React.createElement("strong", null, String(value ?? "—"))))),
-                  report.rows.length ? React.createElement("div", { className: "lm-report-rows" }, report.rows.map((row, index) =>
-                    React.createElement("details", { key: index },
-                      React.createElement("summary", null, row.status || row.confidence || row.action || row.recommendation || `Finding ${index + 1}`,
-                        row.scene_id && React.createElement("span", { className: "scene-card lm-scene-pill-card", onClick: e => e.stopPropagation() }, SceneLink(row.scene_id, `Scene ${row.scene_id}`, "lm-activity-scene-pill"))),
-                      React.createElement("pre", null, JSON.stringify(row, null, 2))))) :
+                  report.rows.length ? React.createElement("div", { className: "lm-report-rows" }, report.rows.map((row, index) => {
+                    const isVerified = row.confidence === "verified" && row.candidate_path;
+                    const isConflict = row.confidence === "conflict";
+                    return React.createElement("details", { key: index },
+                      React.createElement("summary", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                        React.createElement("div", { style: { display: "inline-flex", alignItems: "center", gap: "8px" } },
+                          React.createElement("span", { className: `lm-badge ${isVerified ? "ok" : isConflict ? "warn" : ""}` }, row.status || row.confidence || row.action || row.recommendation || `Finding ${index + 1}`),
+                          row.scene_id && React.createElement("span", { className: "scene-card lm-scene-pill-card", onClick: e => e.stopPropagation() }, SceneLink(row.scene_id, `Scene ${row.scene_id}`, "lm-activity-scene-pill")),
+                          React.createElement("span", { style: { fontSize: "0.82rem", color: "#8b949e", maxWidth: "450px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                            row.candidate_path ? row.candidate_path.split("/").pop() : (row.reason || ""))
+                        ),
+                        isVerified ? React.createElement(Button, {
+                          variant: "primary",
+                          style: { fontSize: "0.75rem", padding: "3px 10px" },
+                          disabled: !!busy,
+                          onClick: async (e) => {
+                            e.stopPropagation();
+                            await handleReconcilePath(row.candidate_path);
+                          }
+                        }, busy === "reconcile-item" ? "Reconciling…" : "⚡ Reconcile in Stash") : null
+                      ),
+                      React.createElement("pre", null, JSON.stringify(row, null, 2))
+                    );
+                  })) :
                     React.createElement("p", { className: "lm-empty" }, "This report contains no individual findings."),
                   React.createElement("small", { className: "lm-report-file" }, `Export file: ${report.filename}`)) :
                   React.createElement("p", { className: "lm-empty" }, report.error || "Run the corresponding tool under Advanced Diagnostic Tools to create this report."))))))
