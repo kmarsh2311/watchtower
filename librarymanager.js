@@ -752,6 +752,15 @@
       if (row.category === "filesystem" && ["external move", "moved"].includes(row.action))
         return `MOVED  ${basename(row.old_path)}  →  ${basename(row.new_path)}`;
       if (row.category === "rename" && row.status === "skipped") return `NO RENAME NEEDED  ${row.scene_id ? `Scene ${row.scene_id}` : "metadata unchanged"}`;
+      if (row.category === "companion") {
+        if (row.action.includes("contact sheet updated") || row.action.includes("sheet updated"))
+          return `SHEET UPDATED  ${basename(row.new_path || row.old_path)}`;
+        if (row.action.includes("contact sheet") || row.action.includes("sheet"))
+          return `SHEET GENERATED  ${basename(row.new_path || row.old_path)}`;
+        if (row.action.includes("move") || row.action.includes("rename"))
+          return `COMPANION MOVED  ${basename(row.new_path || row.old_path)}`;
+        return `PAIRED  ${basename(row.new_path || row.old_path)}`;
+      }
       return `${readableKey(row.status).toUpperCase()}  ${basename(row.new_path || row.old_path)}`;
     }
 
@@ -1165,6 +1174,16 @@
                 badgeText = "RENAMED";
               } else if (row.category === "reconciliation" && row.status === "updated") {
                 badgeText = "RECONNECTED";
+              } else if (row.category === "companion") {
+                if (row.action.includes("contact sheet updated") || row.action.includes("sheet updated")) {
+                  badgeText = "SHEET UPDATED";
+                } else if (row.action.includes("contact sheet") || row.action.includes("sheet")) {
+                  badgeText = "SHEET GENERATED";
+                } else if (row.action.includes("move") || row.action.includes("rename")) {
+                  badgeText = "COMPANION MOVED";
+                } else {
+                  badgeText = "PAIRED";
+                }
               } else if (row.category === "config") {
                 badgeClass = "config";
                 badgeText = "CONFIG";
