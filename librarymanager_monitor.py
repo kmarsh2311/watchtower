@@ -5,9 +5,11 @@ import argparse
 import logging
 import json
 import os
+import sys
 import signal
 import sqlite3
 import subprocess
+import shutil
 import threading
 import queue
 import time
