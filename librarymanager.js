@@ -468,7 +468,42 @@
     );
   }
 
+  function playWelcomeChime() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      if (ctx.state === "suspended") {
+        ctx.resume().catch(() => {});
+      }
+      const now = ctx.currentTime;
+      // Soft, high-end harmonic chime: D5 (587.33Hz), A5 (880Hz), D6 (1174.66Hz)
+      const freqs = [587.33, 880.0, 1174.66];
+      freqs.forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, now + idx * 0.07);
+        gain.gain.setValueAtTime(0, now + idx * 0.07);
+        gain.gain.linearRampToValueAtTime(0.035, now + idx * 0.07 + 0.035);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.07 + 1.2);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(now + idx * 0.07);
+        osc.stop(now + idx * 0.07 + 1.25);
+      });
+    } catch (_) {}
+  }
+
   function OnboardingWizardModal({ show, onHide, data, config, updateSetting, updateSettings, operation, refresh, onNavigateTab }) {
+    React.useEffect(() => {
+      if (show) {
+        const chimeTimer = window.setTimeout(() => {
+          playWelcomeChime();
+        }, 150);
+        return () => window.clearTimeout(chimeTimer);
+      }
+    }, [show]);
     // step 0 is the Welcome Screen, steps 1..4 are setup, step 5 is complete
     const [step, setStep] = React.useState(0);
     const [indexing, setIndexing] = React.useState(false);

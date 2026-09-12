@@ -2086,7 +2086,7 @@ a.lm-activity-scene-pill:hover {
   color: #ffffff;
 }
 
-/* Onboarding Wizard Modal Overlay & Graceful Animations */
+/* Onboarding Wizard Modal Overlay & Graceful Luminous Animations */
 @keyframes lmFadeInBackdrop {
   0% {
     opacity: 0;
@@ -2095,19 +2095,19 @@ a.lm-activity-scene-pill:hover {
   }
   100% {
     opacity: 1;
-    backdrop-filter: blur(10px);
-    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
   }
 }
 
 @keyframes lmDialogEnter {
   0% {
     opacity: 0;
-    transform: translateY(24px) scale(0.95);
+    transform: translateY(32px) scale(0.94);
   }
-  65% {
+  60% {
     opacity: 1;
-    transform: translateY(-2px) scale(1.004);
+    transform: translateY(-2px) scale(1.003);
   }
   100% {
     opacity: 1;
@@ -2133,15 +2133,15 @@ a.lm-activity-scene-pill:hover {
   right: 0 !important;
   bottom: 0 !important;
   z-index: 999999 !important;
-  background: rgba(3, 7, 18, 0.85) !important;
-  backdrop-filter: blur(14px) !important;
-  -webkit-backdrop-filter: blur(14px) !important;
+  background: rgba(10, 18, 34, 0.52) !important;
+  backdrop-filter: blur(14px) saturate(1.35) !important;
+  -webkit-backdrop-filter: blur(14px) saturate(1.35) !important;
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
   padding: 1.5rem !important;
   box-sizing: border-box !important;
-  animation: lmFadeInBackdrop 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  animation: lmFadeInBackdrop 0.55s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
 }
 .lm-wizard-dialog button, .lm-wizard-preset-card, .lm-wizard-step-item {
   touch-action: manipulation !important;
@@ -2153,13 +2153,13 @@ a.lm-activity-scene-pill:hover {
   max-width: 660px;
   background: #111c2e !important;
   border: 1px solid #2fa66d !important;
-  border-radius: 0.65rem !important;
-  box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.85), 0 0 35px rgba(47, 166, 109, 0.3) !important;
+  border-radius: 0.75rem !important;
+  box-shadow: 0 1.5rem 4.5rem rgba(0, 0, 0, 0.65), 0 0 35px rgba(47, 166, 109, 0.28) !important;
   display: flex !important;
   flex-direction: column !important;
   overflow: hidden !important;
   color: #e9edf5 !important;
-  animation: lmDialogEnter 0.45s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  animation: lmDialogEnter 0.65s cubic-bezier(0.16, 1, 0.3, 1) 0.1s backwards !important;
   will-change: transform, opacity;
 }
 .lm-wizard-pane {
