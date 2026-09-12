@@ -1,0 +1,890 @@
+#!/usr/bin/env python3
+"""Stash entry point for the read-only Library Manager inventory."""
+
+import json
+import csv
+import logging
+import plistlib
+from logging.handlers import RotatingFileHandler
+import os
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+from stashapi.stashapp import StashInterface
+
+from librarymanager_core import (
+    generate_video_contact_sheet, expect_filesystem_create,apply_manual_filename, apply_scene_filename, build_merge_preview, build_resolution_plan,
+                                 claim_due_rename, connect, enqueue_rename, fail_queued_rename,
+                                 finish_queued_rename, inventory, preview_safe_filenames,
+                                 preview_manual_filename, preview_scene_filename, reconcile_missing_files, refresh_scene_inventory,
+                                 release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
+                                 reconcile_filesystem_events, pending_filesystem_events)
+from librarymanager_core import dashboard_data, incoming_summary, record_activity, recent_activity
+
+
+QUERY = """
+query LibraryManagerInventory($filter: FindFilterType) {
+  findScenes(filter: $filter) {
+    count
+    scenes {
+      id title details date director code rating100 organized urls
+      studio { name }
+      performers { id name }
+      tags { id name }
+      galleries { id title }
+      stash_ids { endpoint stash_id }
+      groups { group { id name } scene_index }
+      files { id path basename size duration fingerprints { type value } }
+    }
+  }
+}
+"""
+
+SCENE_QUERY = """
+query LibraryManagerScene($id: ID!) {
+  findScene(id: $id) {
+    id title details date director code rating100 organized urls
+    studio { name }
+    performers { id name }
+    tags { id name }
+    galleries { id title }
+    stash_ids { endpoint stash_id }
+    groups { group { id name } scene_index }
+    files { id path basename size duration fingerprints { type value } }
+  }
+}
+"""
+
+ROOTS_QUERY = "query LibraryManagerRoots { configuration { general { stashes { path } } } }"
+SCENE_COUNT_QUERY = "query LibraryManagerSceneCount { findScenes(filter: {per_page: 1}) { count } }"
+
+
+def current_scene_count(stash):
+    result = stash.call_GQL(SCENE_COUNT_QUERY)
+    return int(((result or {}).get("findScenes") or {}).get("count") or 0)
+
+
+def activity_logger():
+    logger = logging.getLogger("librarymanager.activity")
+    if not logger.handlers:
+        handler = RotatingFileHandler(Path(__file__).with_name("librarymanager.log"), maxBytes=5_000_000,
+                                      backupCount=3, encoding="utf-8")
+        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    return logger
+
+
+def audit(database_path, category, action, status, **fields):
+    if "details" in fields and "detail" not in fields:
+        fields["detail"] = str(fields.pop("details"))
+    elif "details" in fields:
+        fields.pop("details")
+    record_activity(database_path, category, action, status, **fields)
+    activity_logger().log(logging.ERROR if fields.get("severity") == "error" else logging.INFO,
+                          "%s %s %s scene=%s file=%s %s", category, action, status,
+                          fields.get("scene_id") or "-", fields.get("file_id") or "-", fields.get("detail") or "")
+
+
+def send_macos_notification(title, message):
+    """Send safely without a shell, so metadata cannot become AppleScript code."""
+    result = subprocess.run([
+        "/usr/bin/osascript", "-e", "on run argv", "-e",
+        "display notification (item 1 of argv) with title (item 2 of argv)",
+        "-e", "end run", "--", str(message), str(title),
+    ], capture_output=True, text=True, timeout=10, check=False)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or f"osascript exited {result.returncode}")
+
+
+def maybe_notify(config, message, *, success=False):
+    if not (config or {}).get("macNotifications"):
+        return
+    if success and not (config or {}).get("notifySuccessfulRenames"):
+        return
+    send_macos_notification("Stash Library Manager", message)
+
+
+def dashboard_reports():
+    """Load bounded copies of the latest human-facing reports for the dashboard."""
+    definitions = [
+        ("renamed", "Renamed File Search", "reconciliation-report.json", "matches"),
+        ("resolution", "Resolution Plan", "resolution-plan.json", "items"),
+        ("metadata", "Metadata Merge Preview", "metadata-merge-preview.json", "previews"),
+        ("filenames", "Filename Preview", "filename-preview.json", "files"),
+        ("filesystem", "Filesystem Event Review", "filesystem-reconciliation-report.json", "proposals"),
+        ("activity", "Activity Export", "activity-report.json", "activity"),
+    ]
+    reports = []
+    for report_id, title, filename, rows_key in definitions:
+        path = Path(__file__).with_name(filename)
+        if not path.exists():
+            reports.append({"id": report_id, "title": title, "available": False, "filename": filename})
+            continue
+        try:
+            content = json.loads(path.read_text(encoding="utf-8"))
+            summary = content.get("summary") if isinstance(content, dict) else None
+            if not isinstance(summary, dict):
+                summary = {key: value for key, value in (content.items() if isinstance(content, dict) else [])
+                           if key not in (rows_key, "action_performed") and not isinstance(value, (list, dict))}
+            rows = content.get(rows_key, []) if isinstance(content, dict) else []
+            reports.append({"id": report_id, "title": title, "available": True, "filename": filename,
+                            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(path.stat().st_mtime)),
+                            "summary": summary, "row_count": len(rows) if isinstance(rows, list) else 0,
+                            "rows": rows[:100] if isinstance(rows, list) else []})
+        except (OSError, ValueError) as error:
+            reports.append({"id": report_id, "title": title, "available": False, "filename": filename,
+                            "error": str(error)})
+    return reports
+
+
+def load_input():
+    return json.load(sys.stdin)
+
+
+def fetch_scenes(stash, page_size=250):
+    scenes = []
+    page = 1
+    while True:
+        result = stash.call_GQL(QUERY, {"filter": {"page": page, "per_page": page_size}})
+        found = (result or {}).get("findScenes") or {}
+        batch = found.get("scenes") or []
+        scenes.extend(batch)
+        if not batch or len(scenes) >= int(found.get("count") or 0):
+            return scenes
+        page += 1
+
+
+def refresh_scene(stash, database_path, scene_id):
+    result = stash.call_GQL(SCENE_QUERY, {"id": str(scene_id)})
+    scene = (result or {}).get("findScene")
+    if not scene:
+        raise ValueError(f"Scene {scene_id} was not found in Stash")
+    refresh_scene_inventory(database_path, scene)
+
+
+def automatic_scene_allowed(config, scene_id):
+    """A configured test scene acts as a hard scope lock for automatic hooks."""
+    test_scene_id = str((config or {}).get("testSceneId") or "").strip()
+    return not test_scene_id or test_scene_id == str(scene_id)
+
+
+def fetch_library_roots(stash):
+    result = stash.call_GQL(ROOTS_QUERY)
+    stashes = (((result or {}).get("configuration") or {}).get("general") or {}).get("stashes") or []
+    return sorted({str(item.get("path")).strip() for item in stashes if item.get("path")})
+
+
+def incoming_folder_status(config, roots):
+    configured = str((config or {}).get("incomingFolder") or "").strip()
+    enabled = (config or {}).get("automaticIncomingScan") is True
+    if not configured:
+        return {"enabled": enabled, "valid": False, "path": "", "reason": "Choose an incoming folder first"}
+    folder = Path(configured).expanduser().resolve()
+    if not folder.is_dir():
+        return {"enabled": enabled, "valid": False, "path": str(folder), "reason": "The incoming folder is not currently available"}
+    inside_root = False
+    for root in roots:
+        try:
+            folder.relative_to(Path(root).expanduser().resolve())
+            inside_root = True
+            break
+        except ValueError:
+            continue
+    if not inside_root:
+        return {"enabled": enabled, "valid": False, "path": str(folder),
+                "reason": "The incoming folder must be inside a folder configured in Stash"}
+    return {"enabled": enabled, "valid": True, "path": str(folder), "reason": "Ready to watch for completed videos"}
+
+
+def macos_startup_paths():
+    label = "com.stash.librarymanager"
+    return label, Path.home() / "Library" / "LaunchAgents" / f"{label}.plist", Path(__file__).with_name("startup-runtime.json")
+
+
+def macos_startup_status():
+    label, plist_path, runtime_path = macos_startup_paths()
+    return {"supported": sys.platform == "darwin", "enabled": plist_path.is_file() and runtime_path.is_file(),
+            "label": label, "plist_path": str(plist_path)}
+
+
+def configure_macos_startup(enabled, server_connection, database_path):
+    if sys.platform != "darwin":
+        raise ValueError("Start with macOS is available only on a Mac")
+    label, plist_path, runtime_path = macos_startup_paths()
+    domain = f"gui/{os.getuid()}"
+    subprocess.run(["/bin/launchctl", "bootout", domain, str(plist_path)], capture_output=True, check=False)
+    if not enabled:
+        plist_path.unlink(missing_ok=True)
+        runtime_path.unlink(missing_ok=True)
+        return macos_startup_status()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_path.write_text(json.dumps({"server_connection": server_connection or {},
+                                        "database": str(database_path)}), encoding="utf-8")
+    runtime_path.chmod(0o600)
+    plist = {
+        "Label": label,
+        "ProgramArguments": [sys.executable, str(Path(__file__).with_name("librarymanager_startup.py")),
+                             "--runtime", str(runtime_path)],
+        "RunAtLoad": True,
+        "StartInterval": 60,
+        "StandardOutPath": str(Path(__file__).with_name("librarymanager-startup.log")),
+        "StandardErrorPath": str(Path(__file__).with_name("librarymanager-startup.log")),
+    }
+    with plist_path.open("wb") as handle:
+        plistlib.dump(plist, handle)
+    subprocess.run(["/bin/launchctl", "bootstrap", domain, str(plist_path)], capture_output=True, check=True)
+    return macos_startup_status()
+
+
+def start_filesystem_monitor(stash, database_path, server_connection=None):
+    current = filesystem_monitor_summary(database_path)
+    if current.get("state") == "running" and current.get("pid"):
+        try:
+            os.kill(int(current["pid"]), 0)
+            return {**current, "message": "Filesystem monitor is already running"}
+        except OSError:
+            pass
+    roots = fetch_library_roots(stash)
+    if not roots:
+        raise ValueError("Stash has no configured library roots")
+    token = uuid.uuid4().hex
+    control_path = Path(__file__).with_name("monitor-control.json")
+    if control_path.exists():
+        control_path.unlink()
+    log_path = Path(__file__).with_name("librarymanager-monitor.log")
+    config = stash.find_plugin_config("librarymanager") or {}
+    incoming = incoming_folder_status(config, roots)
+    if incoming["enabled"] and not incoming["valid"]:
+        audit(database_path, "incoming", "incoming folder", "disabled", severity="warning",
+              old_path=incoming["path"] or None, detail=incoming["reason"])
+    runtime_path = Path(__file__).with_name("monitor-runtime.json")
+    runtime_path.write_text(json.dumps({
+        "server_connection": server_connection or {},
+        "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
+        "mac_notifications": config.get("macNotifications") is True,
+        "incoming_imports": incoming["enabled"] and incoming["valid"],
+        "incoming_folder": incoming["path"] if incoming["valid"] else "",
+        "incoming_settle_seconds": max(60, int(config.get("incomingSettleMinutes") or 5) * 60),
+        "incoming_fallback_seconds": 60,
+        "generate_contact_sheets": config.get("generateContactSheets") is True,
+        "contact_sheet_grid": config.get("contactSheetGrid") or "4x4",
+        "contact_sheet_banner": config.get("contactSheetBanner") is not False,
+        "contact_sheet_adjust_vertical": config.get("contactSheetAdjustVertical") is not False,
+        "contact_sheet_script": config.get("contactSheetScript") or "",
+    }), encoding="utf-8")
+    runtime_path.chmod(0o600)
+    log_handle = open(log_path, "ab", buffering=0)
+    subprocess.Popen(
+        [sys.executable, str(Path(__file__).with_name("librarymanager_monitor.py")),
+         "--database", str(database_path), "--control", str(control_path),
+         "--token", token, "--roots-json", json.dumps(roots), "--runtime", str(runtime_path)],
+        stdin=subprocess.DEVNULL, stdout=log_handle, stderr=log_handle,
+        start_new_session=True, close_fds=True,
+    )
+    log_handle.close()
+    for _ in range(20):
+        time.sleep(0.1)
+        status = filesystem_monitor_summary(database_path)
+        if status.get("state") == "running":
+            return {**status, "message": "Read-only filesystem monitor started"}
+    raise RuntimeError(f"Filesystem monitor did not start; inspect {log_path}")
+
+
+def stop_filesystem_monitor(database_path):
+    status = filesystem_monitor_summary(database_path)
+    if status.get("state") != "running" or not status.get("token"):
+        return {**status, "message": "Filesystem monitor is already stopped"}
+    control_path = Path(__file__).with_name("monitor-control.json")
+    control_path.write_text(json.dumps({"action": "stop", "token": status["token"]}), encoding="utf-8")
+    for _ in range(40):
+        time.sleep(0.15)
+        status = filesystem_monitor_summary(database_path)
+        if status.get("state") == "stopped":
+            return {**status, "message": "Filesystem monitor stopped"}
+    return {**status, "message": "Stop requested; monitor is still shutting down"}
+
+
+def process_rename_queue(stash, database_path):
+    config = stash.find_plugin_config("librarymanager") or {}
+    processed = skipped = failed = 0
+    try:
+        while True:
+            scene_id, next_at, pending = claim_due_rename(database_path, time.time())
+            if scene_id is None:
+                if pending and next_at is not None:
+                    time.sleep(max(0.05, min(2.0, next_at - time.time())))
+                    continue
+                break
+            try:
+                before = scene_naming_signature(database_path, scene_id)
+                refresh_scene(stash, database_path, scene_id)
+                after = scene_naming_signature(database_path, scene_id)
+                if before == after:
+                    preview = preview_scene_filename(database_path, scene_id, config)
+                    if preview.get("status") == "unchanged":
+                        finish_queued_rename(database_path, scene_id, "skipped", "Naming metadata is unchanged")
+                        audit(database_path, "rename", "automatic rename", "skipped", scene_id=scene_id,
+                              detail="Naming metadata is unchanged")
+                        skipped += 1
+                        continue
+                result = apply_scene_filename(
+                    database_path, scene_id,
+                    lambda file_id, folder, basename: stash.move_files({"ids": [file_id],
+                        "destination_folder": folder, "destination_basename": basename}),
+                    config,
+                )
+                finish_queued_rename(database_path, scene_id, result.get("status", "unknown"), result.get("reason", ""))
+                audit(database_path, "rename", "automatic rename", result.get("status", "unknown"),
+                      scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
+                      new_path=result.get("proposed_path"), detail=result.get("reason", ""),
+                      metadata={"base_stem": result.get("base_stem")})
+                if result.get("action_performed"):
+                    maybe_notify(config, f"Renamed scene {scene_id}: {Path(result['proposed_path']).name}", success=True)
+                    if config.get("generateContactSheets") is True:
+                        scope = config.get("contactSheetScope") or "all"
+                        should_generate = True
+                        if scope == "incoming":
+                            inc_str = config.get("incomingFolder") or ""
+                            if inc_str:
+                                try:
+                                    Path(result["proposed_path"]).resolve().relative_to(Path(inc_str).resolve())
+                                except (OSError, ValueError):
+                                    should_generate = False
+                            else:
+                                should_generate = False
+                        if should_generate:
+                            sheet_p = f"{result['proposed_path']}.jpg"
+                            expect_filesystem_create(database_path, sheet_p)
+                            try:
+                                con = connect(database_path)
+                                con.execute(
+                                    """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,size,modified_ns,stable_since,settle_seconds,status,attempts,detail)
+                                       VALUES (?,?,?,?,?,?,?,?,0,?)
+                                       ON CONFLICT(path) DO UPDATE SET status='generating_sheet', last_checked_at=excluded.last_checked_at, detail=excluded.detail""",
+                                    (str(sheet_p), utc_now(), utc_now(), None, None, time.time(), 0, "generating_sheet", f"Creating contact sheet for scene {scene_id}")
+                                )
+                                con.commit()
+                                con.close()
+                            except Exception:
+                                pass
+                            try:
+                                csm_res = generate_video_contact_sheet(
+                                    result["proposed_path"],
+                                    grid=config.get("contactSheetGrid") or "4x5",
+                                    include_banner=config.get("contactSheetBanner") is not False,
+                                    adjust_vertical=config.get("contactSheetAdjustVertical") is not False,
+                                    custom_script=config.get("contactSheetScript") or "",
+                                    overwrite=True
+                                )
+                                if csm_res.get("status") == "generated":
+                                    sheet_p = csm_res.get("path")
+                                    try:
+                                        con = connect(database_path)
+                                        con.execute(
+                                            """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,size,modified_ns,stable_since,settle_seconds,status,attempts,detail)
+                                               VALUES (?,?,?,?,?,?,?,?,0,?)
+                                               ON CONFLICT(path) DO UPDATE SET status='paired', last_checked_at=excluded.last_checked_at, detail=excluded.detail""",
+                                            (str(sheet_p), utc_now(), utc_now(), Path(sheet_p).stat().st_size if Path(sheet_p).exists() else None,
+                                             Path(sheet_p).stat().st_mtime_ns if Path(sheet_p).exists() else None, time.time(), 60, "paired",
+                                             f"Contact sheet regenerated for scene {scene_id}")
+                                        )
+                                        con.commit()
+                                        con.close()
+                                    except Exception:
+                                        pass
+                                    record_activity(
+                                        database_path,
+                                        "companion",
+                                        "contact sheet updated",
+                                        "recorded",
+                                        scene_id=str(scene_id),
+                                        new_path=sheet_p,
+                                        detail=f"Contact sheet regenerated with new metadata for Finder browsing"
+                                    )
+                                    maybe_notify(
+                                        config,
+                                        f"Contact sheet created & paired: {Path(sheet_p).name} → Scene {scene_id}",
+                                        success=True
+                                    )
+                                else:
+                                    try:
+                                        con = connect(database_path)
+                                        con.execute("DELETE FROM incoming_files WHERE path=?", (str(sheet_p),))
+                                        con.commit()
+                                        con.close()
+                                    except Exception:
+                                        pass
+                            except Exception as csm_err:
+                                try:
+                                    con = connect(database_path)
+                                    con.execute("DELETE FROM incoming_files WHERE path=?", (str(sheet_p),))
+                                    con.commit()
+                                    con.close()
+                                except Exception:
+                                    pass
+                                activity_logger().error("Contact sheet update failed: %s", csm_err)
+                processed += int(bool(result.get("action_performed")))
+                skipped += int(not result.get("action_performed"))
+            except Exception as error:
+                fail_queued_rename(database_path, scene_id, str(error))
+                audit(database_path, "rename", "automatic rename", "failed", severity="error",
+                      scene_id=scene_id, detail=str(error))
+                try:
+                    maybe_notify(config, f"Rename failed for scene {scene_id}: {error}")
+                except Exception as notify_error:
+                    activity_logger().error("notification failed: %s", notify_error)
+                failed += 1
+    finally:
+        release_worker_schedule(database_path)
+    return {"renamed": processed, "skipped": skipped, "failed": failed}
+
+
+def main():
+    plugin_input = load_input()
+    mode = ((plugin_input.get("args") or {}).get("mode") or "inventory").lower()
+    database_path = Path(__file__).with_name("librarymanager.sqlite3")
+    hook_context = (plugin_input.get("args") or {}).get("hookContext") or {}
+    if hook_context:
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        changed = hook_context.get("input") or {}
+        relevant = bool({"title", "studio_id", "performer_ids"} & set(changed))
+        if not config.get("automaticRenaming") or not relevant:
+            print(json.dumps({"output": "Automatic rename skipped."}))
+            return
+        scene_id = hook_context.get("id")
+        if not automatic_scene_allowed(config, scene_id):
+            audit(database_path, "rename", "metadata edit", "skipped", scene_id=scene_id,
+                  detail=f"Automatic filename changes are limited to Test Scene ID {config.get('testSceneId')}")
+            print(json.dumps({"output": f"Automatic rename skipped: scene {scene_id} is outside Test Scene ID scope."}))
+            return
+        rename_settle = int(config.get("renameSettleSeconds") if config.get("renameSettleSeconds") is not None else 30)
+        should_schedule = enqueue_rename(database_path, str(scene_id), time.time(), debounce_seconds=rename_settle)
+        if should_schedule:
+            try:
+                job_id = stash.run_plugin_task("librarymanager", "Process Rename Queue")
+            except Exception:
+                release_worker_schedule(database_path)
+                raise
+            print(json.dumps({"output": f"Scene {scene_id} queued for rename worker job {job_id}."}))
+        else:
+            print(json.dumps({"output": f"Scene {scene_id} coalesced into the pending rename queue."}))
+        return
+    elif mode == "generate_incoming_contact_sheets":
+        config = stash.find_plugin_config("librarymanager") or {}
+        incoming_folder_str = config.get("incomingFolder") or ""
+        incoming_path = Path(incoming_folder_str) if incoming_folder_str else None
+        if not incoming_path or not incoming_path.is_dir():
+            message = f"Incoming folder '{incoming_folder_str}' does not exist or is not configured."
+        else:
+            grid = config.get("contactSheetGrid") or "4x4"
+            banner = config.get("contactSheetBanner") is not False
+            adjust_vert = config.get("contactSheetAdjustVertical") is not False
+            custom_script = config.get("contactSheetScript") or ""
+            video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm", ".wmv"}
+            candidates = [
+                p for p in incoming_path.iterdir()
+                if p.is_file() and p.suffix.lower() in video_extensions
+            ]
+            missing = [
+                p for p in candidates
+                if not Path(f"{p}.jpg").exists() and not Path(f"{p.stem}.jpg").exists()
+            ]
+            generated_count = 0
+            skipped_count = len(candidates) - len(missing)
+            errors = []
+            for i, vid in enumerate(missing):
+                try:
+                    stash.progress((i + 1) / max(1, len(missing)))
+                except Exception:
+                    pass
+                res = generate_video_contact_sheet(
+                    vid,
+                    grid=grid,
+                    include_banner=banner,
+                    adjust_vertical=adjust_vert,
+                    custom_script=custom_script
+                )
+                if res.get("status") == "generated":
+                    generated_count += 1
+                    try:
+                        record_activity(
+                            database_path,
+                            "companion",
+                            "contact sheet generated",
+                            "recorded",
+                            new_path=res.get("path"),
+                            detail=f"Generated {res.get('grid', grid)} contact sheet for {vid.name}"
+                        )
+                    except Exception:
+                        pass
+                elif res.get("status") == "error":
+                    errors.append(f"{vid.name}: {res.get('error')}")
+            err_str = f" Errors: {', '.join(errors)}" if errors else ""
+            message = (
+                f"Generated {generated_count} contact sheet(s) in {incoming_path.name}. "
+                f"{skipped_count} already had artwork.{err_str}"
+            )
+    if mode == "inventory":
+        stash = StashInterface(plugin_input["server_connection"])
+        scenes = fetch_scenes(stash)
+        summary = inventory(database_path, scenes)
+        message = (
+            f"Read-only inventory complete: {summary['scenes']} scenes containing {summary['files']} files, "
+            f"{summary['present']} files present, "
+            f"{summary['missing']} missing, {summary['changed_paths']} Stash path changes, "
+            f"{summary['restored']} restored."
+        )
+    elif mode == "reconcile":
+        summary, report = reconcile_missing_files(database_path)
+        report_path = Path(__file__).with_name("reconciliation-report.json")
+        report_path.write_text(json.dumps({"summary": summary, "matches": report}, indent=2, ensure_ascii=False), encoding="utf-8")
+        message = (
+            f"Read-only reconciliation complete: {summary['missing']} missing records, "
+            f"{summary['matched']} candidates, {summary['ambiguous']} ambiguous, "
+            f"{summary['unmatched']} unmatched, {summary['skipped_folders']} unavailable folders. "
+            f"Report: {report_path}"
+        )
+    elif mode == "plan":
+        plan = build_resolution_plan(database_path)
+        plan_path = Path(__file__).with_name("resolution-plan.json")
+        plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+        message = (
+            f"Read-only resolution plan complete: {plan.get('safe_redundant', 0)} redundant stale records, "
+            f"{plan.get('merge_required', 0)} requiring metadata merge. No changes made. Report: {plan_path}"
+        )
+    elif mode == "preview_merge":
+        preview = build_merge_preview(database_path)
+        preview_path = Path(__file__).with_name("metadata-merge-preview.json")
+        preview_path.write_text(json.dumps(preview, indent=2, ensure_ascii=False), encoding="utf-8")
+        message = (
+            f"Read-only metadata merge preview complete: {preview.get('ready_to_apply', 0)} ready, "
+            f"{preview.get('manual_review', 0)} requiring manual review. No changes made. "
+            f"Report: {preview_path}"
+        )
+    elif mode == "preview_filenames":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        summary, filenames = preview_safe_filenames(database_path, config)
+        preview_path = Path(__file__).with_name("filename-preview.json")
+        preview_path.write_text(json.dumps({"summary": summary, "files": filenames}, indent=2, ensure_ascii=False), encoding="utf-8")
+        message = (
+            f"Read-only filename preview complete: {summary['examined']} examined, "
+            f"{summary['proposed']} proposed, {summary['unchanged']} unchanged, "
+            f"{summary['conflicts']} conflicts. No files renamed. Report: {preview_path}"
+        )
+    elif mode == "process_rename_queue":
+        stash = StashInterface(plugin_input["server_connection"])
+        result = process_rename_queue(stash, database_path)
+        message = f"Rename queue complete: {result['renamed']} renamed, {result['skipped']} skipped, {result['failed']} failed."
+    elif mode == "start_monitor":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        result = start_filesystem_monitor(stash, database_path, plugin_input["server_connection"])
+        message = f"{result['message']}: {len(result.get('roots', []))} roots, {len(result.get('unavailable_roots', []))} unavailable."
+        unavailable = result.get("unavailable_roots", [])
+        audit(database_path, "monitor", "start", "warning" if unavailable else "running",
+              severity="warning" if unavailable else "info", detail=message,
+              metadata={"roots": result.get("roots", []), "unavailable_roots": unavailable})
+        if unavailable:
+            try:
+                maybe_notify(config, f"{len(unavailable)} library root(s) are unavailable")
+            except Exception as notify_error:
+                activity_logger().error("notification failed: %s", notify_error)
+    elif mode == "ensure_monitor":
+        stash = StashInterface(plugin_input["server_connection"])
+        result = start_filesystem_monitor(stash, database_path, plugin_input["server_connection"])
+        message = result["message"]
+    elif mode == "stop_monitor":
+        result = stop_filesystem_monitor(database_path)
+        message = result["message"]
+        audit(database_path, "monitor", "stop", result.get("state", "stopped"), detail=message)
+    elif mode == "monitor_status":
+        result = filesystem_monitor_summary(database_path)
+        message = (f"Filesystem monitor: {result['state']}; PID {result.get('pid')}; "
+                   f"{len(result.get('roots', []))} roots; {result.get('pending_events', 0)} recorded events; "
+                   f"heartbeat {result.get('heartbeat_at')}.")
+    elif mode == "monitor_health":
+        result = filesystem_monitor_summary(database_path)
+        result.pop("token", None)
+        result["incoming"] = incoming_summary(database_path)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "live_status":
+        stash = StashInterface(plugin_input["server_connection"])
+        # Auto-prune any failed incoming files that were deleted from disk
+        connection = connect(database_path)
+        try:
+            failed_rows = connection.execute("SELECT path FROM incoming_files WHERE status='failed'").fetchall()
+            for r in failed_rows:
+                if not Path(r["path"]).exists():
+                    connection.execute("UPDATE incoming_files SET status='gone', detail='File removed from disk' WHERE path=?", (r["path"],))
+                    audit(database_path, "incoming", "pruned absent file", "gone", new_path=r["path"], detail="Failed incoming file was deleted from disk; alert cleared automatically")
+            connection.commit()
+        finally:
+            connection.close()
+
+        active_jobs = []
+        try:
+            job_data = stash.call_GQL('{ jobQueue { id description status progress } }')
+            for j in (job_data.get("jobQueue") or []):
+                if j and j.get("status") in ("RUNNING", "QUEUED"):
+                    active_jobs.append({
+                        "id": str(j.get("id")),
+                        "description": j.get("description") or "Background task",
+                        "status": j.get("status"),
+                        "progress": j.get("progress"),
+                    })
+        except Exception:
+            pass
+
+        result = {
+            "monitor": filesystem_monitor_summary(database_path),
+            "incoming": incoming_summary(database_path),
+            "active_jobs": active_jobs,
+            "activity": recent_activity(database_path, 250),
+            "pending_events": pending_filesystem_events(database_path),
+            "server_time": time.time(),
+            "current_scene_count": current_scene_count(stash),
+        }
+        result["monitor"].pop("token", None)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "startup_status":
+        message = json.dumps(macos_startup_status(), ensure_ascii=False)
+    elif mode == "configure_startup":
+        arguments = plugin_input.get("args") or {}
+        result = configure_macos_startup(arguments.get("enabled") is True,
+                                         plugin_input.get("server_connection") or {}, database_path)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "retry_incoming_file":
+        arguments = plugin_input.get("args") or {}
+        path = str(arguments.get("path") or "")
+        if not path:
+            raise ValueError("File path required to retry scan")
+        connection = connect(database_path)
+        try:
+            connection.execute(
+                "UPDATE incoming_files SET status='waiting', attempts=0, stable_since=?, detail='User requested re-scan' WHERE path=?",
+                (time.time(), path)
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        audit(database_path, "incoming", "retry scan", "waiting", new_path=path, detail="User initiated manual re-scan from console")
+        message = json.dumps({"status": "waiting", "path": path, "detail": "Re-scan scheduled"}, ensure_ascii=False)
+    elif mode == "dismiss_incoming_file":
+        arguments = plugin_input.get("args") or {}
+        path = str(arguments.get("path") or "")
+        if not path:
+            raise ValueError("File path required to dismiss")
+        connection = connect(database_path)
+        try:
+            connection.execute(
+                "UPDATE incoming_files SET status='dismissed', detail='User dismissed failure' WHERE path=?",
+                (path,)
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        audit(database_path, "incoming", "dismiss failed scan", "dismissed", new_path=path, detail="User dismissed failed incoming video alert from console")
+        message = json.dumps({"status": "dismissed", "path": path, "detail": "Dismissed failed incoming alert"}, ensure_ascii=False)
+    elif mode == "retry_all_incoming_files":
+        connection = connect(database_path)
+        try:
+            cur = connection.cursor()
+            cur.execute("UPDATE incoming_files SET status='waiting', attempts=0, stable_since=?, detail='Batch retry by user' WHERE status='failed'", (time.time(),))
+            count = cur.rowcount
+            connection.commit()
+        finally:
+            connection.close()
+        audit(database_path, "incoming", "batch retry", "waiting", detail=f"User retried {count} failed incoming video(s)")
+        message = json.dumps({"status": "waiting", "count": count, "detail": f"Re-scan scheduled for {count} video(s)"}, ensure_ascii=False)
+    elif mode == "dismiss_all_incoming_files":
+        connection = connect(database_path)
+        try:
+            cur = connection.cursor()
+            cur.execute("UPDATE incoming_files SET status='dismissed', detail='Batch dismissed by user' WHERE status='failed'")
+            count = cur.rowcount
+            connection.commit()
+        finally:
+            connection.close()
+        audit(database_path, "incoming", "batch dismiss", "dismissed", detail=f"User dismissed {count} failed incoming video alert(s)")
+        message = json.dumps({"status": "dismissed", "count": count, "detail": f"Dismissed {count} failed incoming alert(s)"}, ensure_ascii=False)
+    elif mode == "resolve_all_filesystem_events":
+        arguments = plugin_input.get("args") or {}
+        resolution = str(arguments.get("resolution") or "dismiss")
+        connection = connect(database_path)
+        try:
+            cursor = connection.cursor()
+            cursor.execute("UPDATE filesystem_events SET status='reviewed' WHERE status='pending'")
+            count = cursor.rowcount
+            connection.commit()
+        finally:
+            connection.close()
+        summary, proposals = reconcile_filesystem_events(database_path)
+        audit(database_path, "filesystem", "bulk dismiss", "dismissed",
+              detail=f"Bulk dismissed {count} filesystem events", metadata={"count": count})
+        message = json.dumps({"status": "dismissed", "count": count,
+                              "detail": f"Dismissed {count} change{'s' if count != 1 else ''}"}, ensure_ascii=False)
+    elif mode == "resolve_filesystem_event":
+        stash = StashInterface(plugin_input["server_connection"])
+        arguments = plugin_input.get("args") or {}
+        event_key = str(arguments.get("event_key") or "")
+        resolution = str(arguments.get("resolution") or "")
+        if not event_key or resolution not in ("dismiss", "remove_stash_scene", "scan_destination"):
+            raise ValueError("Choose a valid review action")
+        connection = connect(database_path)
+        try:
+            event = connection.execute(
+                "SELECT * FROM filesystem_events WHERE event_key=? AND status='pending'", (event_key,)
+            ).fetchone()
+            if not event:
+                raise ValueError("This change is no longer waiting for review")
+            event = dict(event)
+            file_row = connection.execute("SELECT * FROM files WHERE path=?", (event["source_path"],)).fetchone()
+            file_row = dict(file_row) if file_row else None
+        finally:
+            connection.close()
+
+        scene_id = str(file_row.get("scene_id")) if file_row and file_row.get("scene_id") else None
+        detail = ""
+        status = "resolved"
+        if resolution == "dismiss":
+            detail = "User confirmed that this filesystem change needs no Stash action"
+            status = "dismissed"
+        elif resolution == "remove_stash_scene":
+            if not scene_id:
+                raise ValueError("Watchtower cannot identify a Stash scene for this deleted file")
+            scene = stash.find_scene(int(scene_id))
+            if scene:
+                stash.destroy_scene(int(scene_id), delete_file=False)
+                detail = f"Removed stale Stash scene {scene_id}; the video file was already absent"
+            else:
+                detail = f"Stash scene {scene_id} was already removed"
+        else:
+            destination = event.get("destination_path") or event.get("source_path")
+            if not destination or not Path(destination).is_file():
+                raise ValueError("The destination file no longer exists, so Stash cannot scan it")
+            job_id = stash.metadata_scan(paths=[destination])
+            if not stash.wait_for_job(job_id, timeout=180):
+                raise ValueError(f"Stash scan job {job_id} did not finish")
+            detail = f"Stash scan job {job_id} checked {destination}"
+
+        connection = connect(database_path)
+        try:
+            connection.execute("UPDATE filesystem_events SET status='reviewed' WHERE event_key=?", (event_key,))
+            connection.commit()
+        finally:
+            connection.close()
+        audit(database_path, "filesystem", event["event_type"], status, scene_id=scene_id,
+              file_id=file_row.get("file_id") if file_row else None,
+              old_path=event.get("source_path"), new_path=event.get("destination_path"), detail=detail,
+              metadata={"resolution": resolution})
+        message = json.dumps({"status": status, "detail": detail, "scene_id": scene_id}, ensure_ascii=False)
+    elif mode == "reconcile_events":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        summary, proposals = reconcile_filesystem_events(database_path)
+        report_path = Path(__file__).with_name("filesystem-reconciliation-report.json")
+        report_path.write_text(json.dumps({"summary": summary, "proposals": proposals}, indent=2,
+                                          ensure_ascii=False), encoding="utf-8")
+        message = (f"Read-only event reconciliation complete: {summary['events']} events, "
+                   f"{summary['verified']} verified, {summary['review']} needing review, "
+                   f"{summary['informational']} informational. No changes made. Report: {report_path}")
+        for proposal in proposals:
+            severity = "warning" if proposal["confidence"] in ("review", "strong") else "info"
+            audit(database_path, "filesystem", proposal["event_type"], proposal["confidence"], severity=severity,
+                  scene_id=proposal.get("scene_id"), file_id=proposal.get("file_id"),
+                  old_path=proposal.get("old_path"), new_path=proposal.get("new_path"),
+                  detail=proposal.get("reason", ""), metadata={"recommendation": proposal.get("recommendation")})
+        warnings = [p for p in proposals if p["confidence"] in ("review", "strong")]
+        if warnings and config.get("macNotifications"):
+            try:
+                maybe_notify(config, f"{len(warnings)} filesystem event(s) need review")
+            except Exception as notify_error:
+                activity_logger().error("notification failed: %s", notify_error)
+    elif mode == "activity":
+        rows = recent_activity(database_path, (plugin_input.get("args") or {}).get("limit", 250))
+        report_path = Path(__file__).with_name("activity-report.json")
+        report_path.write_text(json.dumps({"activity": rows}, indent=2, ensure_ascii=False), encoding="utf-8")
+        csv_path = Path(__file__).with_name("activity-report.csv")
+        columns = ["recorded_at", "category", "severity", "action", "status", "scene_id", "file_id",
+                   "old_path", "new_path", "detail"]
+        with csv_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        if rows:
+            latest = rows[0]
+            message = (f"Activity report contains {len(rows)} recent entries. Latest: {latest['recorded_at']} — "
+                       f"{latest['action']} {latest['status']}. JSON: {report_path}; CSV: {csv_path}")
+        else:
+            message = f"Activity report is empty. JSON: {report_path}; CSV: {csv_path}"
+    elif mode == "dashboard":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        roots = fetch_library_roots(stash)
+        payload = dashboard_data(database_path, (plugin_input.get("args") or {}).get("limit", 250))
+        payload["monitor"].pop("token", None)
+        payload["library_roots"] = roots
+        payload["incoming_folder"] = incoming_folder_status(config, roots)
+        payload["startup"] = macos_startup_status()
+        payload["current_scene_count"] = current_scene_count(stash)
+        message = json.dumps(payload, ensure_ascii=False)
+    elif mode == "reports":
+        message = json.dumps({"reports": dashboard_reports()}, ensure_ascii=False)
+    elif mode in ("preview_manual_filename", "apply_manual_filename"):
+        stash = StashInterface(plugin_input["server_connection"])
+        arguments = plugin_input.get("args") or {}
+        scene_id = str(arguments.get("scene_id") or "").strip()
+        requested_name = str(arguments.get("filename") or "").strip()
+        if not scene_id:
+            raise ValueError("Enter a Scene ID")
+        refresh_scene(stash, database_path, scene_id)
+        if mode == "preview_manual_filename":
+            result = preview_manual_filename(database_path, scene_id, requested_name)
+        else:
+            result = apply_manual_filename(
+                database_path, scene_id, requested_name,
+                lambda file_id, folder, basename: stash.move_files({"ids": [file_id], "destination_folder": folder,
+                                                                    "destination_basename": basename}),
+            )
+            audit(database_path, "rename", "manual filename correction", result.get("status", "unknown"),
+                  scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
+                  new_path=result.get("proposed_path"), detail=result.get("reason", ""))
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode in ("preview_test_rename", "apply_test_rename"):
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        scene_id = str(config.get("testSceneId") or "").strip()
+        if not scene_id:
+            raise ValueError("Set Test Scene ID in the Stash Library Manager settings first")
+        refresh_scene(stash, database_path, scene_id)
+        if mode == "preview_test_rename":
+            result = preview_scene_filename(database_path, scene_id, config)
+        else:
+            if not config.get("allowTestRename"):
+                raise ValueError("Enable Allow One Test Rename before running the apply task")
+            result = apply_scene_filename(
+                database_path, scene_id,
+                lambda file_id, folder, basename: stash.move_files({"ids": [file_id], "destination_folder": folder,
+                                                                    "destination_basename": basename}),
+                config,
+            )
+        result_path = Path(__file__).with_name("test-rename-result.json")
+        result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        message = f"Test scene {scene_id}: {result.get('status')} — {result.get('reason')}. Report: {result_path}"
+    else:
+        raise ValueError(f"Unsupported Library Manager mode: {mode}")
+    print(json.dumps({"output": message}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as error:
+        print(json.dumps({"error": str(error)}))
+        raise
