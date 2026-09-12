@@ -907,6 +907,7 @@
       setBusy("reset"); setError("");
       try {
         const defaultSettings = {
+          onboardingCompleted: false,
           automaticRenaming: false,
           masterTitleSource: "stash_title",
           includeStudio: true,
