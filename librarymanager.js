@@ -344,10 +344,12 @@
         const restart = ["automaticMoveReconciliation", "macNotifications", "automaticIncomingScan",
           "incomingFolder", "incomingSettleMinutes", "generateContactSheets", "contactSheetGrid",
           "contactSheetBanner", "contactSheetAdjustVertical", "contactSheetScript"].some(key => key in changes);
-        if ((restart || stopWhenDisabled) && data?.monitor?.state === "running") {
+        if (changes.autoStartMonitor === false || ((restart || stopWhenDisabled) && data?.monitor?.state === "running")) {
           await operation("stop_monitor");
         }
-        if (next.autoStartMonitor === true && (restart || changes.autoStartMonitor === true)) await operation("ensure_monitor");
+        if (next.autoStartMonitor === true && (restart || changes.autoStartMonitor === true)) {
+          await operation("ensure_monitor");
+        }
         setNotice("Settings saved.");
         window.setTimeout(refresh, 500);
       }
@@ -1193,14 +1195,33 @@
               value: monitor.pending_events || 0,
               detail: "Audited in SQLite"
             })),
-          React.createElement("div", { className: "lm-actions", style: { marginTop: "14px" } },
-            React.createElement(TaskButton, { name: "Start Read-Only Filesystem Monitor", label: "Start Monitor", variant: "primary" }),
-            React.createElement(TaskButton, { name: "Stop Filesystem Monitor", label: "Stop Monitor" }),
+          React.createElement("div", { className: "lm-actions", style: { marginTop: "14px", display: "flex", gap: "10px" } },
+            React.createElement("button", {
+              type: "button",
+              className: "lm-btn lm-btn-primary",
+              disabled: !!busy,
+              title: "Restart the background watcher daemon",
+              onClick: async () => {
+                setBusy("restart_monitor");
+                setError("");
+                try {
+                  await operation("stop_monitor");
+                  await updateSetting("autoStartMonitor", true);
+                  await operation("ensure_monitor");
+                  await refresh();
+                  setNotice("Filesystem watcher restarted successfully.");
+                } catch (err) {
+                  setError(`Restart failed: ${err.message}`);
+                } finally {
+                  setBusy("");
+                }
+              }
+            }, "⟳ RESTART WATCHER"),
             React.createElement(TaskButton, { name: readOnlyTasks.events, label: "Reconcile Events (Read Only)", showResults: "reports" })))),
-      panel("Watcher Automation & Startup", "Control when monitoring begins and how external moves are reconciled.",
+      panel("Watcher Settings & Automation", "Control continuous monitoring, external move reconciliation, and system startup.",
         React.createElement(React.Fragment, null,
-          React.createElement(Switch, { setting: "autoStartMonitor", label: "Automatically Start Filesystem Monitor",
-            help: "Recommended. Ensures the watcher is running whenever Stash is open in a browser." }),
+          React.createElement(Switch, { setting: "autoStartMonitor", label: "Enable Filesystem Monitoring",
+            help: "Continuously watch library folders for moved/renamed files in Finder and completed downloads in your incoming folder." }),
           React.createElement(Switch, { setting: "automaticMoveReconciliation", label: "Reconcile Verified External Moves",
             help: "When a file is moved in Finder and verified by size/hash, ask Stash to scan the new path and reconnect it." }),
           data?.startup?.supported && React.createElement(Switch, { setting: "startAtLogin", label: "Start Monitoring with macOS",
