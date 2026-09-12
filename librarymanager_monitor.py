@@ -1025,6 +1025,17 @@ def main():
                                 pass
             update_status(database_path, args.token, os.getpid(), "running", available, unavailable)
             time.sleep(2)
+    except KeyboardInterrupt:
+        pass
+    except Exception as fatal_error:
+        try:
+            record_activity(
+                database_path, "monitor", "daemon stopped unexpectedly", "failed",
+                severity="error", detail=f"Filesystem watcher crashed: {fatal_error}"
+            )
+        except Exception:
+            pass
+        raise
     finally:
         observer.stop()
         observer.join(timeout=10)
