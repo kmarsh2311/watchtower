@@ -416,7 +416,7 @@
 
     async function updateSettings(changes, stopWhenDisabled) {
       const next = { ...config, ...changes };
-      setConfig(next); setBusy("settings"); setError("");
+      setConfig(next); setError("");
       try {
         await saveConfig(next);
         if (Object.prototype.hasOwnProperty.call(changes, "startAtLogin")) {
@@ -435,7 +435,6 @@
         window.setTimeout(refresh, 500);
       }
       catch (e) { setError(e.message); await refresh(); }
-      finally { setBusy(""); }
     }
 
     async function correctFilename(apply) {
@@ -1253,7 +1252,7 @@
               label: "Metadata Edit Settle Delay",
               help: "Wait this many seconds after metadata edits in Stash before renaming files and refreshing contact sheets. Additional edits reset the timer.",
               value: Number(config.renameSettleSeconds !== undefined ? config.renameSettleSeconds : 30),
-              disabled: busy === "settings",
+              
               choices: [
                 [0, "Immediate (No delay)"],
                 [15, "15 seconds"],
@@ -1271,9 +1270,9 @@
             label: "Clean Embedded Performers & Studio from Titles",
             help: "Automatically removes performer and studio names from the Stash title when building filenames to prevent duplicate names." }),
           React.createElement("div", { className: "lm-filename-style-grid" },
-            React.createElement(ChoiceField, { label: "Information Order", help: "Choose what appears first, second and third.", value: config.filenameOrder || "title,studio,performers", choices: filenameOrders, disabled: busy === "settings", onChange: value => updateSetting("filenameOrder", value) }),
-            React.createElement(ChoiceField, { label: "Between the Main Parts", help: "Choose what appears between the title, studio and performer list.", value: config.filenameSectionSeparator || "dash", choices: sectionSeparators, disabled: busy === "settings", onChange: value => updateSetting("filenameSectionSeparator", value) }),
-            React.createElement(ChoiceField, { label: "Between Performer Names", help: "Choose what appears between two or more performer names.", value: config.filenamePerformerSeparator || "comma", choices: performerSeparators, disabled: busy === "settings", onChange: value => updateSetting("filenamePerformerSeparator", value) })),
+            React.createElement(ChoiceField, { label: "Information Order", help: "Choose what appears first, second and third.", value: config.filenameOrder || "title,studio,performers", choices: filenameOrders,  onChange: value => updateSetting("filenameOrder", value) }),
+            React.createElement(ChoiceField, { label: "Between the Main Parts", help: "Choose what appears between the title, studio and performer list.", value: config.filenameSectionSeparator || "dash", choices: sectionSeparators,  onChange: value => updateSetting("filenameSectionSeparator", value) }),
+            React.createElement(ChoiceField, { label: "Between Performer Names", help: "Choose what appears between two or more performer names.", value: config.filenamePerformerSeparator || "comma", choices: performerSeparators,  onChange: value => updateSetting("filenamePerformerSeparator", value) })),
           React.createElement("div", { className: "lm-filename-example" },
             React.createElement("small", null, "Example filename"),
             React.createElement("strong", null, exampleFilename),
@@ -1445,7 +1444,7 @@
               React.createElement("small", null, "Choose the folder where downloads arrive. It must be inside one of your Stash library folders."),
               React.createElement("input", {
                 value: config.incomingFolder || "",
-                disabled: busy === "settings",
+                
                 onChange: event => setConfig({ ...config, incomingFolder: event.target.value }),
                 onBlur: event => updateSetting("incomingFolder", event.target.value.trim()),
                 placeholder: "/Volumes/Library/Incoming"
@@ -1454,7 +1453,7 @@
               label: "Wait Before Adding a Video",
               help: "The video must stay completely unchanged for this long before Watchtower asks Stash to add it.",
               value: Number(config.incomingSettleMinutes || 5),
-              disabled: busy === "settings",
+              
               choices: [[1, "1 minute"], [5, "5 minutes (recommended)"], [10, "10 minutes"], [15, "15 minutes"], [30, "30 minutes"]],
               onChange: value => updateSetting("incomingSettleMinutes", Number(value))
             })),
@@ -1479,7 +1478,7 @@
               help: "Choose whether contact sheets are generated across all library folders or restricted to your incoming folder.",
               value: config.contactSheetScope || "incoming",
               choices: [["incoming", "Incoming Folder Only (Recommended)"], ["all", "All Library Folders"]],
-              disabled: busy === "settings",
+              
               onChange: value => updateSetting("contactSheetScope", value)
             }),
             React.createElement(ChoiceField, {
@@ -1487,7 +1486,7 @@
               help: "Number of timestamped scene snapshots per contact sheet.",
               value: config.contactSheetGrid || "4x4",
               choices: [["4x4", "4×4 (16 frames) — Standard"], ["4x5", "4×5 (20 frames) — Detailed"], ["5x5", "5×5 (25 frames) — Dense Overview"], ["3x4", "3×4 (12 frames) — Compact"], ["4x6", "4×6 (24 frames) — Extended"]],
-              disabled: busy === "settings",
+              
               onChange: value => updateSetting("contactSheetGrid", value)
             })),
           React.createElement(Switch, { setting: "contactSheetBanner", defaultValue: true,
@@ -1501,7 +1500,7 @@
             React.createElement("small", null, "Optional path to an external custom contact sheet script. Leave blank to use the high-speed built-in generator."),
             React.createElement("input", {
               value: config.contactSheetScript || "",
-              disabled: busy === "settings",
+              
               onChange: e => setConfig({ ...config, contactSheetScript: e.target.value }),
               onBlur: e => updateSetting("contactSheetScript", e.target.value.trim()),
               placeholder: "Leave blank to use built-in generator"
@@ -1549,7 +1548,7 @@
             React.createElement("small", null, "Scene used by Step 6 tests. While set, Automatic Renaming is restricted to this scene only."),
             React.createElement("input", {
               value: config.testSceneId || "",
-              disabled: busy === "settings",
+              
               onChange: e => setConfig({ ...config, testSceneId: e.target.value }),
               onBlur: e => updateSetting("testSceneId", e.target.value.trim()),
               placeholder: "Leave blank for all scenes"
