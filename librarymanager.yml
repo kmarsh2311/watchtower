@@ -192,6 +192,8 @@ tasks:
       mode: activity
 hooks:
   - name: Rename Edited Scene
-    description: Handles relevant scene metadata changes when Automatic Renaming is explicitly enabled.
+    description: Handles scene, performer, and studio metadata updates when Automatic Renaming is explicitly enabled.
     triggeredBy:
       - Scene.Update.Post
+      - Performer.Update.Post
+      - Studio.Update.Post

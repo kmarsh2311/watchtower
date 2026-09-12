@@ -59,6 +59,22 @@ query LibraryManagerScene($id: ID!) {
 }
 """
 
+PERFORMER_SCENES_QUERY = """
+query LibraryManagerPerformerScenes($id: ID!) {
+  findScenes(scene_filter: { performers: { value: [$id], modifier: INCLUDES } }, filter: { per_page: -1 }) {
+    scenes { id }
+  }
+}
+"""
+
+STUDIO_SCENES_QUERY = """
+query LibraryManagerStudioScenes($id: ID!) {
+  findScenes(scene_filter: { studios: { value: [$id], modifier: INCLUDES } }, filter: { per_page: -1 }) {
+    scenes { id }
+  }
+}
+"""
+
 ROOTS_QUERY = "query LibraryManagerRoots { configuration { general { stashes { path } } } }"
 SCENE_COUNT_QUERY = "query LibraryManagerSceneCount { findScenes(filter: {per_page: 1}) { count } }"
 
@@ -596,37 +612,80 @@ def main():
     if hook_context:
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
+        if not config.get("automaticRenaming"):
+            print(json.dumps({"output": "Automatic rename skipped: Automatic Renaming is disabled."}))
+            return
+
+        hook_type = str(hook_context.get("type") or "").strip()
         changed = hook_context.get("input") or {}
-        relevant = bool({"title", "studio_id", "performer_ids"} & set(changed))
-        if not config.get("automaticRenaming") or not relevant:
-            print(json.dumps({"output": "Automatic rename skipped."}))
-            return
-        scene_id = hook_context.get("id")
-        if not automatic_scene_allowed(config, scene_id):
-            audit(database_path, "rename", "metadata edit", "skipped", scene_id=scene_id,
-                  detail=f"Automatic filename changes are limited to Test Scene ID {config.get('testSceneId')}")
-            print(json.dumps({"output": f"Automatic rename skipped: scene {scene_id} is outside Test Scene ID scope."}))
-            return
-        try:
-            refresh_scene(stash, database_path, scene_id)
-            preview = preview_scene_filename(database_path, str(scene_id), config)
-            if preview.get("status") == "unchanged":
-                cancel_pending_rename(database_path, str(scene_id))
-                print(json.dumps({"output": f"Scene {scene_id} filename matches current file on disk; no rename needed."}))
+        entity_id = hook_context.get("id")
+
+        target_scene_ids = []
+        if "Performer" in hook_type:
+            relevant = bool({"name", "disambiguation", "alias_list"} & set(changed)) if changed else True
+            if not relevant:
+                print(json.dumps({"output": "Performer update has no relevant naming changes; skipping."}))
                 return
-        except Exception:
-            pass
+            try:
+                res = stash.call_GQL(PERFORMER_SCENES_QUERY, {"id": str(entity_id)})
+                target_scene_ids = [str(s["id"]) for s in (((res or {}).get("findScenes") or {}).get("scenes") or []) if s.get("id")]
+            except Exception as e:
+                activity_logger().error("Failed to query scenes for performer %s: %s", entity_id, e)
+        elif "Studio" in hook_type:
+            relevant = bool({"name"} & set(changed)) if changed else True
+            if not relevant:
+                print(json.dumps({"output": "Studio update has no name changes; skipping."}))
+                return
+            try:
+                res = stash.call_GQL(STUDIO_SCENES_QUERY, {"id": str(entity_id)})
+                target_scene_ids = [str(s["id"]) for s in (((res or {}).get("findScenes") or {}).get("scenes") or []) if s.get("id")]
+            except Exception as e:
+                activity_logger().error("Failed to query scenes for studio %s: %s", entity_id, e)
+        else:
+            relevant = bool({"title", "studio_id", "performer_ids", "code", "date"} & set(changed)) if changed else True
+            if not relevant:
+                print(json.dumps({"output": "Scene update has no relevant naming metadata changes; skipping."}))
+                return
+            if entity_id:
+                target_scene_ids = [str(entity_id)]
+
+        if not target_scene_ids:
+            print(json.dumps({"output": "No associated scenes found for rename."}))
+            return
+
         rename_settle = int(config.get("renameSettleSeconds") if config.get("renameSettleSeconds") is not None else 30)
-        should_schedule = enqueue_rename(database_path, str(scene_id), time.time(), debounce_seconds=rename_settle)
-        if should_schedule:
+        scheduled_any = False
+        enqueued_count = 0
+
+        for sid in target_scene_ids:
+            if not automatic_scene_allowed(config, sid):
+                audit(database_path, "rename", "metadata edit", "skipped", scene_id=sid,
+                      detail=f"Automatic filename changes are limited to Test Scene ID {config.get('testSceneId')}")
+                continue
+            try:
+                refresh_scene(stash, database_path, sid)
+                preview = preview_scene_filename(database_path, str(sid), config)
+                if preview.get("status") == "unchanged":
+                    cancel_pending_rename(database_path, str(sid))
+                    continue
+            except Exception:
+                pass
+            should_schedule = enqueue_rename(database_path, str(sid), time.time(), debounce_seconds=rename_settle)
+            if should_schedule:
+                scheduled_any = True
+            enqueued_count += 1
+
+        if scheduled_any:
             try:
                 job_id = stash.run_plugin_task("librarymanager", "Process Rename Queue")
+                print(json.dumps({"output": f"{enqueued_count} scene(s) queued for rename worker job {job_id}."}))
             except Exception:
                 release_worker_schedule(database_path)
                 raise
-            print(json.dumps({"output": f"Scene {scene_id} queued for rename worker job {job_id}."}))
+        elif enqueued_count > 0:
+            print(json.dumps({"output": f"{enqueued_count} scene(s) coalesced into the pending rename queue."}))
         else:
-            print(json.dumps({"output": f"Scene {scene_id} coalesced into the pending rename queue."}))
+            print(json.dumps({"output": "No scene filenames required renaming."}))
         return
     elif mode == "generate_incoming_contact_sheets":
         stash = StashInterface(plugin_input["server_connection"])
@@ -1137,7 +1196,7 @@ def main():
         arguments = plugin_input.get("args") or {}
         override_config = arguments.get("config") or arguments.get("filename_options") or {}
         active_config = {**config, **override_config}
-        scene_id = str(arguments.get("scene_id") or active_config.get("testSceneId") or "").strip()
+        scene_id = str(arguments.get("scene_id") or active_config.get('testSceneId') or "").strip()
         if not scene_id:
             raise ValueError("Set Test Scene ID in the Stash Library Manager settings first")
         refresh_scene(stash, database_path, scene_id)
