@@ -1412,12 +1412,16 @@ def _remove_legacy_studio(base: str, studio: str | None) -> str:
     return re.sub(r"\s+", " ", cleaned).strip(" -")
 
 
-def _metadata_name_pattern(name: str) -> str | None:
+def _metadata_name_pattern(name: str, include_connectors: bool = False) -> str | None:
     """Return an exact-name regex that tolerates spaces/punctuation but not partial words."""
     parts = re.findall(r"\w+", str(name or ""), flags=re.UNICODE)
     if not parts:
         return None
-    return r"(?<!\w)" + r"[\W_]*".join(re.escape(part) for part in parts) + r"(?!\w)"
+    core = r"(?<!\w)" + r"[\W_]*".join(re.escape(part) for part in parts) + r"(?!\w)"
+    if include_connectors:
+        connectors = r"(?:(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in)|[&,+])"
+        return rf"(?:{connectors}\s+)?{core}(?:\s+{connectors})?"
+    return core
 
 
 def _strip_managed_metadata(base: str, studios, performers, options: dict | None = None) -> str:
@@ -1435,8 +1439,9 @@ def _strip_managed_metadata(base: str, studios, performers, options: dict | None
 
     # Longest first prevents a shorter known name from consuming part of a longer one.
     names.sort(key=lambda value: len(_compact_filename_text(value)), reverse=True)
+    strip_connectors = opts.get("stripConnectiveWords") is not False
     for name in names:
-        pattern = _metadata_name_pattern(name)
+        pattern = _metadata_name_pattern(name, include_connectors=strip_connectors)
         if pattern:
             cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
 

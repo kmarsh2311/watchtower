@@ -277,6 +277,12 @@ class InventoryTests(unittest.TestCase):
             'Studio Name Episode 1 - Studio Name - Performer A'
         )
 
+        # 8. Partially tagged performers consuming attached conjunction (e.g. Scene 5555 DBB Benvi & Ty Roderick)
+        self.assertEqual(
+            _proposed_stem('DBB Benvi & Ty Roderick Born Slave Ch3', 'Dream Boy Bondage', ['Ty Roderick'], {}),
+            'DBB Benvi Born Slave Ch3 - Dream Boy Bondage - Ty Roderick'
+        )
+
         # 7. Leftover conjunction with hyphen (e.g. 8TB Devin Lewis & Jimmy Andrews - Wet & Wild FHD)
         self.assertEqual(
             _proposed_stem('8TB Devin Lewis & Jimmy Andrews - Wet & Wild FHD', '8teenBoy', ['Jimmy Andrews', 'Devin Lewis'], {}),
