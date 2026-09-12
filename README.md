@@ -11,6 +11,12 @@
 [![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
 [![Architecture](https://img.shields.io/badge/Zero--Data--Loss-Guaranteed-00f0ff?style=for-the-badge)](#-zero-data-loss-philosophy)
 
+<br />
+
+<p align="center">
+  <img src="assets/overview_terminal.png" alt="Watchtower Live Feed Terminal" width="100%" />
+</p>
+
 </div>
 
 ---
@@ -27,34 +33,19 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 
 ## 🔥 Key Features
 
-```
- ┌─────────────────────────────────────────────────────────────────────────────┐
- │                           WATCHTOWER ARCHITECTURE                           │
- └─────────────────────────────────────────────────────────────────────────────┘
-      │
-      ├── 📡 24/7 Live Filesystem Watcher (Continuous background drive monitoring)
-      │
-      ├── 📥 Smart Ingest Pipeline (Drop-folder settle timers & auto-import)
-      │
-      ├── ⚡ External Move Reconnection (Tracks Finder/Explorer moves by OSHash)
-      │
-      ├── 🖼️ Visual Contact Sheets (High-res storyboards on disk with zero Stash clutter)
-      │
-      ├── 🛡️ Atomic Renaming Engine (Sync'd sidecar rollback & collision protection)
-      │
-      └── 🖥️ Cyberpunk Control Terminal (Live stream feed, diagnostics & flight recorder)
-```
-
----
-
 ### 📡 1. 24/7 Live Storage Monitoring & Background Watcher
 * **Continuous Real-Time Tracking:** Watchtower runs a silent, lightweight watchdog service that monitors all your configured Stash library roots simultaneously.
 * **No More Manual Rescan Sweeps:** New files, modifications, deletions, and folder relocations are detected in real-time the moment they happen on your drives.
+* **Quick-Peek Status Popover:** Click the glowing lighthouse in Stash's top navigation bar to check watcher health, pending changes, and folder states instantly from any page.
 * **OS-Native Startup Daemon:** Keeps monitoring 24/7 without needing a web browser open:
   * **macOS:** Native LaunchAgent plist with protected tokens.
   * **Windows:** Silent background VBS runtime (`WshShell.Run`).
   * **Linux:** GNOME `.desktop` autostart daemon.
 * **Self-Healing Heartbeat:** 2-second heartbeat loop, dead PID detection via `os.kill(pid, 0)`, and graceful token-authenticated control.
+
+<p align="center">
+  <img src="assets/filesystem_monitor.png" alt="Filesystem Monitor" width="100%" />
+</p>
 
 ---
 
@@ -64,6 +55,10 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 * **Dynamic Stability Settle Timers:** Watches file size and `mtime` continuously. The import timer (configurable from 1 to 30 mins) automatically resets if a transfer is still writing.
 * **Targeted Automated Scans:** Once a video is 100% stable, Watchtower triggers an exact-path Stash scan with thumbnail, sprite, and perceptual-hash generation—importing only the new file in seconds.
 * **Subfolder Discovery:** Automatically discovers and processes videos nested inside newly downloaded subfolders.
+
+<p align="center">
+  <img src="assets/navbar_status.png" alt="Watchtower Quick Status" width="45%" />
+</p>
 
 ---
 
@@ -79,6 +74,10 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 * **Smart 9:16 Vertical Video Reflow:** Automatically detects smartphone and social media vertical videos and optimizes the grid layout for standard widescreen viewing.
 * **Custom Grid Layouts & Headers:** Choose 4x4 (16 frames), 5x4 (20 frames widescreen), or custom grids with detailed metadata header banners displaying resolution, file size, duration, and video codec.
 
+<p align="center">
+  <img src="assets/contact_sheets.png" alt="Contact Sheets CSM" width="100%" />
+</p>
+
 ---
 
 ### 🛡️ 5. Atomic Renaming Engine & Sidecar Safety
@@ -87,6 +86,10 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 * **Atomic Rollback Guarantee:** If Stash or the filesystem encounters an error mid-rename, all companion sidecars are restored to their original names in reverse dependency order.
 * **Kernel-Level Lock Protection:** Cross-platform file locking (`fcntl` / `msvcrt`) eliminates race conditions between simultaneous Stash hooks.
 * **Clean Conjunction Stripping:** Automatically cleans dangling connective words (`and`, `&`, `feat.`, `with`, `vs.`) and collapses multi-dashes without ever producing empty stems.
+
+<p align="center">
+  <img src="assets/filename_management.png" alt="Filename Management Sandbox" width="100%" />
+</p>
 
 ---
 
@@ -112,7 +115,7 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 
 ### Method 2: Manual Install
 1. Download [`librarymanager.zip`](https://kmarsh2311.github.io/my-stash-plugins/librarymanager.zip).
-2. Extract the contents into your Stash plugins folder:
+2. Extract the contents into your Stash plugins directory:
    * **Linux/macOS:** `~/.stash/plugins/librarymanager/`
    * **Windows:** `C:\Users\<Username>\.stash\plugins\librarymanager\`
 3. Go to **Settings ➔ Plugins** and click **Reload Plugins**.
