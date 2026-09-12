@@ -518,7 +518,7 @@
       };
     }, [show]);
 
-    // step 0: Welcome, steps 1..5: Setup, step 6: Complete
+    // step 0: Welcome, steps 1..6: Setup, step 7: Complete
     const [step, setStep] = React.useState(0);
     const [stepDirection, setStepDirection] = React.useState("forward");
     const [isExiting, setIsExiting] = React.useState(false);
@@ -604,7 +604,8 @@
       { num: 2, label: "Storage Roots" },
       { num: 3, label: "Watched Folders" },
       { num: 4, label: "Index Database" },
-      { num: 5, label: "Renaming" }
+      { num: 5, label: "Renaming" },
+      { num: 6, label: "Contact Sheets" }
     ];
 
     const capabilities = [
@@ -666,7 +667,7 @@
             }),
             React.createElement("div", null,
               React.createElement("span", { className: "lm-wizard-badge" },
-                step === 0 ? "WELCOME" : step === 6 ? "COMPLETE" : `STEP ${step} OF 5`),
+                step === 0 ? "WELCOME" : step === 7 ? "COMPLETE" : `STEP ${step} OF 6`),
               React.createElement("h2", null, "Watchtower Guided Setup")
             )
           ),
@@ -677,7 +678,7 @@
             title: "Close Setup Wizard"
           }, "✕")
         ),
-        step > 0 && step < 6 && React.createElement("div", { className: "lm-wizard-stepper" },
+        step > 0 && step < 7 && React.createElement("div", { className: "lm-wizard-stepper" },
           stepsList.map(s => {
             const isDone = step > s.num;
             const isCurrent = step === s.num;
@@ -933,7 +934,49 @@
                 "All naming rules, separators, section ordering, multi-performer formatting, and the real-time simulation sandbox can be configured and tested safely in the Filename Management tab.")
             )
           ),
-          step === 6 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}`, style: { textAlign: "center", padding: "1.4rem 0.5rem" } },
+          step === 6 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
+            React.createElement("h3", null, "6. Contact Sheet Previews (CSM)"),
+            React.createElement("p", { className: "lm-wizard-desc", style: { marginBottom: "12px" } },
+              "Watchtower can automatically generate high-resolution video storyboard contact sheets when new scenes are indexed or added to Stash."),
+            React.createElement("div", {
+              className: "lm-wizard-option-card",
+              style: {
+                marginBottom: "14px",
+                padding: "0.75rem 0.95rem",
+                borderColor: config.generateContactSheets === true ? "#2fa66d" : "rgba(140, 155, 185, 0.25)",
+                background: config.generateContactSheets === true ? "rgba(47, 166, 109, 0.1)" : "rgba(0, 0, 0, 0.25)"
+              }
+            },
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "10px" } },
+                React.createElement("div", null,
+                  React.createElement("strong", { style: { fontSize: "0.95rem" } }, "Enable Automatic Contact Sheets?"),
+                  React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.83rem" } },
+                    config.generateContactSheets === true
+                      ? "Active — Storyboard contact sheets will be generated automatically for new videos."
+                      : "OFF by default — Generate contact sheets manually on demand, or enable whenever ready.")
+                ),
+                React.createElement("button", {
+                  type: "button",
+                  className: `btn ${config.generateContactSheets === true ? "btn-primary" : "btn-secondary"}`,
+                  style: { minWidth: "88px", fontWeight: 700, padding: "0.38rem 0.8rem", fontSize: "0.84rem" },
+                  onClick: (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    updateSetting("generateContactSheets", !(config.generateContactSheets === true));
+                  }
+                }, config.generateContactSheets === true ? "✓ Active" : "Disabled (Off)")
+              )
+            ),
+            React.createElement("div", {
+              className: "lm-wizard-callout",
+              style: { background: "rgba(52, 86, 164, 0.15)", borderColor: "rgba(77, 113, 199, 0.4)" }
+            },
+              React.createElement("strong", { style: { color: "#79a2ff", display: "block", marginBottom: "4px" } }, "🖼️ Customize in Contact Sheets (CSM)"),
+              React.createElement("p", { style: { margin: 0, fontSize: "0.83rem", color: "#ccd6ea", lineHeight: 1.45 } },
+                "Grid layouts (e.g. 4x4, 5x4), header banners with video codecs/duration, auto-adjustment for vertical 9:16 phone videos, and custom generator scripts can be configured anytime in the Contact Sheets tab.")
+            )
+          ),
+          step === 7 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}`, style: { textAlign: "center", padding: "1.4rem 0.5rem" } },
             React.createElement("div", { style: { fontSize: "3.5rem", marginBottom: "0.4rem" } }, "🎉"),
             React.createElement("h3", { style: { fontSize: "1.45rem", color: "#39ff64" } }, "You're All Set!"),
             React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "520px", margin: "0.4rem auto 1.4rem" } },
@@ -954,18 +997,18 @@
             style: { marginLeft: "auto", padding: "0.55rem 1.4rem", fontSize: "0.95rem", fontWeight: 700, background: "#218657", borderColor: "#2da76f" },
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(1); }
           }, "🚀 Get Started ➔"),
-          step > 0 && step < 6 && React.createElement("button", {
+          step > 0 && step < 7 && React.createElement("button", {
             type: "button",
             className: "btn btn-secondary",
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(step - 1); }
           }, step === 1 ? "⬅ Back to Welcome" : "⬅ Back"),
-          step > 0 && step < 6 && React.createElement("button", {
+          step > 0 && step < 7 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
             style: { marginLeft: "auto" },
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(step + 1); }
-          }, step === 5 ? "Review & Complete ➔" : "Next ➔"),
-          step === 6 && React.createElement("button", {
+          }, step === 6 ? "Review & Complete ➔" : "Next ➔"),
+          step === 7 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
             style: { marginLeft: "auto", background: "#218657", borderColor: "#2da76f", fontWeight: 700 },
