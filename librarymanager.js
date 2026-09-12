@@ -365,8 +365,23 @@
 
     return React.createElement("div", { className: "lm-real-scene-tester" },
       React.createElement("div", { className: "lm-real-scene-header" },
-        React.createElement("strong", null, "Test Rules with a Real Scene"),
-        React.createElement("small", null, "Enter a Scene ID, search by title/performer, or pick a recent scene to preview its filename and artwork.")),
+        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+          React.createElement("strong", null, "Test Rules with a Real Scene"),
+          React.createElement("span", {
+            style: {
+              fontSize: "0.72rem",
+              padding: "2px 8px",
+              borderRadius: "12px",
+              background: "rgba(34, 197, 94, 0.12)",
+              color: "#4ade80",
+              border: "1px solid rgba(74, 222, 128, 0.3)",
+              fontWeight: 500,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "4px"
+            }
+          }, "✓ Safe Dry-Run — No files are modified")),
+        React.createElement("small", null, "Enter a Scene ID, search by title/performer, or pick a recent scene to simulate renaming. No files are modified.")),
       React.createElement("div", { className: "lm-real-scene-inputs" },
         React.createElement("input", {
           type: "text",
