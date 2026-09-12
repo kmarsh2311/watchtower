@@ -395,6 +395,8 @@ class CompletedDownloadWorker(threading.Thread):
         if not self.accepts(path):
             return False
         normalized = str(Path(path).resolve())
+        if consume_expected_create(self.database_path, normalized) or consume_expected_create(self.database_path, str(path)):
+            return False
         if self._is_in_inventory(normalized) or self._was_imported(normalized):
             return False
         try:
@@ -732,8 +734,10 @@ class CompletedDownloadWorker(threading.Thread):
                 continue
             if candidate.get("is_temporary"):
                 continue
-            if now - candidate["stable_since"] >= self.settle_seconds:
-                if candidate.get("is_companion") or Path(path).suffix.lower() in COMPANION_EXTENSIONS:
+            is_comp = candidate.get("is_companion") or Path(path).suffix.lower() in COMPANION_EXTENSIONS
+            settle_needed = min(3, self.settle_seconds) if is_comp else self.settle_seconds
+            if now - candidate["stable_since"] >= settle_needed:
+                if is_comp:
                     self._process_companion(path, candidate)
                 else:
                     with self.lock:
@@ -790,6 +794,8 @@ class LibraryEventHandler(FileSystemEventHandler):
             return
         # Resolve any transient delete event if the file is recreated/present
         resolve_filesystem_event(self.database_path, "deleted", event.src_path)
+        if consume_expected_create(self.database_path, event.src_path):
+            return
         incoming_candidate = bool(not event.is_directory and self.incoming_worker and self.incoming_worker.submit(event.src_path))
         if self._relevant(event.src_path, event.is_directory) and not incoming_candidate:
             if self.incoming_worker and self.incoming_worker.incoming_folder:
