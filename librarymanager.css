@@ -2174,7 +2174,7 @@ a.lm-activity-scene-pill:hover {
 }
 
 .lm-wizard-backdrop.lm-exiting {
-  animation: lmFadeOutBackdrop 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  animation: lmFadeOutBackdrop 0.22s cubic-bezier(0.4, 0, 1, 1) forwards !important;
   pointer-events: none !important;
 }
 
@@ -2203,7 +2203,7 @@ a.lm-activity-scene-pill:hover {
 }
 
 .lm-wizard-dialog.lm-exiting {
-  animation: lmDialogExit 0.28s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  animation: lmDialogExit 0.22s cubic-bezier(0.4, 0, 1, 1) forwards !important;
   pointer-events: none !important;
 }
 

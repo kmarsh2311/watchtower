@@ -546,12 +546,13 @@
     };
 
     const handleCloseGracefully = (targetTab = null) => {
+      if (isExiting) return;
       setIsExiting(true);
       window.setTimeout(() => {
         onHide();
         setIsExiting(false);
         if (targetTab) onNavigateTab(targetTab);
-      }, 280);
+      }, 220);
     };
 
     const handleUpdateFolder = (index, val) => {
@@ -593,10 +594,10 @@
       }
     };
 
-    const handleFinish = async (targetTab = "overview") => {
-      await updateSetting("onboardingCompleted", true);
-      window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
+    const handleFinish = (targetTab = "overview") => {
       handleCloseGracefully(targetTab);
+      updateSetting("onboardingCompleted", true).catch(() => {});
+      window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
     };
 
     const stepsList = [
