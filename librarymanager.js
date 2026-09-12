@@ -1452,9 +1452,19 @@
       error && React.createElement("div", { className: "lm-message error" }, error),
       notice && React.createElement("div", { className: "lm-message" }, notice),
       React.createElement("div", { className: "lm-layout" },
-        React.createElement("nav", { className: "lm-tabs" }, sections.map(([id, label]) => React.createElement("button", {
-          key: id, className: tab === id ? "active" : "", onClick: () => setTab(id)
-        }, label))), React.createElement("div", { className: "lm-content" }, data ? content : React.createElement("p", null, "Loading Library Manager…"))),
+        React.createElement("nav", { className: "lm-tabs" },
+          sections.map(([id, label]) => React.createElement("button", {
+            key: id, className: tab === id ? "active" : "", onClick: () => setTab(id)
+          }, label)),
+          React.createElement("div", { className: "lm-tabs-divider" }),
+          React.createElement("a", {
+            href: "https://buymeacoffee.com/kamarsh",
+            target: "_blank",
+            rel: "noopener noreferrer",
+            className: "lm-kitkat-btn",
+            title: "Support continued Watchtower & FastTag development"
+          }, "Buy me a KitKat 🍫")
+        ), React.createElement("div", { className: "lm-content" }, data ? content : React.createElement("p", null, "Loading Library Manager…"))),
       sceneHover && React.createElement("article", { className: "scene-card lm-scene-hover-card",
         style: { left: `${Math.max(8, sceneHover.left)}px`, top: `${Math.max(8, sceneHover.top)}px` },
         onMouseEnter: () => window.clearTimeout(sceneHoverTimer.current), onMouseLeave: scheduleSceneHoverClose },

@@ -1286,3 +1286,40 @@ a.lm-activity-scene-pill:hover {
   user-select: none;
 }
 
+
+
+/* Menu KitKat Support Button */
+.lm-tabs-divider {
+  height: 1px;
+  background: rgba(140, 155, 185, 0.2);
+  margin: 8px 4px;
+}
+
+.lm-kitkat-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 6px 4px 4px;
+  padding: 8px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #fde7b0 !important;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: center;
+  text-decoration: none !important;
+  transition: all 0.16s ease;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.08);
+  cursor: pointer;
+}
+
+.lm-kitkat-btn:hover {
+  background: rgba(245, 158, 11, 0.24);
+  border-color: #f59e0b;
+  color: #ffffff !important;
+  box-shadow: 0 0 14px rgba(245, 158, 11, 0.35);
+  transform: translateY(-1px);
+}
