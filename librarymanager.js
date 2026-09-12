@@ -759,9 +759,9 @@
               "How would you like Watchtower to format filenames when scene metadata is edited? Automatic Renaming is OFF by default so you can test safely."),
             React.createElement("div", { className: "lm-wizard-presets-grid" },
               [
-                { id: "standard", title: "Standard (Recommended)", example: "Helix Studios - 2024-05-12 - Sunset Bay (Alex Smith, Jamie Jones).mp4" },
-                { id: "performer_first", title: "Performer Focus", example: "Alex Smith, Jamie Jones - 2024-05-12 - Sunset Bay (Helix Studios).mp4" },
-                { id: "clean_title", title: "Clean Title Only", example: "Sunset Bay (Helix Studios).mp4" }
+                { id: "standard", title: "Standard (Recommended)", example: "Studio Name - 2024-05-12 - Scene Title (Performer One, Performer Two).mp4" },
+                { id: "performer_first", title: "Performer Focus", example: "Performer One, Performer Two - 2024-05-12 - Scene Title (Studio Name).mp4" },
+                { id: "clean_title", title: "Clean Title Only", example: "Scene Title (Studio Name).mp4" }
               ].map(p => React.createElement("div", {
                 key: p.id,
                 className: `lm-wizard-preset-card ${namingPreset === p.id ? "active" : ""}`,
@@ -1241,7 +1241,7 @@
     const filenameSectionCharacters = { dash: " - ", comma: ", ", space: " ", underscore: "_" };
     const filenamePerformerCharacters = { comma: ", ", space: " ", dash: " - ", ampersand: " & " };
     const performerLimit = Number(config.maxPerformersInFilename || 0);
-    const samplePerformers = ["Alex Smith", "Jamie Jones"];
+    const samplePerformers = ["Performer One", "Performer Two"];
     const limitedPerformers = performerLimit > 0 ? samplePerformers.slice(0, performerLimit) : samplePerformers;
     const exampleParts = {
       title: "Example Scene",
