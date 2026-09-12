@@ -75,7 +75,7 @@ settings:
     type: NUMBER
   generateContactSheets:
     displayName: Generate Visual Contact Sheets (CSM)
-    description: Automatically generate a visual contact sheet companion image (.mp4.jpg) for new videos within your configured location scope.
+    description: Automatically generate a visual contact sheet companion image for new videos within your configured location scope.
     type: BOOLEAN
   refreshContactSheetsOnRename:
     displayName: Refresh Contact Sheets on Metadata Edits

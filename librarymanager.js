@@ -471,11 +471,23 @@
 
     function Switch({ setting, label, help, defaultValue = false }) {
       const isChecked = defaultValue ? config[setting] !== false : config[setting] === true;
-      return React.createElement("label", { className: "lm-switch-row", title: help },
-        React.createElement("input", { type: "checkbox", checked: isChecked,
-          disabled: busy === "settings", onChange: e => updateSetting(setting, e.target.checked) }),
-        React.createElement("span", null, React.createElement("strong", null, label),
-          React.createElement("small", null, help)));
+      const inputId = `lm-switch-${setting}`;
+      return React.createElement("div", { className: "lm-switch-row", title: help },
+        React.createElement("input", {
+          id: inputId,
+          type: "checkbox",
+          checked: isChecked,
+          disabled: busy === "settings",
+          onChange: e => updateSetting(setting, e.target.checked)
+        }),
+        React.createElement("div", { className: "lm-switch-text" },
+          React.createElement("label", {
+            htmlFor: inputId,
+            style: { cursor: "pointer", display: "inline-block", margin: 0, userSelect: "none" }
+          }, React.createElement("strong", null, label)),
+          React.createElement("small", null, help)
+        )
+      );
     }
 
     const inventory = data?.inventory;
@@ -1425,11 +1437,11 @@
           React.createElement("p", { className: "lm-help", style: { marginTop: "10px" } },
             "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."))))
     else if (tab === "csm") content = React.createElement(React.Fragment, null,
-      panel("Contact Sheets (CSM)", "Generate multi-frame visual contact sheet companion images (.mp4.jpg) alongside your video files.",
+      panel("Contact Sheets (CSM)", "Generate multi-frame visual contact sheet companion images alongside your video files.",
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "generateContactSheets", defaultValue: false,
             label: "Generate Visual Contact Sheets (CSM)",
-            help: "Automatically generate a visual contact sheet companion image (.mp4.jpg) for new videos within your configured location scope." }),
+            help: "Automatically generate a visual contact sheet companion image for new videos within your configured location scope." }),
           React.createElement(Switch, { setting: "refreshContactSheetsOnRename", defaultValue: true,
             label: "Refresh Contact Sheets on Metadata Edits",
             help: "Re-render contact sheets with updated title and performer banners when scene metadata is edited in Stash. If turned off, existing contact sheets are kept and safely renamed alongside the video." }),
