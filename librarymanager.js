@@ -648,6 +648,7 @@
       {
         icon: "🏷️",
         title: "Organized Filenames",
+        badge: "BETA",
         short: "Standardizes filenames from Studio, Performers, and Title.",
         details: "Automatically formats filenames using clean, customizable templates whenever metadata changes in Stash — 100% non-destructive with collision protection.",
         side: "right"
@@ -745,7 +746,10 @@
                   React.createElement("span", { style: { fontSize: "1.15rem", flexShrink: 0 } }, cap.icon),
                   React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                     React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" } },
-                      React.createElement("strong", { style: { fontSize: "0.86rem" } }, cap.title),
+                      React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "6px" } },
+                        React.createElement("strong", { style: { fontSize: "0.86rem" } }, cap.title),
+                        cap.badge && React.createElement("span", { className: "lm-badge-beta" }, cap.badge)
+                      ),
                       React.createElement("span", {
                         className: "lm-chip-info-cue",
                         title: "Hover for details"
@@ -894,7 +898,10 @@
             )
           ),
           step === 5 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
-            React.createElement("h3", null, "5. Automatic File Renaming"),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "0.45rem" } },
+              React.createElement("h3", { style: { margin: 0 } }, "5. Automatic File Renaming"),
+              React.createElement("span", { className: "lm-badge-beta" }, "BETA")
+            ),
             React.createElement("p", { className: "lm-wizard-desc", style: { marginBottom: "12px" } },
               "Watchtower can automatically standardize video filenames to match metadata whenever scenes are updated in Stash. Sidecar files (artwork and subtitles) are always renamed in lockstep with collision protection."),
             React.createElement("div", {

@@ -2531,3 +2531,19 @@ a.lm-activity-scene-pill:hover {
   transform: translateY(0) !important;
   transition: opacity 0.24s cubic-bezier(0.16, 1, 0.3, 1) 150ms, transform 0.24s cubic-bezier(0.16, 1, 0.3, 1) 150ms, visibility 0.24s ease 150ms !important;
 }
+
+.lm-badge-beta {
+  display: inline-flex !important;
+  align-items: center !important;
+  font-size: 0.62rem !important;
+  font-weight: 800 !important;
+  letter-spacing: 0.08em !important;
+  text-transform: uppercase !important;
+  padding: 0.12rem 0.42rem !important;
+  border-radius: 0.25rem !important;
+  background: rgba(255, 181, 46, 0.15) !important;
+  color: #ffb52e !important;
+  border: 1px solid rgba(255, 181, 46, 0.45) !important;
+  vertical-align: middle !important;
+  line-height: 1 !important;
+}
