@@ -332,14 +332,15 @@
       });
     }, []);
 
-    const refresh = React.useCallback(async () => {
-      setBusy("refresh"); setError("");
+    const refresh = React.useCallback(async (isUserClick = false) => {
+      if (isUserClick === true) setBusy("refresh");
+      setError("");
       try {
         const [raw, settings] = await Promise.all([operation("dashboard", { limit: 250 }), getConfig()]);
         const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
-        setData({ ...payload, _liveReceivedAt: Date.now() }); setConfig(settings); setNotice("");
+        setData({ ...payload, _liveReceivedAt: Date.now() }); setConfig(settings);
       } catch (e) { setError(e.message); }
-      finally { setBusy(""); }
+      finally { if (isUserClick === true) setBusy(""); }
     }, []);
 
     const loadReports = React.useCallback(async () => {
@@ -497,8 +498,9 @@
     }
 
     function TaskButton({ name, label, dangerous, variant, help, afterTab, showResults }) {
+      const isTaskRunning = busy === `task:${name}` || busy === name || busy === "task";
       return React.createElement(Button, { variant: variant || (dangerous ? "danger" : "secondary"),
-        disabled: !!busy, onClick: () => task(name, dangerous, afterTab, showResults), title: help || label || name }, label || name);
+        disabled: isTaskRunning, onClick: () => task(name, dangerous, afterTab, showResults), title: help || label || name }, label || name);
     }
 
     function Switch({ setting, label, help, defaultValue = false }) {
@@ -813,7 +815,7 @@
               className: `lm-terminal-refresh-btn ${busy === "refresh" ? "refreshing" : ""}`,
               disabled: !!busy,
               title: "Refresh Watchtower telemetry, queue and activity feed",
-              onClick: refresh
+              onClick: () => refresh(true)
             },
               React.createElement(RestartIcon, { size: 14, className: "lm-refresh-icon", spinning: busy === "refresh" }),
               busy === "refresh" ? " REFRESHING…" : " REFRESH"
