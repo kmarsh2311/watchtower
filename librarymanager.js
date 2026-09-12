@@ -1035,7 +1035,7 @@
   function Dashboard() {
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
-    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(true);
+    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(false);
     const [onboardingBannerDismissed, setOnboardingBannerDismissed] = React.useState(false);
     const [config, setConfig] = React.useState({});
     const [busy, setBusy] = React.useState("");
@@ -3037,7 +3037,7 @@
           })
         ))),
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
-      (data !== null && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
+      (data !== null && !onboardingBannerDismissed && config?.onboardingCompleted !== true) ? React.createElement(OnboardingBanner, {
         onStart: () => setShowOnboardingWizard(true),
         onDismiss: () => setOnboardingBannerDismissed(true)
       }) : null,
