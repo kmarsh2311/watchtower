@@ -273,7 +273,7 @@ class CompletedDownloadWorker(threading.Thread):
         self.started_at = time.time()
         self.last_fallback = self.started_at
         self.generate_contact_sheets = False
-        self.contact_sheet_grid = "4x5"
+        self.contact_sheet_grid = "4x4"
         self.contact_sheet_banner = True
         self.contact_sheet_adjust_vertical = True
         self.contact_sheet_script = ""
@@ -426,7 +426,7 @@ class CompletedDownloadWorker(threading.Thread):
             detail = "Incoming download in progress"
         elif is_companion:
             status = "waiting"
-            detail = f"Waiting for companion file to remain unchanged for {self.settle_seconds // 60} minute(s)"
+            detail = "Waiting for companion file to stabilise"
         else:
             status = "waiting"
             detail = f"Waiting for video to remain unchanged for {self.settle_seconds // 60} minute(s)"
@@ -592,7 +592,8 @@ class CompletedDownloadWorker(threading.Thread):
         except Exception as error:
             if attempts < self.max_attempts and Path(path).is_file():
                 retry_at = time.time()
-                self.candidates[path] = {**candidate, "stable_since": retry_at, "attempts": attempts}
+                with self.lock:
+                    self.candidates[path] = {**candidate, "stable_since": retry_at, "attempts": attempts}
                 self._save_state(path, "waiting", stable_since=retry_at, attempts=attempts,
                                  detail=f"Scan attempt {attempts} failed; it will retry: {error}")
             else:
@@ -804,8 +805,6 @@ class LibraryEventHandler(FileSystemEventHandler):
                     return
                 except (OSError, ValueError):
                     pass
-            if consume_expected_create(self.database_path, event.src_path):
-                return
             if Path(event.src_path).suffix.lower() in COMPANION_EXTENSIONS:
                 cand = Path(event.src_path)
                 parent = cand.parent
@@ -991,8 +990,12 @@ def main():
                         new_cfg = request.get("config") or {}
                         worker.automatic_move_reconciliation = new_cfg.get("automatic_move_reconciliation", worker.automatic_move_reconciliation)
                         worker.notifications = new_cfg.get("mac_notifications", worker.notifications)
-                        incoming_worker.incoming_folder = new_cfg.get("incoming_folder", incoming_worker.incoming_folder)
-                        incoming_worker.enabled = new_cfg.get("incoming_imports", incoming_worker.enabled)
+                        _new_folder_str = new_cfg.get("incoming_folder")
+                        if _new_folder_str is not None:
+                            incoming_worker.incoming_folder = Path(_new_folder_str).resolve() if _new_folder_str else None
+                        _new_enabled = new_cfg.get("incoming_imports")
+                        if _new_enabled is not None:
+                            incoming_worker.enabled = bool(_new_enabled and incoming_worker.incoming_folder)
                         incoming_worker.settle_seconds = new_cfg.get("incoming_settle_seconds", incoming_worker.settle_seconds)
                         incoming_worker.generate_contact_sheets = new_cfg.get("generate_contact_sheets", incoming_worker.generate_contact_sheets)
                         incoming_worker.contact_sheet_grid = new_cfg.get("contact_sheet_grid", incoming_worker.contact_sheet_grid)

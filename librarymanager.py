@@ -556,12 +556,16 @@ def main():
                     pass
                 try:
                     con = connect(database_path)
+                    now_ts = time.time()
                     con.execute(
-                        "INSERT INTO incoming_files (path, file_size, last_modified, settle_until, status, detail) "
-                        "VALUES (?, ?, ?, ?, ?, ?) "
-                        "ON CONFLICT(path) DO UPDATE SET status=excluded.status, detail=excluded.detail",
-                        (str(vid), vid.stat().st_size if vid.exists() else 0, time.time(), time.time(),
-                         "generating_sheet", f"Generating contact sheet {current_num} of {total_missing} ({remaining_num} remaining)")
+                        "INSERT INTO incoming_files "
+                        "(path, first_seen_at, last_checked_at, size, stable_since, settle_seconds, status, detail) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                        "ON CONFLICT(path) DO UPDATE SET last_checked_at=excluded.last_checked_at, "
+                        "status=excluded.status, detail=excluded.detail",
+                        (str(vid), now_ts, now_ts, vid.stat().st_size if vid.exists() else 0,
+                         now_ts, 0, "generating_sheet",
+                         f"Generating contact sheet {current_num} of {total_missing} ({remaining_num} remaining)")
                     )
                     con.commit()
                     con.close()
