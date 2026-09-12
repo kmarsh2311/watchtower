@@ -768,10 +768,21 @@ def main():
             destination = event.get("destination_path") or event.get("source_path")
             if not destination or not Path(destination).is_file():
                 raise ValueError("The destination file no longer exists, so Stash cannot scan it")
-            job_id = stash.metadata_scan(paths=[destination])
-            if not stash.wait_for_job(job_id, timeout=180):
-                raise ValueError(f"Stash scan job {job_id} did not finish")
-            detail = f"Stash scan job {job_id} checked {destination}"
+            try:
+                job_id = stash.metadata_scan(paths=[destination])
+                if not stash.wait_for_job(job_id, timeout=180):
+                    raise ValueError(f"Stash scan job {job_id} did not finish within 3 minutes")
+                detail = f"Stash scan job {job_id} checked {destination}"
+            except Exception:
+                # Mark the event as failed rather than leaving it permanently pending
+                # (e.g. network interruption, Stash restart during the scan wait).
+                _fc = connect(database_path)
+                try:
+                    _fc.execute("UPDATE filesystem_events SET status='failed' WHERE event_key=?", (event_key,))
+                    _fc.commit()
+                finally:
+                    _fc.close()
+                raise
 
         connection = connect(database_path)
         try:

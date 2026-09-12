@@ -774,6 +774,11 @@ class LibraryEventHandler(FileSystemEventHandler):
         self.worker = worker
         self.notifications = notifications
         self.incoming_worker = incoming_worker
+        # Track when each path last had a 'created' event so the delayed
+        # "still missing?" check can tell the difference between a genuine
+        # deletion and a rapid delete-then-recreate (e.g. atomic download swap).
+        self._recent_creates: dict[str, float] = {}
+        self._recent_creates_lock = threading.Lock()
 
     def _relevant(self, path, is_directory):
         return is_directory or Path(path).suffix.lower() in WATCHED_EXTENSIONS
@@ -805,6 +810,11 @@ class LibraryEventHandler(FileSystemEventHandler):
                         break
                 if has_matching_video:
                     return
+            with self._recent_creates_lock:
+                self._recent_creates[event.src_path] = time.monotonic()
+                # Prune entries older than 30 s to prevent unbounded growth
+                cutoff = time.monotonic() - 30.0
+                self._recent_creates = {k: v for k, v in self._recent_creates.items() if v > cutoff}
             record_filesystem_event(self.database_path, "created", event.src_path, is_directory=event.is_directory, initial_status="pending")
 
     def on_deleted(self, event):
@@ -821,6 +831,12 @@ class LibraryEventHandler(FileSystemEventHandler):
                     threading.Timer(3, self._notify_if_still_missing, args=(event.src_path,)).start()
 
     def _notify_if_still_missing(self, path):
+        # Suppress the warning if the file was recreated within 5 s of this check
+        # (e.g. an atomic download swap or in-place replacement).
+        with self._recent_creates_lock:
+            created_at = self._recent_creates.get(path, 0)
+        if time.monotonic() - created_at < 5.0:
+            return
         if not Path(path).exists():
             record_activity(self.database_path, "filesystem", "external deletion", "review", severity="warning",
                             old_path=path, detail="File remained absent after the notification delay")

@@ -254,22 +254,27 @@ def associated_file_target(candidate: Path, current: Path, proposed: Path) -> Pa
     suffix = candidate.suffix.lower()
     candidate_stem_lower = candidate.stem.lower()
     current_stem_lower = current.stem.lower()
+    # Pre-compute normalised keys once — avoids double-calling and prevents
+    # two punctuation-only filenames whose keys both collapse to "" matching each other.
+    key_cand = _sidecar_match_key(candidate.stem)
+    key_curr = _sidecar_match_key(current.stem)
+    stems_match = candidate_stem_lower == current_stem_lower or (
+        bool(key_cand) and key_cand == key_curr
+    )
     if suffix in ASSOCIATED_EXTENSIONS:
-        if candidate_stem_lower == current_stem_lower or (
-            _sidecar_match_key(candidate.stem) and _sidecar_match_key(candidate.stem) == _sidecar_match_key(current.stem)
-        ):
+        if stems_match:
             return candidate.with_name(proposed.stem + candidate.suffix)
     if suffix not in IMAGE_SIDECAR_EXTENSIONS:
         return None
     # Matches exact or bracket/accent-tolerant stem companions (e.g. video.jpg)
-    if candidate_stem_lower == current_stem_lower or (
-        _sidecar_match_key(candidate.stem) and _sidecar_match_key(candidate.stem) == _sidecar_match_key(current.stem)
-    ):
+    if stems_match:
         return candidate.with_name(proposed.stem + candidate.suffix)
     # Covers Stash-style companions such as video.mp4.jpg (exact or bracket/accent-tolerant)
     image_base = candidate.name[:-len(candidate.suffix)]
+    key_img = _sidecar_match_key(image_base)
+    key_curr_name = _sidecar_match_key(current.name)
     if image_base.lower() == current.name.lower() or (
-        _sidecar_match_key(image_base) and _sidecar_match_key(image_base) == _sidecar_match_key(current.name)
+        bool(key_img) and key_img == key_curr_name
     ):
         return candidate.with_name(proposed.name + candidate.suffix)
     return None
@@ -725,9 +730,21 @@ def scene_naming_signature(database_path: Path, scene_id: str):
         connection.close()
 
 
+def _connect_short(database_path: Path) -> sqlite3.Connection:
+    """Open a connection with a short write-lock timeout for hook-critical paths."""
+    connection = sqlite3.connect(database_path, timeout=5)
+    connection.row_factory = sqlite3.Row
+    _ensure_schema(connection, database_path)
+    return connection
+
+
 def enqueue_rename(database_path: Path, scene_id: str, now_timestamp: float, debounce_seconds: float = 1.0) -> bool:
-    """Coalesce a scene's hooks and return True only when a worker must be scheduled."""
-    connection = connect(database_path)
+    """Coalesce a scene's hooks and return True only when a worker must be scheduled.
+
+    Uses a 5-second write-lock timeout (instead of the default 30 s) so that a
+    batch of simultaneous Stash hooks never stalls the UI for half a minute.
+    """
+    connection = _connect_short(database_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
@@ -1910,7 +1927,7 @@ def generate_video_contact_sheet(
     probe_cmd = [
         ffprobe_bin, "-v", "error",
         "-select_streams", "v:0",
-        "-show_entries", "stream=width,height,duration",
+        "-show_entries", "stream=width,height,duration,display_aspect_ratio",
         "-show_entries", "format=duration,size",
         "-of", "json", str(video_file)
     ]
@@ -1941,7 +1958,15 @@ def generate_video_contact_sheet(
     except Exception:
         cols, rows = 4, 4
 
-    is_vertical = height > width
+    # Use Display Aspect Ratio when available — raw pixel dimensions are wrong
+    # for videos with non-square pixels (e.g. 1440x1080 DVD rips with SAR 4:3).
+    dar = stream.get("display_aspect_ratio") or ""
+    try:
+        dar_parts = [int(x) for x in dar.split(":")]
+        display_ratio = dar_parts[0] / dar_parts[1] if len(dar_parts) == 2 and dar_parts[1] else None
+    except (ValueError, ZeroDivisionError):
+        display_ratio = None
+    is_vertical = (display_ratio < 1.0) if display_ratio is not None else (height > width)
     if is_vertical and adjust_vertical:
         cols, rows = max(cols, 6), min(rows, 3)
 
