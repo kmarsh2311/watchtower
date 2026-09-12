@@ -1,95 +1,129 @@
-# Stash Library Manager
+<div align="center">
 
-This is a new, separate project for safe Stash library inventory, reconciliation, monitoring and filename management.
+<img src="assets/watchtower-header.gif" alt="Watchtower for Stash" width="100%" />
 
-## Step 1: read-only inventory
+# 🗼 Watchtower for Stash
+### The Zero-Data-Loss Media Inventory Guardian, Live Filesystem Watcher & Atomic Renaming Engine for Stash
 
-The **Build Read-Only Inventory** task reads scene and file metadata from Stash and records it in `librarymanager.sqlite3`. It checks whether each Stash path currently exists and records path changes, missing files and restored files between runs.
+[![Version](https://img.shields.io/badge/version-1.0.0-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases)
+[![Stash](https://img.shields.io/badge/Stash-v0.26+-ff0055?style=for-the-badge)](https://github.com/stashapp/stash)
+[![Python](https://img.shields.io/badge/Python-3.10+-39ff64?style=for-the-badge)](https://python.org)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
+[![Safety](https://img.shields.io/badge/Safety-Atomic%20Rollback-00f0ff?style=for-the-badge)](#-zero-data-loss-philosophy)
 
-This version does **not** rename, move, delete or modify files. It does **not** update Stash. SQLite is used only as the plugin's local inventory and audit history.
+</div>
 
-After reloading plugins, run:
+---
 
-`Settings → Tasks → Plugin Tasks → Stash Library Manager → Build Read-Only Inventory`
+## ⚡ Overview
 
-The first run establishes a baseline. Later runs can report differences from that baseline.
+**Watchtower** is an enterprise-grade library management plugin and live background daemon built specifically for [Stash](https://github.com/stashapp/stash). 
 
-## Step 2: read-only rename detection
+Designed around a strict **zero-data-loss philosophy**, Watchtower continuously safeguards your library drives: tracking external file moves made in Finder or Explorer, automatically renaming videos and companion sidecars in atomic lockstep, rendering beautiful video contact sheets on disk without cluttering your Stash image database, and ingesting completed downloads the instant they finish.
 
-Run **Find Renamed Files (Read Only)** after building the inventory. For every missing Stash path, it searches the original parent folder for untracked video files with the same size. Where Stash has an OpenSubtitles hash, the candidate hash is verified by reading only the beginning and end of the file.
+Featuring a retro-futuristic Cyberpunk/Lighthouse control console with CRT warm-up animations, real-time sandboxed filename simulation, and a 6-step guided Onboarding Wizard, Watchtower transforms media organization into a fast, safe, and visual experience.
 
-Results are stored in SQLite and written to `reconciliation-report.json`. A match is `verified` only when both size and `oshash` match. Sidecars and images are ignored. Ambiguous and unavailable-folder cases are reported without guessing.
+---
 
-If a matching path is already attached to another Stash file or scene record, it is reported as a `conflict`, including the other IDs. The plugin will never propose silently reassigning an already tracked file.
+## 🔥 Key Features
 
-Step 2 remains completely read-only: it does not change Stash or any library file.
+### 🛡️ 1. Atomic Renaming Engine & Sidecar Safety
+* **Full Multi-Pass Preflight:** Before any file is touched on disk, Watchtower calculates proposed paths, detects duplicate target collisions, verifies 255 UTF-8 byte limits, and validates parent directories.
+* **Synchronized Sidecar Renaming:** Subtitles (`.srt`, `.vtt`) and image artwork (`video.jpg`, `video.mp4.jpg`, `_contact_sheet.jpg`) rename in lockstep with the main video file.
+* **Automatic Rollback:** If Stash or the filesystem encounters any error mid-rename, all companion sidecars are restored to their original names in reverse dependency order.
+* **Cross-Platform Lock:** Uses kernel-level file locks (`fcntl.LOCK_EX` on Unix/macOS, `msvcrt.LK_LOCK` on Windows) to eliminate race conditions between simultaneous Stash hooks.
+* **Clean Metadata Stripping:** Automatically removes leftover conjunctions (`and`, `&`, `feat.`, `with`, `vs.`) and collapses multi-dashes without ever leaving an empty filename stem.
 
-## Step 3: safe resolution planning
+### 📡 2. Real-Time Background Filesystem Watcher
+* **Live Storage Monitoring:** A lightweight background watchdog service continuously tracks all your configured Stash library roots.
+* **Automatic Move Reconnection:** When files or folders are organized outside of Stash in Finder or Windows Explorer, Watchtower verifies file size and `OSHash` and asks Stash to adopt the new path without destructive rescans.
+* **OS-Native Startup Daemon:** Optionally launches on system boot and retries until Stash comes online:
+  * **macOS:** Native LaunchAgent plist with protected runtime tokens.
+  * **Windows:** Hidden background VBS runtime (`WshShell.Run`).
+  * **Linux:** GNOME `.desktop` autostart entry.
+* **Heartbeat & Dead PID Detection:** Self-healing watchdog with 2-second heartbeat loop and token-authenticated cooperative stop.
 
-Run a fresh inventory and reconciliation, then run **Build Resolution Plan (Read Only)**. The planner compares the stale scene's title, details, date, director, code, rating, organized status, studio, performers, tags, galleries, URLs, Stash IDs and groups against the live scene.
+### 📥 3. Smart Multi-Folder Download Ingest
+* **Drop-Folder Automation:** Watch up to 5 incoming download directories inside your Stash library.
+* **Partial Download Filter:** Automatically ignores active download temporary files (`.part`, `.partial`, `.crdownload`, `.download`, `.tmp`).
+* **Dynamic Settle Timer:** Configurable delay (1 to 30 mins) that automatically resets if file size or `mtime` changes. Once the download is completely finished, Watchtower triggers an exact-path Stash scan with thumbnail, sprite, and perceptual-hash generation.
 
-It marks a record `stale_record_redundant` only when all inventoried metadata is already present on the live scene. Otherwise it reports `merge_metadata_first` and names the differing fields. The plan is written to `resolution-plan.json`; this step never deletes scenes or files and never updates Stash.
+### 🖼️ 4. Visual Storyboard Contact Sheets (CSM)
+* **Zero Stash Image Clutter:** High-resolution video storyboard contact sheets are saved directly beside the video file on your drive as companion files—never polluting Stash's image library.
+* **Smart Vertical Video Auto-Adjust:** Automatically reflows 9:16 vertical smartphone/social media videos into balanced widescreen sheets.
+* **Customizable Layouts & Banners:** Choose 4x4 (16 frames), 5x4 (20 frames widescreen), or custom grid layouts with detailed top metadata header banners showing resolution, file size, duration, and video codec.
 
-## Step 4: metadata merge preview
+### 🔬 5. Central Dashboard & Diagnostic Suite
+* **Interactive Sandbox Previewer:** Test naming schemes against real scenes from your library in real-time before applying changes.
+* **100% Read-Only Diagnostic Scanners:** Conflict-aware resolution planning, metadata recovery previews, and candidate search for missing paths.
+* **250-Entry Activity Flight Recorder:** Permanent audit trail of all renames, monitor events, and file recoveries, exportable to JSON and CSV.
+* **Native Desktop Notifications:** Desktop alerts on macOS, Windows, and Linux for important warnings and background failures.
 
-Run **Preview Metadata Merge (Read Only)** after the resolution plan. It writes `metadata-merge-preview.json` showing every proposed field-level change. Collections such as URLs and Stash IDs are combined without removing existing values. Empty scalar fields may be filled, but differing non-empty values are marked `manual_choice_required` and are never overwritten automatically.
+---
 
-The preview includes `action_performed: false` explicitly. This task contains no Stash mutation and cannot delete, rename or move a file.
+## 📥 Installation
 
-## Step 5: safe filename preview
+### Method 1: Stash Community Repository (Recommended)
+1. Open Stash and navigate to **Settings ➔ Plugins ➔ Available Plugins ➔ Add Source**.
+2. Paste the Community Source URL:
+   ```text
+   https://kmarsh2311.github.io/my-stash-plugins/index.yml
+   ```
+3. Find **Watchtower** in the list and click **Install**.
+4. Click **Reload Plugins**. The **📚** icon will appear in your Stash navigation bar.
 
-Run **Preview Safe Filenames (Read Only)** after building the inventory. The first run stores one stable base per Stash file in SQLite. A non-empty Stash title becomes the base; otherwise the existing filename stem is preserved. Exact trailing `{Studio}` and `(Performers)` components generated by the known RenameFile format are removed before a blank-title base is stored.
+### Method 2: Manual Install
+1. Download the latest [`librarymanager.zip`](https://kmarsh2311.github.io/my-stash-plugins/librarymanager.zip) from the release assets.
+2. Extract the contents into your Stash plugins directory:
+   * **Linux/macOS:** `~/.stash/plugins/librarymanager/`
+   * **Windows:** `C:\Users\<Username>\.stash\plugins\librarymanager\`
+3. Go to **Settings ➔ Plugins** in Stash and click **Reload Plugins**.
 
-The proposed format is `Base - Studio - Performer One, Performer Two`. Studio and performer names already contained in the base are not duplicated. Existing braces and parentheses from RenameFile are recognised when establishing the base, but Library Manager does not add them. The task detects occupied targets, duplicate proposed paths and names over 255 UTF-8 bytes. Results are written to `filename-preview.json` and SQLite. No files are renamed.
+---
 
-## Step 6: controlled event-driven renaming
+## 🚀 Quick Start Guide
 
-Set **Test Scene ID**, then run **Preview Configured Test Rename**. Applying the test requires separately enabling **Allow One Test Rename** and running **Apply Configured Test Rename**. The apply path repeats preflight, blocks occupied targets, renames known sidecars with rollback protection and asks Stash's native `moveFiles` operation to rename the primary file and update its record.
+1. **Launch Onboarding:** Click the **📚** icon in the top Stash navigation bar. If it's your first time, the 6-step Guided Setup Wizard will open automatically.
+2. **Build Initial Inventory:** In Step 4 of the wizard, click **⚡ Build Initial Inventory Now** to map your scenes into `watchtower.db`.
+3. **Configure Watched Folders:** Set your incoming download folder (e.g. `/Volumes/Media/Incoming`) to enable automatic ingest.
+4. **Tune Filename Formatting:** Choose your preferred section order (`Title - Studio - Performers`), separators, and performer caps in the **Filename Management** tab.
+5. **Enable Watcher Daemon:** Enable **Start Monitoring with OS** to keep your library synchronized 24/7.
 
-Exact-name image companions are included. Both `video.jpg` and `video.mp4.jpg` conventions are recognised for JPEG, PNG and WebP files and the convention is preserved after renaming. Unrelated images are ignored. Any occupied companion target blocks the complete operation before a file is changed.
+---
 
-**Automatic Renaming** is disabled by default. While **Test Scene ID** has a value, automatic hooks are hard-restricted to that one scene. When explicitly enabled, only hooks that change `title`, `studio_id` or `performer_ids` are processed. Merely enabling or reloading the plugin never starts a full-library rename.
+## ⚙️ Configuration & Options
 
-Before any automatic rename, Library Manager compares the previous and freshly fetched title, studio and performer values. A tag-only or otherwise unrelated save is skipped even when the incoming update contains unchanged naming fields.
+| Setting | Default | Description |
+| :--- | :---: | :--- |
+| **Automatic Renaming** | `OFF` | Safely renames video and companion sidecars on metadata edits. |
+| **Master Title Source** | `Stash Metadata` | Drive filenames from Stash scraped metadata or preserve original disk stems. |
+| **Filename Order** | `Title, Studio, Performers` | Choose the sequence of information in generated filenames. |
+| **Strip Connective Words** | `ON` | Removes dangling `and`, `&`, `feat.`, `with` left when metadata is stripped. |
+| **Collapse Multiple Separators** | `ON` | Cleans duplicate dashes, spaces, and punctuation into single clean dividers. |
+| **Generate Contact Sheets** | `OFF` | Automatically creates storyboard contact sheets beside new videos on disk. |
+| **Auto-adjust Vertical Videos**| `ON` | Automatically optimizes contact sheet grid layout for 9:16 vertical videos. |
+| **Desktop Notifications** | `ON` | Native system notifications for important warnings, moves, and failures. |
+| **Start with OS** | `OFF` | Starts the background filesystem watcher on system boot / login. |
 
-Automatic hooks coalesce repeated saves by scene ID into a SQLite queue with a short debounce. Only the first hook schedules the internal **Process Rename Queue** task. The worker claims jobs transactionally, refreshes final metadata and processes file operations serially. Outcomes are retained in `rename_audit`; failed jobs remain visible in `rename_queue` rather than retrying destructively.
+---
 
-## Step 7: filesystem monitoring
+## 🔒 Zero Data Loss Philosophy
 
-**Start Read-Only Filesystem Monitor** launches a small background watchdog service for the library roots configured in Stash. It records created, deleted, modified and moved media/sidecar events in SQLite, coalescing identical events. When external-move reconciliation is enabled, exact verified moves may trigger a targeted Stash scan; uncertain events remain review-only.
+Watchtower is engineered from the ground up to guarantee that your media collection is never damaged:
+* **Safe Defaults:** All initial scans, inventory runs, and filename previews are strictly 100% read-only.
+* **Isolated SQLite Database:** Watchtower maintains its own WAL-mode SQLite database (`watchtower.db`) and never modifies Stash's internal SQLite database directly.
+* **Stash Native Operations:** All file moves and primary renames are delegated through Stash's native `moveFiles` GraphQL API, ensuring Stash's internal path indices stay valid.
+* **Symlink Safe:** Path containment checks resolve symlinks before testing folder boundaries, preventing accidental out-of-bounds operations.
 
-Use **Filesystem Monitor Status** to see its PID, heartbeat, watched roots and event count. **Stop Filesystem Monitor** uses a token-protected cooperative stop request. Missing library roots are reported and skipped rather than interpreted as mass deletion.
+---
 
-## Step 8: filesystem event reconciliation
+## 🤝 Contributing & Support
 
-Run **Reconcile Filesystem Events (Read Only)** to convert pending watcher events into proposals. Exact moves from an inventoried path are checked against size and `oshash`. Unpaired created files are compared with missing inventory records; deletes without destinations are held for review. Events whose destination already matches Stash are informational.
+* 🐛 **Bug Reports & Features:** Please open an issue on the [GitHub Issue Tracker](https://github.com/kmarsh2311/watchtower/issues).
+* ☕ **Support:** If Watchtower saves you time managing your collection, feel free to [buy me a KitKat here 🍫](https://buymeacoffee.com/kamarsh)!
 
-Reviewed events and proposals remain in SQLite and are exported to `filesystem-reconciliation-report.json`. This step does not scan or update Stash and performs no filesystem operation.
+---
 
-## Step 9: activity history and notifications
-
-Run **View / Export Recent Activity** to summarise the latest 250 rename, monitor and reconciliation events. The permanent history is stored in SQLite, with original and proposed paths, scene/file IDs, outcome and supporting metadata. The task also refreshes `activity-report.json` and `activity-report.csv`. A rotating human-readable `librarymanager.log` is retained alongside them (5 MB, three backups).
-
-**macOS Notifications** is disabled by default. When enabled, Library Manager uses macOS directly to report failures, unavailable library roots and filesystem events needing review. Routine file modifications are not notified. Successful rename notifications remain separately disabled unless **Notify Successful Renames** is enabled. Notification failures are logged and never fail the underlying Library Manager operation.
-
-## Central dashboard
-
-After reloading plugins, use the **📚** button in Stash's top navigation to open `/library-manager`. The dashboard brings status, settings, filename previews, companion-file information, monitor controls, reconciliation tasks, notification choices and advanced maintenance into one compartmentalised page. Long operations are submitted to Stash's background task queue.
-
-The **Activity & Recovery** section displays the activity history directly, links entries to their scenes and downloads the currently filtered rows as CSV or JSON. Existing plugin settings and task entries remain available as fallback controls.
-
-### Verified external moves
-
-When **Automatically Start Filesystem Monitor** is enabled, loading the Stash web interface ensures the watcher is running. With **Reconcile Verified External Moves** enabled, a same-library move must originate at the exact inventoried path and retain its expected size and, where available, `oshash`. The plugin then requests a targeted Stash scan, waits for it to finish and confirms that the original scene adopted the destination path. If any check fails or Stash does not adopt the path, the event remains marked for review; the plugin does not delete, merge or directly edit Stash's database.
-
-Move, delayed deletion, unavailable-root, reconciliation-success and reconciliation-failure alerts use the optional macOS notification setting. Companion-file events are recorded without producing one notification per image or subtitle.
-
-### Completed downloads
-
-Under **Automatic File Management → Add completed downloads**, an incoming folder inside a configured Stash library can be selected. This feature is disabled by default. Files already present when the watcher starts are ignored. New final video files are watched, while `.part`, `.partial`, `.crdownload`, `.download`, `.tmp` and `.temp` files are ignored.
-
-The unchanged-file wait defaults to five minutes and can be set to 1, 5, 10, 15 or 30 minutes. Any size or modification-time change restarts the wait. Once stable, Library Manager requests an exact-path Stash scan with cover, thumbnail, preview, sprite and perceptual-hash generation enabled. It waits for the job, verifies that Stash created a scene containing that path, updates its private inventory and records the outcome in Activity. A failed scan is retried up to three times without deleting or moving the incoming file.
-
-Inventory totals distinguish Stash scenes from their files because one scene can contain more than one video file. Routine modification events do not create review warnings. A verified move is removed from the pending-attention count as soon as Stash confirms the new path.
-
-On macOS, **Keep monitoring without opening Stash in a browser** installs an opt-in per-user startup entry. It checks once a minute, starts the watcher when Stash is available and leaves monitoring disabled whenever the normal watcher setting is off.
+<div align="center">
+  <sub>Built with ❤️ for the Stash Community.</sub>
+</div>
