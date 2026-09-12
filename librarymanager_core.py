@@ -1698,10 +1698,12 @@ def _proposed_stem(base: str, studio: str | None, performers: list[str], options
         name.strip() for name in performers if str(name).strip()
     )
 
-    if _is_only_metadata_or_connectors(title_val, studio_val, performers):
-        title_val = ""
-    else:
-        title_val = _strip_managed_metadata(title_val, [studio_val] if studio_val else [], performers)
+    should_strip = (options or {}).get("stripMetadataFromTitle") is not False
+    if should_strip:
+        if _is_only_metadata_or_connectors(title_val, studio_val, performers):
+            title_val = ""
+        else:
+            title_val = _strip_managed_metadata(title_val, [studio_val] if studio_val else [], performers)
 
     values = {
         "title": title_val,

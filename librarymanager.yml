@@ -21,6 +21,10 @@ settings:
     displayName: Contact Sheet Location Scope
     description: Choose whether contact sheets are generated across all library folders or restricted to your incoming folder.
     type: STRING
+  stripMetadataFromTitle:
+    displayName: Clean Embedded Performers & Studio from Titles
+    description: Automatically clean duplicate studio or performer names from titles when generating filenames.
+    type: BOOLEAN
   renameSettleSeconds:
     displayName: Rename & Contact Sheet Settle Delay
     description: Seconds to wait after a metadata edit before renaming the video and refreshing its contact sheet.
