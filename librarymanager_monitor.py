@@ -137,13 +137,31 @@ query LibraryManagerSceneByPath($path: String!) {
 
 
 def notify(enabled, message):
-    if not enabled or sys.platform != "darwin":
+    if not enabled:
         return
     try:
-        subprocess.run(["/usr/bin/osascript", "-e", "on run argv", "-e",
-                        "display notification (item 1 of argv) with title (item 2 of argv)",
-                        "-e", "end run", "--", str(message), "Stash Library Manager"],
-                       capture_output=True, text=True, timeout=10, check=False)
+        if sys.platform == "darwin":
+            subprocess.run(["/usr/bin/osascript", "-e", "on run argv", "-e",
+                            "display notification (item 1 of argv) with title (item 2 of argv)",
+                            "-e", "end run", "--", str(message), "Stash Library Manager"],
+                           capture_output=True, text=True, timeout=10, check=False)
+        elif sys.platform == "win32":
+            msg_esc = str(message).replace('"', '`"')
+            ps_cmd = (
+                f'[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; '
+                f'$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); '
+                f'$textNodes = $template.GetElementsByTagName("text"); '
+                f'$textNodes.Item(0).AppendChild($template.CreateTextNode("Stash Library Manager")) > $null; '
+                f'$textNodes.Item(1).AppendChild($template.CreateTextNode("{msg_esc}")) > $null; '
+                f'$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Stash Library Manager"); '
+                f'$notification = [Windows.UI.Notifications.ToastNotification]::new($template); '
+                f'$notifier.Show($notification)'
+            )
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                           capture_output=True, text=True, timeout=10, check=False)
+        elif shutil.which("notify-send"):
+            subprocess.run(["notify-send", "-a", "Stash Library Manager", "Stash Library Manager", str(message)],
+                           capture_output=True, text=True, timeout=5, check=False)
     except Exception:
         pass
 

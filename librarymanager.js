@@ -559,7 +559,7 @@
         { label: "Login Startup", key: "startAtLogin", active: config.startAtLogin === true, state: config.startAtLogin === true ? "ON" : "OFF", help: `Runs watcher in background on ${data?.startup?.platform_label || "OS"} login`, tab: "monitor" },
         { label: "Sheets", key: "generateContactSheets", active: config.generateContactSheets === true, state: config.generateContactSheets === true ? (config.contactSheetGrid || "ON") : "OFF", help: "Generates multi-frame contact sheets with CSM", tab: "csm" },
         { label: "Scope", key: "contactSheetScope", active: true, state: isIncomingScope ? "INCOMING" : "ALL", help: isIncomingScope ? "Contact sheets restricted to incoming folder" : "Contact sheets generated for entire library", tab: "csm" },
-        { label: "Alerts", key: "macNotifications", active: config.macNotifications === true, state: config.macNotifications === true ? "ON" : "OFF", help: "Sends macOS desktop notifications for important warnings and failures", tab: "advanced" }
+        { label: "Alerts", key: "macNotifications", active: config.macNotifications === true, state: config.macNotifications === true ? "ON" : "OFF", help: "Sends system desktop notifications for important warnings and failures", tab: "advanced" }
       ];
 
       return React.createElement("div", { className: "lm-switch-indicators", title: "File Management feature switches (click to configure)" },
@@ -1582,7 +1582,7 @@
                 React.createElement("strong", null, name.replace(" (Read Only)", "")),
                 React.createElement("small", null, help)),
               React.createElement(TaskButton, { name, label: "Run", help, showResults: "reports" }))))),
-      panel("macOS Desktop Notifications", "Receive system notifications for important warnings and background failures.",
+      panel("Desktop Notifications", "Receive system notifications for important warnings and background failures.",
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "macNotifications", label: "Important Warnings & Failures",
             help: "Notify for failed renames, unavailable roots and events needing review." }),

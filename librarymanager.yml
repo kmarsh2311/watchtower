@@ -42,12 +42,12 @@ settings:
     description: Friendly choice used when a scene has more than one performer, such as Comma or Space.
     type: STRING
   macNotifications:
-    displayName: macOS Notifications
-    description: Show important Library Manager warnings and failures through macOS. Disabled by default.
+    displayName: Desktop Notifications
+    description: Show important Library Manager warnings and failures as native desktop notifications on Windows, macOS, or Linux. Disabled by default.
     type: BOOLEAN
   notifySuccessfulRenames:
     displayName: Notify Successful Renames
-    description: Also show a macOS notification after a successful automatic rename. Requires macOS Notifications.
+    description: Also show a desktop notification after a successful automatic rename. Requires Desktop Notifications.
     type: BOOLEAN
   autoStartMonitor:
     displayName: Automatically Start Filesystem Monitor

@@ -89,20 +89,40 @@ def audit(database_path, category, action, status, **fields):
                           fields.get("scene_id") or "-", fields.get("file_id") or "-", fields.get("detail") or "")
 
 
-def send_macos_notification(title, message):
-    """Send safely without a shell, so metadata cannot become AppleScript code."""
-    if sys.platform != "darwin":
-        return
+def send_system_notification(title, message):
+    """Send desktop notification natively on macOS, Windows, or Linux."""
     try:
-        result = subprocess.run([
-            "/usr/bin/osascript", "-e", "on run argv", "-e",
-            "display notification (item 1 of argv) with title (item 2 of argv)",
-            "-e", "end run", "--", str(message), str(title),
-        ], capture_output=True, text=True, timeout=10, check=False)
-        if result.returncode:
-            activity_logger().debug("osascript notification returned %s: %s", result.returncode, result.stderr)
+        if sys.platform == "darwin":
+            result = subprocess.run([
+                "/usr/bin/osascript", "-e", "on run argv", "-e",
+                "display notification (item 1 of argv) with title (item 2 of argv)",
+                "-e", "end run", "--", str(message), str(title),
+            ], capture_output=True, text=True, timeout=10, check=False)
+            if result.returncode:
+                activity_logger().debug("osascript notification returned %s: %s", result.returncode, result.stderr)
+        elif sys.platform == "win32":
+            title_esc = str(title).replace('"', '`"')
+            msg_esc = str(message).replace('"', '`"')
+            ps_cmd = (
+                f'[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; '
+                f'$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); '
+                f'$textNodes = $template.GetElementsByTagName("text"); '
+                f'$textNodes.Item(0).AppendChild($template.CreateTextNode("{title_esc}")) > $null; '
+                f'$textNodes.Item(1).AppendChild($template.CreateTextNode("{msg_esc}")) > $null; '
+                f'$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Stash Library Manager"); '
+                f'$notification = [Windows.UI.Notifications.ToastNotification]::new($template); '
+                f'$notifier.Show($notification)'
+            )
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                           capture_output=True, text=True, timeout=10, check=False)
+        elif shutil.which("notify-send"):
+            subprocess.run(["notify-send", "-a", "Stash Library Manager", str(title), str(message)],
+                           capture_output=True, text=True, timeout=5, check=False)
     except Exception as exc:
-        activity_logger().debug("osascript notification failed: %s", exc)
+        activity_logger().debug("Desktop notification failed: %s", exc)
+
+
+send_macos_notification = send_system_notification
 
 
 def maybe_notify(config, message, *, success=False):
@@ -110,7 +130,7 @@ def maybe_notify(config, message, *, success=False):
         return
     if success and not (config or {}).get("notifySuccessfulRenames"):
         return
-    send_macos_notification("Stash Library Manager", message)
+    send_system_notification("Stash Library Manager", message)
 
 
 def dashboard_reports():
