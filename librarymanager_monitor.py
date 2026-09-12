@@ -945,16 +945,19 @@ class LibraryEventHandler(FileSystemEventHandler):
 
 
 def update_status(database_path, token, pid, state, roots, unavailable):
-    connection = connect(database_path)
     try:
-        connection.execute(
-            """UPDATE filesystem_monitor_status SET token=?,pid=?,state=?,started_at=COALESCE(started_at,?),
-                   heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1""",
-            (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable)),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+        connection = connect(database_path)
+        try:
+            connection.execute(
+                """UPDATE filesystem_monitor_status SET token=?,pid=?,state=?,started_at=COALESCE(started_at,?),
+                       heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1""",
+                (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable)),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    except (sqlite3.OperationalError, sqlite3.DatabaseError) as err:
+        logger.debug("update_status deferred (DB busy): %s", err)
 
 
 def _reset_stale_failed_incoming(database_path: Path) -> None:
