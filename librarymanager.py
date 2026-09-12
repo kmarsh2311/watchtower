@@ -220,12 +220,22 @@ def fetch_library_roots(stash):
     return sorted({str(item.get("path")).strip() for item in stashes if item.get("path")})
 
 
-def incoming_folder_status(config, roots):
-    configured = str((config or {}).get("incomingFolder") or "").strip()
-    enabled = (config or {}).get("automaticIncomingScan") is True
-    if not configured:
+def get_configured_incoming_folders(config):
+    raw_folders = (config or {}).get("incomingFolders")
+    if isinstance(raw_folders, list):
+        cleaned = [str(f).strip() for f in raw_folders if str(f).strip()]
+        return cleaned[:5]
+    legacy = str((config or {}).get("incomingFolder") or "").strip()
+    return [legacy] if legacy else []
+
+
+def incoming_folder_status_item(folder_path_str, roots, enabled):
+    if not folder_path_str:
         return {"enabled": enabled, "valid": False, "path": "", "reason": "Choose an incoming folder first"}
-    folder = Path(configured).expanduser().resolve()
+    try:
+        folder = Path(folder_path_str).expanduser().resolve()
+    except Exception as exc:
+        return {"enabled": enabled, "valid": False, "path": folder_path_str, "reason": f"Invalid path: {exc}"}
     if not folder.is_dir():
         return {"enabled": enabled, "valid": False, "path": str(folder), "reason": "The incoming folder is not currently available"}
     inside_root = False
@@ -234,12 +244,43 @@ def incoming_folder_status(config, roots):
             folder.relative_to(Path(root).expanduser().resolve())
             inside_root = True
             break
-        except ValueError:
+        except (ValueError, OSError):
             continue
     if not inside_root:
         return {"enabled": enabled, "valid": False, "path": str(folder),
                 "reason": "The incoming folder must be inside a folder configured in Stash"}
     return {"enabled": enabled, "valid": True, "path": str(folder), "reason": "Ready to watch for completed videos"}
+
+
+def incoming_folders_status(config, roots):
+    enabled = (config or {}).get("automaticIncomingScan") is True
+    folders = get_configured_incoming_folders(config)
+    if not folders:
+        return {
+            "enabled": enabled,
+            "folders": [incoming_folder_status_item("", roots, enabled)],
+            "valid_count": 0,
+            "total_count": 0,
+            "all_valid": False,
+        }
+    items = [incoming_folder_status_item(f, roots, enabled) for f in folders]
+    valid_count = sum(1 for item in items if item["valid"])
+    return {
+        "enabled": enabled,
+        "folders": items,
+        "valid_count": valid_count,
+        "total_count": len(items),
+        "all_valid": len(items) > 0 and valid_count == len(items),
+    }
+
+
+def incoming_folder_status(config, roots):
+    multi = incoming_folders_status(config, roots)
+    folders = multi.get("folders", [])
+    for item in folders:
+        if item["valid"]:
+            return item
+    return folders[0] if folders else {"enabled": multi["enabled"], "valid": False, "path": "", "reason": "Choose an incoming folder first"}
 
 
 def system_startup_paths():
@@ -364,16 +405,20 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
     log_path = Path(__file__).with_name("librarymanager-monitor.log")
     config = stash.find_plugin_config("librarymanager") or {}
     incoming = incoming_folder_status(config, roots)
-    if incoming["enabled"] and not incoming["valid"]:
+    incoming_multi = incoming_folders_status(config, roots)
+    valid_incoming_paths = [item["path"] for item in incoming_multi["folders"] if item["valid"]]
+    if incoming_multi["enabled"] and not valid_incoming_paths and incoming_multi["folders"]:
+        first_bad = incoming_multi["folders"][0]
         audit(database_path, "incoming", "incoming folder", "disabled", severity="warning",
-              old_path=incoming["path"] or None, detail=incoming["reason"])
+              old_path=first_bad["path"] or None, detail=first_bad["reason"])
     runtime_path = Path(__file__).with_name("monitor-runtime.json")
     runtime_path.write_text(json.dumps({
         "server_connection": server_connection or {},
         "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
         "mac_notifications": config.get("macNotifications") is True,
-        "incoming_imports": incoming["enabled"] and incoming["valid"],
-        "incoming_folder": incoming["path"] if incoming["valid"] else "",
+        "incoming_imports": incoming_multi["enabled"] and len(valid_incoming_paths) > 0,
+        "incoming_folder": valid_incoming_paths[0] if valid_incoming_paths else "",
+        "incoming_folders": valid_incoming_paths,
         "incoming_settle_seconds": max(60, int(config.get("incomingSettleMinutes") or 5) * 60),
         "incoming_fallback_seconds": 60,
         "generate_contact_sheets": config.get("generateContactSheets") is True,
@@ -407,6 +452,8 @@ def reload_monitor_runtime(stash, database_path):
     roots = fetch_library_roots(stash)
     config = stash.find_plugin_config("librarymanager") or {}
     incoming = incoming_folder_status(config, roots)
+    incoming_multi = incoming_folders_status(config, roots)
+    valid_incoming_paths = [item["path"] for item in incoming_multi["folders"] if item["valid"]]
     control_path = Path(__file__).with_name("monitor-control.json")
     try:
         control_path.write_text(json.dumps({
@@ -415,8 +462,9 @@ def reload_monitor_runtime(stash, database_path):
             "config": {
                 "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
                 "mac_notifications": config.get("macNotifications") is True,
-                "incoming_imports": incoming["enabled"] and incoming["valid"],
-                "incoming_folder": incoming["path"] if incoming["valid"] else "",
+                "incoming_imports": incoming_multi["enabled"] and len(valid_incoming_paths) > 0,
+                "incoming_folder": valid_incoming_paths[0] if valid_incoming_paths else "",
+                "incoming_folders": valid_incoming_paths,
                 "incoming_settle_seconds": max(60, int(config.get("incomingSettleMinutes") or 5) * 60),
                 "generate_contact_sheets": config.get("generateContactSheets") is True,
                 "contact_sheet_grid": config.get("contactSheetGrid") or "4x4",
@@ -690,20 +738,22 @@ def main():
     elif mode == "generate_incoming_contact_sheets":
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
-        incoming_folder_str = config.get("incomingFolder") or ""
-        incoming_path = Path(incoming_folder_str) if incoming_folder_str else None
-        if not incoming_path or not incoming_path.is_dir():
-            message = f"Incoming folder '{incoming_folder_str}' does not exist or is not configured."
+        configured_folders = get_configured_incoming_folders(config)
+        valid_paths = [Path(p) for p in configured_folders if p and Path(p).is_dir()]
+        if not valid_paths:
+            message = f"No valid incoming folder(s) configured ({configured_folders})."
         else:
             grid = config.get("contactSheetGrid") or "4x4"
             banner = config.get("contactSheetBanner") is not False
             adjust_vert = config.get("contactSheetAdjustVertical") is not False
             custom_script = config.get("contactSheetScript") or ""
             video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm", ".wmv"}
-            candidates = [
-                p for p in incoming_path.iterdir()
-                if p.is_file() and p.suffix.lower() in video_extensions
-            ]
+            candidates = []
+            for inc_dir in valid_paths:
+                candidates.extend([
+                    p for p in inc_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() in video_extensions
+                ])
             missing = [
                 p for p in candidates
                 if not Path(f"{p}.jpg").exists() and not Path(f"{p.stem}.jpg").exists()
@@ -1162,6 +1212,7 @@ def main():
         payload["monitor"].pop("token", None)
         payload["library_roots"] = roots
         payload["incoming_folder"] = incoming_folder_status(config, roots)
+        payload["incoming_folders"] = incoming_folders_status(config, roots)
         payload["startup"] = macos_startup_status()
         payload["current_scene_count"] = current_scene_count(stash)
         message = json.dumps(payload, ensure_ascii=False)

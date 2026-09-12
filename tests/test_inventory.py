@@ -15,7 +15,7 @@ from librarymanager_core import preview_manual_filename
 from librarymanager_core import consume_expected_move, expect_filesystem_move, resolve_filesystem_event
 from librarymanager_core import scene_naming_signature
 from librarymanager_core import _proposed_stem, incoming_summary
-from librarymanager import automatic_scene_allowed, incoming_folder_status
+from librarymanager import automatic_scene_allowed, incoming_folder_status, incoming_folders_status, get_configured_incoming_folders
 from librarymanager_monitor import CompletedDownloadWorker, tracked_move
 
 
@@ -195,6 +195,55 @@ class InventoryTests(unittest.TestCase):
             outside.mkdir()
             self.assertTrue(incoming_folder_status({"automaticIncomingScan": True, "incomingFolder": str(incoming)}, [str(library)])["valid"])
             self.assertFalse(incoming_folder_status({"automaticIncomingScan": True, "incomingFolder": str(outside)}, [str(library)])["valid"])
+
+    def test_multi_incoming_folders_validation_and_cap(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            lib1 = root / "Vault1"
+            lib2 = root / "Vault2"
+            inc1 = lib1 / "Torrents"
+            inc2 = lib2 / "JDownloader"
+            inc3 = lib1 / "AirDrop"
+            outside = root / "Outside"
+            for p in [inc1, inc2, inc3, outside]:
+                p.mkdir(parents=True)
+
+            roots = [str(lib1), str(lib2)]
+
+            # Test legacy fallback
+            self.assertEqual(get_configured_incoming_folders({"incomingFolder": str(inc1)}), [str(inc1)])
+
+            # Test capping at 5
+            six_folders = [str(inc1), str(inc2), str(inc3), str(lib1 / "f4"), str(lib1 / "f5"), str(lib1 / "f6")]
+            capped = get_configured_incoming_folders({"incomingFolders": six_folders})
+            self.assertEqual(len(capped), 5)
+
+            # Test multi-folder status
+            status = incoming_folders_status({"automaticIncomingScan": True, "incomingFolders": [str(inc1), str(inc2), str(outside)]}, roots)
+            self.assertEqual(status["total_count"], 3)
+            self.assertEqual(status["valid_count"], 2)
+            self.assertFalse(status["all_valid"])
+            self.assertTrue(status["folders"][0]["valid"])
+            self.assertTrue(status["folders"][1]["valid"])
+            self.assertFalse(status["folders"][2]["valid"])
+
+    def test_completed_download_worker_multi_folder_ingest(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = root / "inventory.sqlite3"
+            incA = root / "IncomingA"
+            incB = root / "IncomingB"
+            incA.mkdir()
+            incB.mkdir()
+            worker = CompletedDownloadWorker(database, object(), None, True, 300, False, incoming_folders=[str(incA), str(incB)])
+            videoA = incA / "videoA.mp4"
+            videoB = incB / "videoB.mkv"
+            videoA.write_bytes(b"contentA")
+            videoB.write_bytes(b"contentB")
+            self.assertTrue(worker.submit(videoA))
+            self.assertTrue(worker.submit(videoB))
+            self.assertIn(str(videoA.resolve()), worker.candidates)
+            self.assertIn(str(videoB.resolve()), worker.candidates)
 
     def test_filename_style_choices_control_order_and_separators(self):
         options = {

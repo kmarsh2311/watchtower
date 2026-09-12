@@ -1905,3 +1905,69 @@ a.lm-activity-scene-pill:hover {
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   }
 }
+
+
+/* Multi-folder incoming list */
+.lm-incoming-list-container {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.85rem;
+  background: rgba(10, 20, 34, 0.35);
+  border: 1px solid rgba(140, 155, 185, 0.2);
+  border-radius: 0.45rem;
+}
+.lm-incoming-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+.lm-incoming-row-num {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--text-muted, #aab3c5);
+  background: rgba(255, 255, 255, 0.08);
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  flex-shrink: 0;
+}
+.lm-incoming-row-input-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+}
+.lm-incoming-row-input-wrap input {
+  width: 100%;
+  padding-right: 7.5rem;
+}
+.lm-incoming-folder-badge {
+  position: absolute;
+  right: 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.2rem 0.45rem;
+  border-radius: 0.25rem;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.lm-incoming-folder-badge.ready {
+  background: rgba(47, 168, 111, 0.2);
+  color: #39ff64;
+  border: 1px solid rgba(47, 168, 111, 0.45);
+}
+.lm-incoming-folder-badge.warning {
+  background: rgba(216, 154, 37, 0.2);
+  color: #ffb52e;
+  border: 1px solid rgba(216, 154, 37, 0.45);
+}
+.lm-incoming-row-remove {
+  padding: 0.3rem 0.55rem;
+  font-size: 0.8rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.lm-incoming-add-btn {
+  font-size: 0.82rem;
+  padding: 0.25rem 0.65rem;
+}

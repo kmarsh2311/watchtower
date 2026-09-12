@@ -291,11 +291,21 @@ class MoveWorker(threading.Thread):
 class CompletedDownloadWorker(threading.Thread):
     """Wait for new incoming videos to settle, then request one targeted Stash scan."""
     def __init__(self, database_path, stash, incoming_folder, enabled, settle_seconds, notifications,
-                 fallback_seconds=60, max_attempts=3):
+                 fallback_seconds=60, max_attempts=3, incoming_folders=None):
         super().__init__(daemon=True)
         self.database_path, self.stash = database_path, stash
-        self.incoming_folder = Path(incoming_folder).resolve() if incoming_folder else None
-        self.enabled = bool(enabled and self.incoming_folder)
+        raw_folders = incoming_folders if incoming_folders is not None else ([incoming_folder] if incoming_folder else [])
+        self.incoming_folders = []
+        for f in raw_folders:
+            if f:
+                try:
+                    p = Path(f).resolve()
+                    if p not in self.incoming_folders:
+                        self.incoming_folders.append(p)
+                except Exception:
+                    pass
+        self.incoming_folder = self.incoming_folders[0] if self.incoming_folders else None
+        self.enabled = bool(enabled and self.incoming_folders)
         self.settle_seconds = max(60, int(settle_seconds or 300))
         self.notifications = notifications
         self.fallback_seconds = max(15, int(fallback_seconds or 60))
@@ -317,6 +327,21 @@ class CompletedDownloadWorker(threading.Thread):
             self._restore_candidates()
             self._recover_recent_files()
 
+    def _is_inside_incoming(self, candidate_path):
+        if not self.incoming_folders or not candidate_path:
+            return False
+        try:
+            resolved = Path(candidate_path).resolve()
+            for root in self.incoming_folders:
+                try:
+                    resolved.relative_to(root)
+                    return True
+                except (OSError, ValueError):
+                    continue
+        except (OSError, ValueError):
+            return False
+        return False
+
     def accepts(self, path):
         if not self.enabled or not path:
             return False
@@ -325,27 +350,27 @@ class CompletedDownloadWorker(threading.Thread):
         if suffix in TEMPORARY_DOWNLOAD_EXTENSIONS:
             if not getattr(self, "track_temporary_downloads", False):
                 return False
-            try:
-                candidate.resolve().relative_to(self.incoming_folder)
-                return True
-            except (OSError, ValueError):
-                return False
+            return self._is_inside_incoming(candidate)
         if suffix not in (VIDEO_EXTENSIONS | COMPANION_EXTENSIONS):
             return False
-        try:
-            candidate.resolve().relative_to(self.incoming_folder)
-            return True
-        except (OSError, ValueError):
-            return False
+        return self._is_inside_incoming(candidate)
 
     def _current_incoming_paths(self):
-        if not self.incoming_folder or not self.incoming_folder.is_dir():
+        if not self.incoming_folders:
             return set()
         valid = VIDEO_EXTENSIONS | COMPANION_EXTENSIONS
         if getattr(self, "track_temporary_downloads", False):
             valid = valid | TEMPORARY_DOWNLOAD_EXTENSIONS
-        return {str(path.resolve()) for path in self.incoming_folder.rglob("*")
-                if path.is_file() and path.suffix.lower() in valid}
+        found = set()
+        for folder in self.incoming_folders:
+            if folder.is_dir():
+                try:
+                    for path in folder.rglob("*"):
+                        if path.is_file() and path.suffix.lower() in valid:
+                            found.add(str(path.resolve()))
+                except Exception as exc:
+                    logger.debug("Failed scanning incoming folder %s: %s", folder, exc)
+        return found
 
     def _current_video_paths(self):
         return self._current_incoming_paths()
@@ -835,12 +860,8 @@ class LibraryEventHandler(FileSystemEventHandler):
             return
         incoming_candidate = bool(not event.is_directory and self.incoming_worker and self.incoming_worker.submit(event.src_path))
         if self._relevant(event.src_path, event.is_directory) and not incoming_candidate:
-            if self.incoming_worker and self.incoming_worker.incoming_folder:
-                try:
-                    Path(event.src_path).resolve().relative_to(self.incoming_worker.incoming_folder)
-                    return
-                except (OSError, ValueError):
-                    pass
+            if self.incoming_worker and self.incoming_worker._is_inside_incoming(event.src_path):
+                return
             if Path(event.src_path).suffix.lower() in COMPANION_EXTENSIONS:
                 cand = Path(event.src_path)
                 parent = cand.parent
@@ -989,6 +1010,7 @@ def main():
         database_path, stash, runtime.get("incoming_folder"), runtime.get("incoming_imports") is True,
         runtime.get("incoming_settle_seconds", 300), runtime.get("mac_notifications") is True,
         runtime.get("incoming_fallback_seconds", 60),
+        incoming_folders=runtime.get("incoming_folders"),
     )
     incoming_worker.generate_contact_sheets = runtime.get("generate_contact_sheets") is True
     incoming_worker.track_temporary_downloads = True
@@ -1027,12 +1049,17 @@ def main():
                             new_cfg = request.get("config") or {}
                             worker.enabled = bool(new_cfg.get("automatic_move_reconciliation", worker.enabled))
                             worker.notifications = bool(new_cfg.get("mac_notifications", worker.notifications))
+                            _new_folders = new_cfg.get("incoming_folders")
                             _new_folder_str = new_cfg.get("incoming_folder")
-                            if _new_folder_str is not None:
+                            if _new_folders is not None:
+                                incoming_worker.incoming_folders = [Path(f).resolve() for f in _new_folders if f]
+                                incoming_worker.incoming_folder = incoming_worker.incoming_folders[0] if incoming_worker.incoming_folders else None
+                            elif _new_folder_str is not None:
                                 incoming_worker.incoming_folder = Path(_new_folder_str).resolve() if _new_folder_str else None
+                                incoming_worker.incoming_folders = [incoming_worker.incoming_folder] if incoming_worker.incoming_folder else []
                             _new_enabled = new_cfg.get("incoming_imports")
                             if _new_enabled is not None:
-                                incoming_worker.enabled = bool(_new_enabled and incoming_worker.incoming_folder)
+                                incoming_worker.enabled = bool(_new_enabled and incoming_worker.incoming_folders)
                             incoming_worker.settle_seconds = new_cfg.get("incoming_settle_seconds", incoming_worker.settle_seconds)
                             incoming_worker.generate_contact_sheets = new_cfg.get("generate_contact_sheets", incoming_worker.generate_contact_sheets)
                             incoming_worker.contact_sheet_grid = new_cfg.get("contact_sheet_grid", incoming_worker.contact_sheet_grid)

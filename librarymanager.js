@@ -1795,36 +1795,100 @@
             );
           })
             : React.createElement("p", { className: "lm-empty" }, "No library roots discovered in Stash configuration."))))
-    else if (tab === "incoming") content = React.createElement(React.Fragment, null,
-      panel("Incoming Downloads Folder", "Watch one incoming folder where new downloads arrive before you organize them.",
-        React.createElement(React.Fragment, null,
-          React.createElement(Switch, { setting: "automaticIncomingScan", label: "Automatically Add Completed Videos",
-            help: "Existing files are left alone. Only new or completed videos in your incoming folder are added to Stash." }),
-          React.createElement("div", { className: "lm-incoming-fields", style: { marginTop: "14px" } },
-            React.createElement("label", { className: "lm-field" },
-              React.createElement("strong", null, "Incoming Folder Path"),
-              React.createElement("small", null, "Choose the folder where downloads arrive. It must be inside one of your Stash library folders."),
-              React.createElement("input", {
-                value: config.incomingFolder || "",
-                
-                onChange: event => setConfig({ ...config, incomingFolder: event.target.value }),
-                onBlur: event => updateSetting("incomingFolder", event.target.value.trim()),
-                placeholder: "/Volumes/Library/Incoming"
+    else if (tab === "incoming") {
+      const rawFolders = Array.isArray(config.incomingFolders)
+        ? config.incomingFolders
+        : (config.incomingFolder ? [config.incomingFolder] : [""]);
+      const incomingFoldersList = rawFolders.length > 0 ? rawFolders : [""];
+      const multiStatus = data?.incoming_folders || { folders: [], valid_count: 0, total_count: 0, all_valid: false };
+      const statusFolders = multiStatus.folders || [];
+
+      const handleUpdateFolder = (index, val) => {
+        const next = [...incomingFoldersList];
+        next[index] = val;
+        setConfig({ ...config, incomingFolders: next, incomingFolder: next[0] || "" });
+      };
+
+      const handleSaveFolders = (nextFolders) => {
+        const cleaned = nextFolders.map(f => (f || "").trim()).filter(Boolean);
+        const finalList = cleaned.length > 0 ? cleaned.slice(0, 5) : [""];
+        setConfig({ ...config, incomingFolders: finalList, incomingFolder: finalList[0] || "" });
+        updateSetting("incomingFolders", finalList);
+        updateSetting("incomingFolder", finalList[0] || "");
+      };
+
+      const handleAddFolder = () => {
+        if (incomingFoldersList.length >= 5) return;
+        const next = [...incomingFoldersList, ""];
+        setConfig({ ...config, incomingFolders: next });
+      };
+
+      const handleRemoveFolder = (index) => {
+        const next = incomingFoldersList.filter((_, idx) => idx !== index);
+        const finalList = next.length > 0 ? next : [""];
+        handleSaveFolders(finalList);
+      };
+
+      content = React.createElement(React.Fragment, null,
+        panel("Incoming Downloads Folders (Auto-Ingest)", "Watch up to 5 staging folders where new downloads arrive before you organize them.",
+          React.createElement(React.Fragment, null,
+            React.createElement(Switch, { setting: "automaticIncomingScan", label: "Automatically Add Completed Videos",
+              help: "Existing files are left alone. Only new or completed videos in your incoming folders are added to Stash." }),
+            React.createElement("div", { style: { marginTop: "14px" } },
+              React.createElement(ChoiceField, {
+                label: "Wait Before Adding a Video",
+                help: "The video must stay completely unchanged for this long before Watchtower asks Stash to add it.",
+                value: Number(config.incomingSettleMinutes || 5),
+                choices: [[1, "1 minute"], [5, "5 minutes (recommended)"], [10, "10 minutes"], [15, "15 minutes"], [30, "30 minutes"]],
+                onChange: value => updateSetting("incomingSettleMinutes", Number(value))
               })),
-            React.createElement(ChoiceField, {
-              label: "Wait Before Adding a Video",
-              help: "The video must stay completely unchanged for this long before Watchtower asks Stash to add it.",
-              value: Number(config.incomingSettleMinutes || 5),
-              
-              choices: [[1, "1 minute"], [5, "5 minutes (recommended)"], [10, "10 minutes"], [15, "15 minutes"], [30, "30 minutes"]],
-              onChange: value => updateSetting("incomingSettleMinutes", Number(value))
-            })),
-          React.createElement("div", { className: `lm-incoming-state ${incomingFolder.valid ? "ready" : "warning"}`, style: { marginTop: "14px" } },
-            React.createElement("strong", null, incomingFolder.valid ? "Folder is ready" : "Folder needs attention"),
-            React.createElement("span", null, incomingFolder.reason || "Choose and save an incoming folder."),
-            React.createElement("small", null, `${incoming.downloading ? `${incoming.downloading} downloading, ` : ""}${incoming.waiting || 0} waiting, ${incoming.scanning || 0} being added, ${incoming.imported || 0} added, ${incoming.failed || 0} failed.`)),
-          React.createElement("p", { className: "lm-help", style: { marginTop: "10px" } },
-            "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."))))
+            React.createElement("div", { className: "lm-incoming-list-container", style: { marginTop: "18px" } },
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
+                React.createElement("strong", null, `Watched Incoming Folders (${incomingFoldersList.length}/5)`),
+                React.createElement("button", {
+                  type: "button",
+                  className: "btn btn-secondary btn-sm lm-incoming-add-btn",
+                  disabled: incomingFoldersList.length >= 5,
+                  onClick: handleAddFolder,
+                  title: incomingFoldersList.length >= 5 ? "Maximum 5 folders reached" : "Add another incoming staging folder"
+                }, incomingFoldersList.length >= 5 ? "Max 5 Folders Configured" : "+ Add Incoming Folder")
+              ),
+              React.createElement("small", { style: { display: "block", color: "var(--text-muted, #aab3c5)", marginBottom: "10px" } },
+                "Specify up to 5 directories where downloaders (e.g. Torrents, Usenet, JDownloader) save files. Each folder must be inside one of your Stash library folders."),
+              incomingFoldersList.map((folderPath, idx) => {
+                const folderStatus = statusFolders[idx] || {};
+                const isConfigured = Boolean((folderPath || "").trim());
+                const isValid = folderStatus.valid;
+                return React.createElement("div", { key: idx, className: "lm-incoming-row" },
+                  React.createElement("span", { className: "lm-incoming-row-num" }, `#${idx + 1}`),
+                  React.createElement("div", { className: "lm-incoming-row-input-wrap" },
+                    React.createElement("input", {
+                      value: folderPath || "",
+                      className: "form-control",
+                      onChange: event => handleUpdateFolder(idx, event.target.value),
+                      onBlur: () => handleSaveFolders(incomingFoldersList),
+                      placeholder: `/Volumes/Library/Incoming${idx > 0 ? `_${idx + 1}` : ""}`
+                    }),
+                    isConfigured ? React.createElement("span", {
+                      className: `lm-incoming-folder-badge ${isValid ? "ready" : "warning"}`
+                    }, isValid ? "✓ Inside Library" : (folderStatus.reason || "Outside Library")) : null
+                  ),
+                  incomingFoldersList.length > 1 ? React.createElement("button", {
+                    type: "button",
+                    className: "btn btn-danger btn-sm lm-incoming-row-remove",
+                    title: "Remove this incoming folder",
+                    onClick: () => handleRemoveFolder(idx)
+                  }, "✕") : null
+                );
+              })
+            ),
+            React.createElement("div", { className: `lm-incoming-state ${multiStatus.valid_count > 0 ? "ready" : "warning"}`, style: { marginTop: "16px" } },
+              React.createElement("strong", null, multiStatus.valid_count > 0 ? `${multiStatus.valid_count} incoming folder${multiStatus.valid_count === 1 ? "" : "s"} ready to monitor` : "Incoming folders need attention"),
+              React.createElement("span", null, multiStatus.valid_count > 0 ? "Watchtower is tracking completed video files across all valid folders." : "Please configure at least one incoming folder located inside a Stash library root."),
+              React.createElement("small", null, `${incoming.downloading ? `${incoming.downloading} downloading, ` : ""}${incoming.waiting || 0} waiting, ${incoming.scanning || 0} being added, ${incoming.imported || 0} added, ${incoming.failed || 0} failed.`)),
+            React.createElement("p", { className: "lm-help", style: { marginTop: "10px" } },
+              "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."))))
+    }
     else if (tab === "csm") content = React.createElement(React.Fragment, null,
       panel("Contact Sheets (CSM)", "Generate multi-frame visual contact sheet companion images alongside your video files.",
         React.createElement(React.Fragment, null,
@@ -2160,11 +2224,11 @@
           title: "5. Incoming Downloads Workflow",
           content: [
             React.createElement("h2", { key: "h2" }, "📥 5. Incoming Downloads & Automatic Ingest"),
-            React.createElement("p", { key: "p1" }, "Automates the ingest of completed video downloads arriving in an incoming staging folder."),
+            React.createElement("p", { key: "p1" }, "Automates the ingest of completed video downloads arriving in up to 5 incoming staging folders (e.g., Torrents, Usenet, JDownloader, AirDrop)."),
             React.createElement("h3", { key: "h3_1" }, "Configuration & Settle Delays"),
             React.createElement("ul", { key: "ul1" },
-              React.createElement("li", null, React.createElement("strong", null, "Automatically Add Completed Videos (automaticIncomingScan): "), "Master switch to enable incoming download monitoring."),
-              React.createElement("li", null, React.createElement("strong", null, "Incoming Folder (incomingFolder): "), "The designated staging directory inside your Stash library where new downloads arrive."),
+              React.createElement("li", null, React.createElement("strong", null, "Automatically Add Completed Videos (automaticIncomingScan): "), "Master switch to enable incoming download monitoring across all configured staging folders."),
+              React.createElement("li", null, React.createElement("strong", null, "Watched Incoming Folders (incomingFolders): "), "Configure up to 5 designated staging directories inside your Stash library roots where new downloads arrive."),
               React.createElement("li", null, React.createElement("strong", null, "Wait Before Adding a Video (incomingSettleMinutes): "), "Minutes a completed video file must remain 100% unchanged before Watchtower asks Stash to scan and import it (default: 5 min)."),
               React.createElement("li", null, React.createElement("strong", null, "Live Terminal Tracking: "), "Actively tracks in-flight download temporary files (.crdownload, .part, .download, .tmp). When downloading completes and the file settles, Stash adds it automatically.")
             )
