@@ -17,12 +17,12 @@ from pathlib import Path
 from stashapi.stashapp import StashInterface
 
 from librarymanager_core import (
-    generate_video_contact_sheet, expect_filesystem_create,apply_manual_filename, apply_scene_filename, build_merge_preview, build_resolution_plan,
+    generate_video_contact_sheet, expect_filesystem_create, apply_manual_filename, apply_scene_filename, build_merge_preview, build_resolution_plan,
                                  claim_due_rename, connect, enqueue_rename, fail_queued_rename,
                                  finish_queued_rename, inventory, preview_safe_filenames,
                                  preview_manual_filename, preview_scene_filename, reconcile_missing_files, refresh_scene_inventory,
                                  release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
-                                 reconcile_filesystem_events, pending_filesystem_events)
+                                 reconcile_filesystem_events, pending_filesystem_events, utc_now)
 from librarymanager_core import dashboard_data, incoming_summary, record_activity, recent_activity, cancel_pending_rename, make_pending_rename_due
 
 
@@ -443,6 +443,98 @@ def stop_filesystem_monitor(database_path):
     return {**status, "message": "Stop requested; monitor is still shutting down"}
 
 
+def refresh_scene_contact_sheet(database_path: Path, video_path: str, scene_id: str, config: dict):
+    """Regenerate contact sheet with updated title/metadata if CSM generation is enabled."""
+    if not video_path:
+        return None
+    if config.get("generateContactSheets") is not True or config.get("refreshContactSheetsOnRename") is False:
+        return None
+    scope = config.get("contactSheetScope") or "all"
+    if scope == "incoming":
+        inc_str = config.get("incomingFolder") or ""
+        if inc_str:
+            try:
+                Path(video_path).resolve().relative_to(Path(inc_str).resolve())
+            except (OSError, ValueError):
+                return None
+        else:
+            return None
+
+    sheet_p = f"{video_path}.jpg"
+    expect_filesystem_create(database_path, sheet_p)
+    try:
+        con = connect(database_path)
+        con.execute(
+            """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,size,modified_ns,stable_since,settle_seconds,status,attempts,detail)
+               VALUES (?,?,?,?,?,?,?,?,0,?)
+               ON CONFLICT(path) DO UPDATE SET status='generating_sheet', last_checked_at=excluded.last_checked_at, detail=excluded.detail""",
+            (str(sheet_p), utc_now(), utc_now(), None, None, time.time(), 0, "generating_sheet", f"Creating contact sheet for scene {scene_id}")
+        )
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+    try:
+        csm_res = generate_video_contact_sheet(
+            video_path,
+            grid=config.get("contactSheetGrid") or "4x4",
+            include_banner=config.get("contactSheetBanner") is not False,
+            adjust_vertical=config.get("contactSheetAdjustVertical") is not False,
+            custom_script=config.get("contactSheetScript") or "",
+            overwrite=True
+        )
+        if csm_res.get("status") == "generated":
+            sheet_p = csm_res.get("path") or sheet_p
+            try:
+                con = connect(database_path)
+                con.execute(
+                    """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,size,modified_ns,stable_since,settle_seconds,status,attempts,detail)
+                       VALUES (?,?,?,?,?,?,?,?,0,?)
+                       ON CONFLICT(path) DO UPDATE SET status='paired', last_checked_at=excluded.last_checked_at, detail=excluded.detail""",
+                    (str(sheet_p), utc_now(), utc_now(), Path(sheet_p).stat().st_size if Path(sheet_p).exists() else None,
+                     Path(sheet_p).stat().st_mtime_ns if Path(sheet_p).exists() else None, time.time(), 60, "paired",
+                     f"Contact sheet regenerated for scene {scene_id}")
+                )
+                con.commit()
+                con.close()
+            except Exception:
+                pass
+            record_activity(
+                database_path,
+                "companion",
+                "contact sheet updated",
+                "recorded",
+                scene_id=str(scene_id),
+                new_path=sheet_p,
+                detail="Contact sheet regenerated with new metadata for visual file browsing"
+            )
+            maybe_notify(
+                config,
+                f"Contact sheet created & paired: {Path(sheet_p).name} → Scene {scene_id}",
+                success=True
+            )
+            return csm_res
+        else:
+            try:
+                con = connect(database_path)
+                con.execute("DELETE FROM incoming_files WHERE path=?", (str(sheet_p),))
+                con.commit()
+                con.close()
+            except Exception:
+                pass
+    except Exception as csm_err:
+        try:
+            con = connect(database_path)
+            con.execute("DELETE FROM incoming_files WHERE path=?", (str(sheet_p),))
+            con.commit()
+            con.close()
+        except Exception:
+            pass
+        activity_logger().error("Contact sheet update failed for %s: %s", video_path, csm_err)
+    return None
+
+
 def process_rename_queue(stash, database_path):
     config = stash.find_plugin_config("librarymanager") or {}
     processed = skipped = failed = 0
@@ -479,89 +571,7 @@ def process_rename_queue(stash, database_path):
                       metadata={"base_stem": result.get("base_stem")})
                 if result.get("action_performed"):
                     maybe_notify(config, f"Renamed scene {scene_id}: {Path(result['proposed_path']).name}", success=True)
-                    if config.get("generateContactSheets") is True and config.get("refreshContactSheetsOnRename") is not False:
-                        scope = config.get("contactSheetScope") or "all"
-                        should_generate = True
-                        if scope == "incoming":
-                            inc_str = config.get("incomingFolder") or ""
-                            if inc_str:
-                                try:
-                                    Path(result["proposed_path"]).resolve().relative_to(Path(inc_str).resolve())
-                                except (OSError, ValueError):
-                                    should_generate = False
-                            else:
-                                should_generate = False
-                        if should_generate:
-                            sheet_p = f"{result['proposed_path']}.jpg"
-                            expect_filesystem_create(database_path, sheet_p)
-                            try:
-                                con = connect(database_path)
-                                con.execute(
-                                    """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,size,modified_ns,stable_since,settle_seconds,status,attempts,detail)
-                                       VALUES (?,?,?,?,?,?,?,?,0,?)
-                                       ON CONFLICT(path) DO UPDATE SET status='generating_sheet', last_checked_at=excluded.last_checked_at, detail=excluded.detail""",
-                                    (str(sheet_p), utc_now(), utc_now(), None, None, time.time(), 0, "generating_sheet", f"Creating contact sheet for scene {scene_id}")
-                                )
-                                con.commit()
-                                con.close()
-                            except Exception:
-                                pass
-                            try:
-                                csm_res = generate_video_contact_sheet(
-                                    result["proposed_path"],
-                                    grid=config.get("contactSheetGrid") or "4x5",
-                                    include_banner=config.get("contactSheetBanner") is not False,
-                                    adjust_vertical=config.get("contactSheetAdjustVertical") is not False,
-                                    custom_script=config.get("contactSheetScript") or "",
-                                    overwrite=True
-                                )
-                                if csm_res.get("status") == "generated":
-                                    sheet_p = csm_res.get("path")
-                                    try:
-                                        con = connect(database_path)
-                                        con.execute(
-                                            """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,size,modified_ns,stable_since,settle_seconds,status,attempts,detail)
-                                               VALUES (?,?,?,?,?,?,?,?,0,?)
-                                               ON CONFLICT(path) DO UPDATE SET status='paired', last_checked_at=excluded.last_checked_at, detail=excluded.detail""",
-                                            (str(sheet_p), utc_now(), utc_now(), Path(sheet_p).stat().st_size if Path(sheet_p).exists() else None,
-                                             Path(sheet_p).stat().st_mtime_ns if Path(sheet_p).exists() else None, time.time(), 60, "paired",
-                                             f"Contact sheet regenerated for scene {scene_id}")
-                                        )
-                                        con.commit()
-                                        con.close()
-                                    except Exception:
-                                        pass
-                                    record_activity(
-                                        database_path,
-                                        "companion",
-                                        "contact sheet updated",
-                                        "recorded",
-                                        scene_id=str(scene_id),
-                                        new_path=sheet_p,
-                                        detail=f"Contact sheet regenerated with new metadata for visual file browsing"
-                                    )
-                                    maybe_notify(
-                                        config,
-                                        f"Contact sheet created & paired: {Path(sheet_p).name} → Scene {scene_id}",
-                                        success=True
-                                    )
-                                else:
-                                    try:
-                                        con = connect(database_path)
-                                        con.execute("DELETE FROM incoming_files WHERE path=?", (str(sheet_p),))
-                                        con.commit()
-                                        con.close()
-                                    except Exception:
-                                        pass
-                            except Exception as csm_err:
-                                try:
-                                    con = connect(database_path)
-                                    con.execute("DELETE FROM incoming_files WHERE path=?", (str(sheet_p),))
-                                    con.commit()
-                                    con.close()
-                                except Exception:
-                                    pass
-                                activity_logger().error("Contact sheet update failed: %s", csm_err)
+                    refresh_scene_contact_sheet(database_path, result.get("proposed_path"), scene_id, config)
                 processed += int(bool(result.get("action_performed")))
                 skipped += int(not result.get("action_performed"))
             except Exception as error:
@@ -1117,6 +1127,9 @@ def main():
             audit(database_path, "rename", "manual filename correction", result.get("status", "unknown"),
                   scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
                   new_path=result.get("proposed_path"), detail=result.get("reason", ""))
+            if result.get("status") == "renamed" or result.get("action_performed"):
+                config = stash.find_plugin_config("librarymanager") or {}
+                refresh_scene_contact_sheet(database_path, result.get("proposed_path"), scene_id, config)
         message = json.dumps(result, ensure_ascii=False)
     elif mode in ("preview_test_rename", "apply_test_rename"):
         stash = StashInterface(plugin_input["server_connection"])
@@ -1138,6 +1151,8 @@ def main():
             audit(database_path, "rename", "test scene rename", result.get("status", "unknown"),
                   scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
                   new_path=result.get("proposed_path"), detail=result.get("reason", ""))
+            if result.get("status") in ("renamed", "ready") or result.get("action_performed"):
+                refresh_scene_contact_sheet(database_path, result.get("proposed_path"), scene_id, config)
         result_path = Path(__file__).with_name("test-rename-result.json")
         result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
         message = json.dumps(result, ensure_ascii=False)
