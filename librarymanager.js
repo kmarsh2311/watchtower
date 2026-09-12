@@ -471,20 +471,16 @@
 
     function Switch({ setting, label, help, defaultValue = false }) {
       const isChecked = defaultValue ? config[setting] !== false : config[setting] === true;
-      const inputId = `lm-switch-${setting}`;
       return React.createElement("div", { className: "lm-switch-row", title: help },
         React.createElement("input", {
-          id: inputId,
           type: "checkbox",
           checked: isChecked,
           disabled: busy === "settings",
+          style: { cursor: "pointer" },
           onChange: e => updateSetting(setting, e.target.checked)
         }),
         React.createElement("div", { className: "lm-switch-text" },
-          React.createElement("label", {
-            htmlFor: inputId,
-            style: { cursor: "pointer", display: "inline-block", margin: 0, userSelect: "none" }
-          }, React.createElement("strong", null, label)),
+          React.createElement("strong", null, label),
           React.createElement("small", null, help)
         )
       );
