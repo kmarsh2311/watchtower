@@ -1291,8 +1291,8 @@ a.lm-activity-scene-pill:hover {
 /* Menu KitKat Support Button - Emerald Command-Center Theme */
 .lm-tabs-divider {
   height: 1px;
-  background: rgba(140, 155, 185, 0.2);
-  margin: 8px 4px;
+  background: rgba(140, 155, 185, 0.18);
+  margin: 6px 4px 4px;
 }
 
 .lm-kitkat-btn {
@@ -1300,8 +1300,8 @@ a.lm-activity-scene-pill:hover {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  margin: 6px 4px 4px;
-  padding: 8px 10px;
+  margin: 0 2px 2px;
+  padding: 7px 10px;
   border: 1px solid rgba(47, 166, 109, 0.45);
   border-radius: 8px;
   background: rgba(47, 166, 109, 0.12);
