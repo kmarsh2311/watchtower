@@ -2547,3 +2547,43 @@ a.lm-activity-scene-pill:hover {
   vertical-align: middle !important;
   line-height: 1 !important;
 }
+
+/* Welcome Screen Lighthouse Animation Badge (exact copy of home screen live CSS beam animation) */
+.lm-wizard-lighthouse-badge {
+  position: relative !important;
+  width: 72px !important;
+  height: 72px !important;
+  border-radius: 14px !important;
+  margin: 0 auto 1rem auto !important;
+  overflow: hidden !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 16px rgba(57, 255, 100, 0.25) !important;
+  background: #000000 !important;
+  display: block !important;
+}
+
+.lm-wizard-lighthouse-badge .lm-brand-wrapper {
+  position: absolute !important;
+  left: -14px !important;
+  top: 0 !important;
+  width: 341.6px !important;
+  height: 72px !important;
+  pointer-events: none !important;
+}
+
+.lm-wizard-lighthouse-badge .lm-brand-lockup {
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 341.6px !important;
+  height: 72px !important;
+  object-fit: fill !important;
+  display: block !important;
+}
+
+.lm-wizard-lighthouse-badge .lm-lighthouse-container {
+  position: absolute !important;
+  inset: 0 !important;
+  pointer-events: none !important;
+  overflow: hidden !important;
+  mix-blend-mode: screen !important;
+}

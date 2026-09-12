@@ -663,7 +663,7 @@
         React.createElement("header", { className: "lm-wizard-header" },
           React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "10px" } },
             React.createElement("img", {
-              src: "/plugin/librarymanager/assets/watchtower-icon.gif",
+              src: "/plugin/librarymanager/assets/watchtower-icon.png",
               alt: "",
               style: { width: "32px", height: "32px", borderRadius: "6px" }
             }),
@@ -697,11 +697,21 @@
         ),
         React.createElement("div", { className: "lm-wizard-body" },
           step === 0 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}`, style: { textAlign: "center", padding: "1rem 0.5rem" } },
-            React.createElement("img", {
-              src: "/plugin/librarymanager/assets/watchtower-icon.gif",
-              alt: "Watchtower",
-              style: { width: "72px", height: "72px", borderRadius: "14px", marginBottom: "1rem", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }
-            }),
+            React.createElement("div", { className: "lm-wizard-lighthouse-badge" },
+              React.createElement("div", { className: "lm-brand-wrapper" },
+                React.createElement("img", {
+                  src: "/plugin/librarymanager/assets/watchtower-header-v2.png",
+                  alt: "Watchtower",
+                  className: "lm-brand-lockup"
+                }),
+                React.createElement("div", { className: "lm-lighthouse-container" },
+                  React.createElement("div", { className: "lm-lighthouse-beam-left" }),
+                  React.createElement("div", { className: "lm-lighthouse-beam-right" }),
+                  React.createElement("div", { className: "lm-lighthouse-flare-streak" }),
+                  React.createElement("div", { className: "lm-lighthouse-core" })
+                )
+              )
+            ),
             React.createElement("h2", { style: { fontSize: "1.5rem", color: "#ffffff", marginBottom: "0.45rem" } }, "Welcome to Watchtower"),
             React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "520px", margin: "0 auto 1.4rem auto" } },
               "Your intelligent library manager, companion file synchronizer, and live monitor for Stash."),
@@ -1458,13 +1468,13 @@
       const isIncomingScope = config.contactSheetScope === "incoming";
       const switches = [
         { label: "Watcher", key: "autoStartMonitor", active: config.autoStartMonitor === true, state: config.autoStartMonitor === true ? "ON" : "OFF", help: "Automatically starts filesystem monitor", tab: "monitor" },
-        { label: "Reconcile", key: "automaticMoveReconciliation", active: config.automaticMoveReconciliation === true, state: config.automaticMoveReconciliation === true ? "ON" : "OFF", help: "Automatically updates Stash when files are moved or renamed externally", tab: "monitor" },
+        { label: "Move Sync", key: "automaticMoveReconciliation", active: config.automaticMoveReconciliation === true, state: config.automaticMoveReconciliation === true ? "ON" : "OFF", help: "Automatically updates Stash when files are moved or renamed externally", tab: "monitor" },
         { label: "Auto-Rename", key: "automaticRenaming", active: config.automaticRenaming === true, state: config.testSceneId ? `TEST ${config.testSceneId}` : (config.automaticRenaming === true ? "ON" : "OFF"), help: config.testSceneId ? `Active (Limited to Test Scene ${config.testSceneId})` : "Automatically renames files when metadata is edited", tab: "manage" },
         { label: "Incoming", key: "automaticIncomingScan", active: config.automaticIncomingScan === true, state: config.automaticIncomingScan === true ? "ON" : "OFF", help: "Watches incoming folder and adds completed downloads", tab: "incoming" },
         { label: "Clean Titles", key: "stripMetadataFromTitle", active: config.stripMetadataFromTitle !== false, state: config.stripMetadataFromTitle !== false ? "ON" : "OFF", help: "Removes duplicate studio/performers from generated filenames", tab: "manage" },
         { label: "Login Startup", key: "startAtLogin", active: config.startAtLogin === true, state: config.startAtLogin === true ? "ON" : "OFF", help: `Runs watcher in background on ${data?.startup?.platform_label || "OS"} login`, tab: "monitor" },
         { label: "Sheets", key: "generateContactSheets", active: config.generateContactSheets === true, state: config.generateContactSheets === true ? (config.contactSheetGrid || "ON") : "OFF", help: "Generates multi-frame contact sheets with CSM", tab: "csm" },
-        { label: "Scope", key: "contactSheetScope", active: true, state: isIncomingScope ? "INCOMING" : "ALL", help: isIncomingScope ? "Contact sheets restricted to incoming folder" : "Contact sheets generated for entire library", tab: "csm" },
+        { label: "Sheet Scope", key: "contactSheetScope", active: true, state: isIncomingScope ? "INCOMING" : "ALL", help: isIncomingScope ? "Contact sheets restricted to incoming folder" : "Contact sheets generated for entire library", tab: "csm" },
         { label: "Alerts", key: "macNotifications", active: config.macNotifications === true, state: config.macNotifications === true ? "ON" : "OFF", help: "Sends system desktop notifications for important warnings and failures", tab: "advanced" }
       ];
 
