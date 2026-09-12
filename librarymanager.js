@@ -25,8 +25,14 @@
     const data = await gql(`mutation Run($id: ID!, $args: Map) {
       runPluginOperation(plugin_id: $id, args: $args)
     }`, { id: PLUGIN_ID, args: { mode, ...(extra || {}) } });
-    const parsed = typeof data.runPluginOperation === "string"
-      ? JSON.parse(data.runPluginOperation) : data.runPluginOperation;
+    let parsed = data.runPluginOperation;
+    if (typeof parsed === "string") {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        // Plain text message from backend, keep as string
+      }
+    }
     if (parsed?.error) throw new Error(parsed.error);
     // Raw Stash plugins may return either their payload directly or an {output: ...} envelope.
     return parsed && Object.prototype.hasOwnProperty.call(parsed, "output") ? parsed.output : parsed;
