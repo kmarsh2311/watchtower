@@ -1380,3 +1380,24 @@ a.lm-activity-scene-pill:hover {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+/* Refined Stop Watcher Button */
+.lm-btn-stop {
+  background: rgba(220, 53, 69, 0.14) !important;
+  border: 1px solid rgba(220, 53, 69, 0.45) !important;
+  color: #ff7875 !important;
+  font-weight: 500 !important;
+  transition: all 0.18s ease-in-out !important;
+}
+
+.lm-btn-stop:hover:not(:disabled) {
+  background: rgba(220, 53, 69, 0.28) !important;
+  border-color: #ff4d4f !important;
+  color: #ffffff !important;
+  box-shadow: 0 0 10px rgba(220, 53, 69, 0.35) !important;
+  transform: translateY(-1px);
+}
+
+.lm-btn-stop:active:not(:disabled) {
+  transform: translateY(0);
+}

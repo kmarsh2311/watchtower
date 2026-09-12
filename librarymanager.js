@@ -1227,7 +1227,7 @@
                 }
               }, "⟳ Restart Watcher"),
               React.createElement(Button, {
-                variant: "danger",
+                className: "lm-btn-stop",
                 disabled: !!busy,
                 title: "Stop the background watcher daemon",
                 onClick: async () => {
@@ -1244,7 +1244,7 @@
                     setBusy("");
                   }
                 }
-              }, "⏹ Stop Watcher")
+              }, "■ Stop Watcher")
             ) : isMonitorStale ? React.createElement(React.Fragment, null,
               React.createElement(Button, {
                 variant: "primary",
@@ -1267,7 +1267,7 @@
                 }
               }, "⟳ RESTART WATCHER"),
               React.createElement(Button, {
-                variant: "secondary",
+                className: "lm-btn-stop",
                 disabled: !!busy,
                 title: "Stop the stale watcher daemon",
                 onClick: async () => {
@@ -1284,7 +1284,7 @@
                     setBusy("");
                   }
                 }
-              }, "⏹ Stop")
+              }, "■ Stop Watcher")
             ) : React.createElement(Button, {
               variant: "primary",
               disabled: !!busy,
