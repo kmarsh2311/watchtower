@@ -415,7 +415,7 @@
       finally { setBusy(""); }
     }
 
-    async function updateSettings(changes, stopWhenDisabled) {
+    async function updateSettings(changes) {
       const next = { ...config, ...changes };
       setConfig(next); setError("");
       try {
@@ -423,14 +423,9 @@
         if (Object.prototype.hasOwnProperty.call(changes, "startAtLogin")) {
           await operation("configure_startup", { enabled: next.startAtLogin === true });
         }
-        const restart = ["automaticMoveReconciliation", "macNotifications", "automaticIncomingScan",
-          "incomingFolder", "incomingSettleMinutes", "generateContactSheets", "contactSheetGrid",
-          "contactSheetBanner", "contactSheetAdjustVertical", "contactSheetScript"].some(key => key in changes);
-        if (changes.autoStartMonitor === false || ((restart || stopWhenDisabled) && data?.monitor?.state === "running")) {
-          await operation("stop_monitor", { silent: true });
-        }
-        if (next.autoStartMonitor === true && (restart || changes.autoStartMonitor === true)) {
-          await operation("ensure_monitor");
+        // Dynamic in-memory hot-reload without restarting or stopping the watcher process
+        if (data?.monitor?.state === "running") {
+          await operation("reload_monitor");
         }
         setNotice("Settings saved.");
         window.setTimeout(refresh, 500);

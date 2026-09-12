@@ -294,6 +294,36 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
     raise RuntimeError(f"Filesystem monitor did not start; inspect {log_path}")
 
 
+def reload_monitor_runtime(stash, database_path):
+    status = filesystem_monitor_summary(database_path)
+    if status.get("state") != "running" or not status.get("token"):
+        return False
+    roots = fetch_library_roots(stash)
+    config = stash.find_plugin_config("librarymanager") or {}
+    incoming = incoming_folder_status(config, roots)
+    control_path = Path(__file__).with_name("monitor-control.json")
+    try:
+        control_path.write_text(json.dumps({
+            "action": "reload",
+            "token": status["token"],
+            "config": {
+                "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
+                "mac_notifications": config.get("macNotifications") is True,
+                "incoming_imports": incoming["enabled"] and incoming["valid"],
+                "incoming_folder": incoming["path"] if incoming["valid"] else "",
+                "incoming_settle_seconds": max(60, int(config.get("incomingSettleMinutes") or 5) * 60),
+                "generate_contact_sheets": config.get("generateContactSheets") is True,
+                "contact_sheet_grid": config.get("contactSheetGrid") or "4x4",
+                "contact_sheet_banner": config.get("contactSheetBanner") is not False,
+                "contact_sheet_adjust_vertical": config.get("contactSheetAdjustVertical") is not False,
+                "contact_sheet_script": config.get("contactSheetScript") or "",
+            }
+        }), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
 def stop_filesystem_monitor(database_path):
     status = filesystem_monitor_summary(database_path)
     if status.get("raw_state", status.get("state")) != "running" or not status.get("token"):
@@ -643,12 +673,14 @@ def main():
         stash = StashInterface(plugin_input["server_connection"])
         result = start_filesystem_monitor(stash, database_path, plugin_input["server_connection"])
         message = result["message"]
+    elif mode == "reload_monitor":
+        stash = StashInterface(plugin_input["server_connection"])
+        reloaded = reload_monitor_runtime(stash, database_path)
+        message = json.dumps({"reloaded": reloaded})
     elif mode == "stop_monitor":
-        silent = (plugin_input.get("args") or {}).get("silent") is True
         result = stop_filesystem_monitor(database_path)
         message = result["message"]
-        if not silent:
-            audit(database_path, "monitor", "stop", result.get("state", "stopped"), detail=message)
+        audit(database_path, "monitor", "stop", result.get("state", "stopped"), detail=message)
     elif mode == "monitor_status":
         result = filesystem_monitor_summary(database_path)
         message = (f"Filesystem monitor: {result['state']}; PID {result.get('pid')}; "
