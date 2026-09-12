@@ -906,8 +906,31 @@ def main():
         message = result["message"]
     elif mode == "record_config_change":
         changes = plugin_input.get("args", {}).get("changes") or {}
+        skip_keys = set()
+        if "incomingFolders" in changes and "incomingFolder" in changes:
+            skip_keys.add("incomingFolder")
+
         for key, val in changes.items():
-            if key == "automaticRenaming":
+            if key in skip_keys:
+                continue
+            if key == "automaticIncomingScan":
+                status = "enabled" if val else "disabled"
+                detail = f"Automatic incoming ingest was {status} by user in settings"
+                audit(database_path, "config", "incoming auto-ingest", status, detail=detail)
+            elif key == "incomingFolders":
+                if isinstance(val, list) and len(val) > 0:
+                    cleaned_val = [str(x).strip() for x in val if str(x).strip()]
+                    if len(cleaned_val) == 1:
+                        detail = f"Incoming folder set to {cleaned_val[0]}"
+                    elif len(cleaned_val) > 1:
+                        folder_list_str = ", ".join(f"[{i+1}] {f}" for i, f in enumerate(cleaned_val))
+                        detail = f"Watched incoming folders updated ({len(cleaned_val)} active): {folder_list_str}"
+                    else:
+                        detail = "Incoming folders cleared (no active folders)"
+                else:
+                    detail = "Incoming folders cleared (no active folders)"
+                audit(database_path, "config", "incoming folders", "updated", detail=detail)
+            elif key == "automaticRenaming":
                 status = "enabled" if val else "disabled"
                 detail = f"Automatic Renaming was {status} by user in settings"
                 audit(database_path, "config", "automatic renaming", status, detail=detail)
@@ -928,7 +951,7 @@ def main():
             elif key == "incomingFolder":
                 audit(database_path, "config", "incoming folder", "updated", detail=f"Incoming folder set to {val or 'none'}")
             elif key == "incomingSettleMinutes":
-                audit(database_path, "config", "incoming delay", "updated", detail=f"Incoming settle delay set to {val}m")
+                audit(database_path, "config", "incoming delay", "updated", detail=f"Incoming settle delay set to {val} minute(s)")
             elif key == "testSceneId":
                 if val:
                     audit(database_path, "config", "test scene limit", "active", detail=f"Automatic renaming restricted to Test Scene {val}")
