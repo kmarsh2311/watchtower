@@ -1233,10 +1233,17 @@
             help: data.startup.enabled ? "The watcher starts with macOS and waits for Stash if necessary." : "Start the background watcher at login and retry once a minute until Stash is available." }))),
       panel("Monitored Library Roots", "All configured Stash scene library folders tracked by the background filesystem monitor.",
         React.createElement("div", { className: "lm-info-list" },
-          (data?.library_roots || []).length ? (data.library_roots || []).map(root =>
-            React.createElement("div", { key: root.path, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.06)" } },
-              React.createElement("code", { style: { color: "var(--lm-accent-green, #20e64a)" } }, root.path),
-              React.createElement("span", { className: `lm-badge ${root.available ? "ok" : "warn"}` }, root.available ? "AVAILABLE" : "UNAVAILABLE")))
+          (data?.library_roots || []).length ? (data.library_roots || []).map(root => {
+            const rootPath = typeof root === "string" ? root : (root?.path || "");
+            const isUnavailable = (unavailableRoots || []).includes(rootPath);
+            return React.createElement("div", {
+              key: rootPath,
+              style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px", borderBottom: "1px solid rgba(255,255,255,0.06)" }
+            },
+              React.createElement("code", { style: { color: isUnavailable ? "#ffb52e" : "#20e64a", fontSize: "0.88rem" } }, rootPath),
+              React.createElement("span", { className: `lm-badge ${isUnavailable ? "warn" : "ok"}` }, isUnavailable ? "UNAVAILABLE" : "AVAILABLE")
+            );
+          })
             : React.createElement("p", { className: "lm-empty" }, "No library roots discovered in Stash configuration."))))
     else if (tab === "incoming") content = React.createElement(React.Fragment, null,
       panel("Incoming Downloads Folder", "Watch one incoming folder where new downloads arrive before you organize them.",
