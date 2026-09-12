@@ -586,12 +586,12 @@
               React.createElement("h2", null, "Watchtower Guided Setup")
             )
           ),
-          config.onboardingCompleted ? React.createElement("button", {
+          React.createElement("button", {
             type: "button",
             className: "lm-wizard-close-btn",
-            onClick: onHide,
+            onClick: (e) => { e.preventDefault(); e.stopPropagation(); onHide(); },
             title: "Close Setup Wizard"
-          }, "✕") : null
+          }, "✕")
         ),
         step > 0 && React.createElement("div", { className: "lm-wizard-stepper" },
           stepsList.map(s => {
@@ -828,6 +828,14 @@
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
     const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(false);
+
+    React.useEffect(() => {
+      // Auto-open on page load for interactive testing
+      const timer = window.setTimeout(() => {
+        setShowOnboardingWizard(true);
+      }, 200);
+      return () => window.clearTimeout(timer);
+    }, []);
     const [onboardingBannerDismissed, setOnboardingBannerDismissed] = React.useState(false);
     const [config, setConfig] = React.useState({});
     const [busy, setBusy] = React.useState("");
@@ -2829,7 +2837,7 @@
           })
         ))),
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
-      (data !== null && config.onboardingCompleted !== true && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
+      (data !== null && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
         onStart: () => setShowOnboardingWizard(true),
         onDismiss: () => setOnboardingBannerDismissed(true)
       }) : null,
