@@ -538,6 +538,52 @@
       return () => { stopped = true; window.clearInterval(pollTimer); window.clearInterval(clockTimer); };
     }, [tab]);
 
+    async function handleFactoryReset() {
+      if (!window.confirm("Are you sure you want to reset all Watchtower settings to factory defaults? This will restore standard naming rules with Desktop Notifications ON. Your video files on disk and Stash records are completely safe and untouched.")) return;
+      setBusy("reset"); setError("");
+      try {
+        const defaultSettings = {
+          automaticRenaming: false,
+          masterTitleSource: "stash_title",
+          includeStudio: true,
+          includePerformers: true,
+          cleanPerformerOnlyTitles: true,
+          stripStudioFromTitle: true,
+          stripPerformersFromTitle: true,
+          stripConnectiveWords: true,
+          collapseMultipleDashes: true,
+          maxPerformersInFilename: 0,
+          filenameOrder: "title,studio,performers",
+          filenameSectionSeparator: "dash",
+          filenamePerformerSeparator: "comma",
+          renameSettleSeconds: 30,
+          testSceneId: "",
+          autoStartMonitor: true,
+          startAtLogin: false,
+          automaticMoveReconciliation: false,
+          automaticIncomingScan: false,
+          incomingFolder: "",
+          incomingSettleMinutes: 5,
+          generateContactSheets: false,
+          refreshContactSheetsOnRename: true,
+          contactSheetGrid: "5x4",
+          contactSheetBanner: true,
+          contactSheetAdjustVertical: true,
+          contactSheetScript: "",
+          macNotifications: true,
+          notifySuccessfulRenames: true
+        };
+        await saveConfig(defaultSettings);
+        setConfig(defaultSettings);
+        await refresh();
+        setNotice("Watchtower has been reset to factory defaults with Desktop Notifications ON.");
+      } catch (err) {
+        setError(`Factory reset failed: ${err.message || err}`);
+      } finally {
+        setBusy("");
+      }
+    }
+
     async function handleCleanStash() {
       if (!window.confirm("Run Safe Auto-Clean? Any verified renamed files will be safely linked to their scenes first to preserve all metadata, then dead references will be pruned.")) return;
       setBusy("clean"); setError("");
@@ -1942,6 +1988,22 @@
               React.createElement("span", { className: "lm-badge ok", style: { fontSize: "11px" } }, "Performer.Update.Post"),
               React.createElement("span", { className: "lm-badge ok", style: { fontSize: "11px" } }, "Studio.Update.Post"))),
           React.createElement("small", null, "Automatically synchronizes video filenames whenever scene, performer, or studio metadata is updated."))),
+      panel("Factory Reset", "Reset all Watchtower configuration switches, naming rules, and diagnostic settings back to safe factory defaults.",
+        React.createElement("div", { className: "lm-field", style: { padding: "12px 14px", background: "rgba(239, 68, 68, 0.04)", borderRadius: "6px", border: "1px solid rgba(239, 68, 68, 0.2)" } },
+          React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" } },
+            React.createElement("div", null,
+              React.createElement("strong", { style: { color: "#f87171" } }, "Reset All Watchtower Settings"),
+              React.createElement("p", { style: { margin: "2px 0 0 0", fontSize: "0.82rem", color: "#8b949e" } }, "Restores safe default naming rules and turns Desktop Notifications ON. No media files or Stash records are ever deleted.")
+            ),
+            React.createElement(Button, {
+              variant: "danger",
+              style: { background: "#dc2626", borderColor: "#ef4444", color: "#ffffff", fontWeight: 600 },
+              disabled: !!busy,
+              onClick: handleFactoryReset
+            }, busy === "reset" ? "Resetting…" : "↺ Reset Settings to Factory Defaults")
+          )
+        )
+      ),
       reports && reports.length ? panel("Diagnostic Results", "Technical diagnostic scan output.",
         React.createElement(React.Fragment, null,
           React.createElement("div", { className: "lm-actions", style: { display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" } },
@@ -2178,7 +2240,8 @@
             React.createElement("h3", { key: "h3_3" }, "Desktop Notifications"),
             React.createElement("ul", { key: "ul3" },
               React.createElement("li", null, React.createElement("strong", null, "Important Warnings & Failures (macNotifications): "), "Sends native OS desktop notifications for failed renames, unavailable drives/roots, and events needing review."),
-              React.createElement("li", null, React.createElement("strong", null, "Notify Successful Renames (notifySuccessfulRenames): "), "Also sends a desktop notification after each completed automatic rename.")
+              React.createElement("li", null, React.createElement("strong", null, "Notify Successful Renames (notifySuccessfulRenames): "), "Also sends a desktop notification after each completed automatic rename."),
+              React.createElement("li", null, React.createElement("strong", null, "Factory Reset (Reset to Defaults): "), "Restores all 20+ Watchtower configuration toggles and naming rules back to factory defaults with Desktop Notifications ON. Never deletes media files or Stash records.")
             )
           ]
         },
