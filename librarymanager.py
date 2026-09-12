@@ -1121,7 +1121,8 @@ def main():
     elif mode in ("preview_test_rename", "apply_test_rename"):
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
-        scene_id = str(config.get("testSceneId") or "").strip()
+        arguments = plugin_input.get("args") or {}
+        scene_id = str(arguments.get("scene_id") or config.get("testSceneId") or "").strip()
         if not scene_id:
             raise ValueError("Set Test Scene ID in the Stash Library Manager settings first")
         refresh_scene(stash, database_path, scene_id)
@@ -1134,9 +1135,12 @@ def main():
                                                                     "destination_basename": basename}),
                 config,
             )
+            audit(database_path, "rename", "test scene rename", result.get("status", "unknown"),
+                  scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
+                  new_path=result.get("proposed_path"), detail=result.get("reason", ""))
         result_path = Path(__file__).with_name("test-rename-result.json")
         result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
-        message = f"Test scene {scene_id}: {result.get('status')} — {result.get('reason')}. Report: {result_path}"
+        message = json.dumps(result, ensure_ascii=False)
     else:
         raise ValueError(f"Unsupported Library Manager mode: {mode}")
     print(json.dumps({"output": message}))

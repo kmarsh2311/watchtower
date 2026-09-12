@@ -296,6 +296,7 @@
     const [showFilenamePreview, setShowFilenamePreview] = React.useState(false);
     const [reports, setReports] = React.useState(null);
     const [correction, setCorrection] = React.useState({ sceneId: "", filename: "", preview: null });
+    const [testRenameResult, setTestRenameResult] = React.useState(null);
     const [clock, setClock] = React.useState(Date.now());
     const [expandedOverviewEvents, setExpandedOverviewEvents] = React.useState(() => new Set());
     const [terminalFilter, setTerminalFilter] = React.useState("all");
@@ -482,6 +483,44 @@
       } catch (reviewError) {
         setError(`Could not resolve “${basename(event.source_path)}”: ${reviewError.message}`);
       } finally { setBusy(""); }
+    }
+
+    async function previewTestRename() {
+      const sceneId = (config.testSceneId || "").trim();
+      if (!sceneId) { setError("Enter a Test Scene ID in the field above first."); return; }
+      setBusy("test_rename_preview"); setError(""); setTestRenameResult(null);
+      try {
+        const raw = await operation("preview_test_rename", { scene_id: sceneId });
+        const result = typeof raw === "string" ? JSON.parse(raw) : raw;
+        setTestRenameResult(result);
+        if (result.status === "ready") {
+          setNotice(`Preview generated for Scene ${sceneId}.`);
+        } else if (result.status === "unchanged") {
+          setNotice(`Scene ${sceneId} already matches configured filename.`);
+        } else {
+          setNotice(`Scene ${sceneId}: ${result.status} (${result.reason || ""})`);
+        }
+      } catch (e) { setError(e.message); }
+      finally { setBusy(""); }
+    }
+
+    async function applyTestRename() {
+      const sceneId = (config.testSceneId || "").trim();
+      if (!sceneId) { setError("Enter a Test Scene ID in the field above first."); return; }
+      if (!window.confirm(`Rename Scene ${sceneId} on disk now?\n\nThis will rename the video and its companion files.`)) return;
+      setBusy("test_rename_apply"); setError("");
+      try {
+        const raw = await operation("apply_test_rename", { scene_id: sceneId });
+        const result = typeof raw === "string" ? JSON.parse(raw) : raw;
+        setTestRenameResult(result);
+        if (result.status === "renamed" || result.status === "ready") {
+          setNotice(`✓ Scene ${sceneId} renamed successfully on disk.`);
+          await refresh();
+        } else {
+          setNotice(`Scene ${sceneId}: ${result.status} (${result.reason || ""})`);
+        }
+      } catch (e) { setError(e.message); }
+      finally { setBusy(""); }
     }
 
     const updateSetting = (key, value) => updateSettings({ [key]: value }, false);
@@ -1559,14 +1598,57 @@
             React.createElement("small", null, "Optional test scene ID. While set, Automatic Renaming is restricted to this scene only, protecting the rest of your library while you test."),
             React.createElement("input", {
               value: config.testSceneId || "",
-              
-              onChange: e => setConfig({ ...config, testSceneId: e.target.value }),
+              onChange: e => { setConfig({ ...config, testSceneId: e.target.value }); setTestRenameResult(null); },
               onBlur: e => updateSetting("testSceneId", e.target.value.trim()),
               placeholder: "Leave blank for all scenes"
             })),
-          React.createElement("div", { className: "lm-actions", style: { marginTop: "12px" } },
-            React.createElement(TaskButton, { name: "Preview Configured Test Rename", label: "Preview Test Rename", help: "Preview the filename for Test Scene ID without changing any file." }),
-            React.createElement(TaskButton, { name: "Apply Configured Test Rename", label: "Apply Configured Test Rename", dangerous: true, help: "Rename Test Scene ID on disk using configured format and tags." })))),
+          React.createElement("div", { className: "lm-actions", style: { marginTop: "12px", display: "flex", gap: "8px", alignItems: "center" } },
+            React.createElement(Button, {
+              variant: "secondary",
+              disabled: busy === "test_rename_preview" || busy === "test_rename_apply" || !config.testSceneId,
+              onClick: previewTestRename,
+              title: "Preview the filename for Test Scene ID without changing any file."
+            }, busy === "test_rename_preview" ? "Previewing..." : "Preview Test Rename"),
+            React.createElement(Button, {
+              variant: "danger",
+              disabled: busy === "test_rename_preview" || busy === "test_rename_apply" || !config.testSceneId,
+              onClick: applyTestRename,
+              title: "Rename Test Scene ID on disk using configured format and tags."
+            }, busy === "test_rename_apply" ? "Renaming..." : "Apply Configured Test Rename")),
+          testRenameResult && React.createElement("div", {
+            className: `lm-correction-preview ${testRenameResult.status || ""}`,
+            style: { marginTop: "14px" }
+          },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
+              React.createElement("strong", null,
+                testRenameResult.status === "ready" ? "✓ Ready to Rename" :
+                testRenameResult.status === "renamed" ? "✓ Renamed Successfully" :
+                testRenameResult.status === "unchanged" ? "✓ Current Filename Matches" :
+                `⚠ ${String(testRenameResult.status || "").replace(/_/g, " ").toUpperCase()}`
+              ),
+              React.createElement("button", {
+                type: "button",
+                className: "btn btn-sm btn-link text-muted p-0",
+                style: { textDecoration: "none", cursor: "pointer" },
+                onClick: () => setTestRenameResult(null)
+              }, "✕ Dismiss")
+            ),
+            testRenameResult.current_path && React.createElement("p", { className: "lm-modal-path", style: { margin: "4px 0" } },
+              React.createElement("b", null, "Current: "),
+              React.createElement("code", null, testRenameResult.current_path.split("/").pop())
+            ),
+            testRenameResult.proposed_path && React.createElement("p", { className: "lm-modal-path", style: { margin: "4px 0" } },
+              React.createElement("b", null, "Proposed: "),
+              React.createElement("code", { style: { color: "#58a6ff" } }, testRenameResult.proposed_path.split("/").pop())
+            ),
+            testRenameResult.reason && React.createElement("p", { style: { margin: "6px 0 0 0", color: "#8b949e", fontSize: "0.85rem" } },
+              testRenameResult.reason
+            ),
+            testRenameResult.associated_files && testRenameResult.associated_files.length > 0 && React.createElement("p", { style: { margin: "6px 0 0 0", color: "#8b949e", fontSize: "0.85rem" } },
+              React.createElement("b", null, "Companion files: "),
+              testRenameResult.associated_files.map(s => (s.source || s.target || "").split("/").pop()).join(", ")
+            )
+          ))),
       panel("Advanced Diagnostic Tools", "Under-the-hood diagnostic scanners for library reconciliation and metadata repair. All preview tools are strictly read-only.",
         React.createElement("div", { className: "lm-task-list" },
           [[readOnlyTasks.inventory, "Refresh the SQLite inventory."],
