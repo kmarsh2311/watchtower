@@ -279,7 +279,7 @@
 
     React.useEffect(() => { document.title = "Watchtower | Stash"; refresh(); }, [refresh]);
     React.useEffect(() => {
-      if (tab === "reports") loadReports().catch(error => setError(error.message));
+      if (tab === "advanced") loadReports().catch(error => setError(error.message));
     }, [tab, loadReports]);
     React.useEffect(() => {
       if (!["overview", "manage"].includes(tab)) return undefined;
@@ -317,7 +317,7 @@
         if (showResults === "reports") {
           await waitForJob(id);
           await loadReports();
-          setTab("reports");
+          setTab("advanced");
           setNotice("The diagnostic report is ready below. No files were changed.");
           return;
         }
@@ -1196,9 +1196,8 @@
               detail: "Audited in SQLite"
             })),
           React.createElement("div", { className: "lm-actions", style: { marginTop: "14px", display: "flex", gap: "10px" } },
-            React.createElement("button", {
-              type: "button",
-              className: "lm-btn lm-btn-primary",
+            React.createElement(Button, {
+              variant: "primary",
               disabled: !!busy,
               title: "Restart the background watcher daemon",
               onClick: async () => {
@@ -1216,7 +1215,7 @@
                   setBusy("");
                 }
               }
-            }, "⟳ RESTART WATCHER"),
+            }, "⟳ Restart Watcher"),
             React.createElement(TaskButton, { name: readOnlyTasks.events, label: "Reconcile Events (Read Only)", showResults: "reports" })))),
       panel("Watcher Settings & Automation", "Control continuous monitoring, external move reconciliation, and system startup.",
         React.createElement(React.Fragment, null,
