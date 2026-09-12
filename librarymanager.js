@@ -98,7 +98,15 @@
     }
     if (parsed?.error) throw new Error(parsed.error);
     // Raw Stash plugins may return either their payload directly or an {output: ...} envelope.
-    return parsed && Object.prototype.hasOwnProperty.call(parsed, "output") ? parsed.output : parsed;
+    let result = parsed && Object.prototype.hasOwnProperty.call(parsed, "output") ? parsed.output : parsed;
+    if (typeof result === "string") {
+      try {
+        result = JSON.parse(result);
+      } catch {
+        // keep as string
+      }
+    }
+    return result;
   }
 
   async function getConfig() {

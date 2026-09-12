@@ -832,16 +832,19 @@ def main():
                 f"Generated {generated_count} contact sheet(s) in {incoming_path.name}. "
                 f"{skipped_count} already had artwork.{err_str}"
             )
-    elif mode == "inventory":
+    elif mode in ("inventory", "build_inventory"):
         stash = StashInterface(plugin_input["server_connection"])
         scenes = fetch_scenes(stash)
         summary = inventory(database_path, scenes)
-        message = (
-            f"Read-only inventory complete: {summary['scenes']} scenes containing {summary['files']} files, "
-            f"{summary['present']} files present, "
-            f"{summary['missing']} missing, {summary['changed_paths']} Stash path changes, "
-            f"{summary['restored']} restored."
-        )
+        if mode == "build_inventory":
+            message = json.dumps(summary, ensure_ascii=False)
+        else:
+            message = (
+                f"Read-only inventory complete: {summary['scenes']} scenes containing {summary['files']} files, "
+                f"{summary['present']} files present, "
+                f"{summary['missing']} missing, {summary['changed_paths']} Stash path changes, "
+                f"{summary['restored']} restored."
+            )
     elif mode == "reconcile":
         summary, report = reconcile_missing_files(database_path)
         report_path = Path(__file__).with_name("reconciliation-report.json")
