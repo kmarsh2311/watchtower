@@ -438,9 +438,293 @@
     );
   }
 
+
+  function OnboardingBanner({ onStart, onDismiss }) {
+    return React.createElement("div", { className: "lm-onboarding-banner" },
+      React.createElement("div", { className: "lm-onboarding-banner-icon" }, "🚀"),
+      React.createElement("div", { className: "lm-onboarding-banner-text" },
+        React.createElement("strong", null, "Welcome to Watchtower! Let's get your library configured."),
+        React.createElement("p", null, "Complete the 4-step guided setup to verify your storage drives, index your scene database, and preflight renaming safety rules.")
+      ),
+      React.createElement("div", { className: "lm-onboarding-banner-actions" },
+        React.createElement("button", {
+          type: "button",
+          className: "btn btn-primary lm-onboarding-start-btn",
+          onClick: onStart
+        }, "🚀 Start Guided Setup (3 mins)"),
+        React.createElement("button", {
+          type: "button",
+          className: "btn btn-secondary lm-onboarding-dismiss-btn",
+          onClick: onDismiss
+        }, "Dismiss")
+      )
+    );
+  }
+
+  function OnboardingWizardModal({ show, onHide, data, config, updateSetting, updateSettings, operation, refresh, onNavigateTab }) {
+    const [step, setStep] = React.useState(1);
+    const [indexing, setIndexing] = React.useState(false);
+    const [indexResult, setIndexResult] = React.useState(null);
+    const [indexError, setIndexError] = React.useState("");
+    const [namingPreset, setNamingPreset] = React.useState("standard");
+
+    if (!show) return null;
+
+    const libraryRoots = data?.library_roots || [];
+    const inventory = data?.inventory || {};
+    const totalScenes = inventory?.total_scenes || 0;
+
+    const handleRunIndex = async () => {
+      setIndexing(true);
+      setIndexError("");
+      try {
+        const res = await operation("build_inventory");
+        setIndexResult(res);
+        await refresh();
+      } catch (err) {
+        setIndexError(err.message || "Failed to build inventory");
+      } finally {
+        setIndexing(false);
+      }
+    };
+
+    const handleApplyPreset = (presetKey) => {
+      setNamingPreset(presetKey);
+      if (presetKey === "standard") {
+        updateSettings({
+          filenameOrder: "studio,date,title,performers",
+          includeStudio: true,
+          includePerformers: true,
+          filenameSectionSeparator: "dash"
+        });
+      } else if (presetKey === "performer_first") {
+        updateSettings({
+          filenameOrder: "performers,date,title,studio",
+          includeStudio: true,
+          includePerformers: true,
+          filenameSectionSeparator: "dash"
+        });
+      } else if (presetKey === "clean_title") {
+        updateSettings({
+          filenameOrder: "title,studio",
+          includeStudio: true,
+          includePerformers: false,
+          filenameSectionSeparator: "space"
+        });
+      }
+    };
+
+    const handleFinish = async () => {
+      await updateSetting("onboardingCompleted", true);
+      onHide();
+    };
+
+    const stepsList = [
+      { num: 1, label: "Storage Roots" },
+      { num: 2, label: "Auto-Ingest" },
+      { num: 3, label: "Index Database" },
+      { num: 4, label: "Safety & Rules" },
+      { num: 5, label: "Complete" }
+    ];
+
+    return React.createElement("div", { className: "lm-wizard-backdrop" },
+      React.createElement("div", { className: "lm-wizard-dialog" },
+        React.createElement("header", { className: "lm-wizard-header" },
+          React.createElement("div", { className: "lm-wizard-title-wrap" },
+            React.createElement("span", { className: "lm-wizard-badge" }, "SETUP WIZARD"),
+            React.createElement("h2", null, "Watchtower Library Onboarding")
+          ),
+          React.createElement("button", {
+            type: "button",
+            className: "lm-wizard-close-btn",
+            onClick: onHide,
+            title: "Close Wizard"
+          }, "✕")
+        ),
+        React.createElement("div", { className: "lm-wizard-stepper" },
+          stepsList.map(s => {
+            const isDone = step > s.num;
+            const isCurrent = step === s.num;
+            return React.createElement("div", {
+              key: s.num,
+              className: `lm-wizard-step-item ${isCurrent ? "current" : ""} ${isDone ? "done" : ""}`
+            },
+              React.createElement("div", { className: "lm-wizard-step-circle" }, isDone ? "✓" : s.num),
+              React.createElement("span", { className: "lm-wizard-step-label" }, s.label)
+            );
+          })
+        ),
+        React.createElement("div", { className: "lm-wizard-body" },
+          step === 1 && React.createElement("div", { className: "lm-wizard-pane" },
+            React.createElement("h3", null, "1. Verify Stash Library Storage Roots"),
+            React.createElement("p", { className: "lm-wizard-desc" },
+              "Watchtower automatically connects to your Stash instance and monitors all active library roots for file creations, moves, and renames."),
+            React.createElement("div", { className: "lm-wizard-roots-list" },
+              libraryRoots.length > 0
+                ? libraryRoots.map((r, i) => React.createElement("div", { key: i, className: "lm-wizard-root-row" },
+                    React.createElement("span", { className: "lm-wizard-root-icon" }, "📁"),
+                    React.createElement("code", { className: "lm-wizard-root-path" }, r),
+                    React.createElement("span", { className: "lm-incoming-status-pill ok" }, "✓ Available")
+                  ))
+                : React.createElement("div", { className: "lm-wizard-empty-roots" },
+                    "⚠️ No library roots discovered in Stash. Make sure you have at least one folder configured in Stash Settings → Library.")
+            ),
+            React.createElement("div", { className: "lm-wizard-callout" },
+              React.createElement("strong", null, "💡 Pro Tip: "),
+              "Watchtower never deletes media files on disk. It maintains an event log to protect your metadata whenever files are moved externally.")
+          ),
+          step === 2 && React.createElement("div", { className: "lm-wizard-pane" },
+            React.createElement("h3", null, "2. Incoming Downloads & Auto-Ingest (Optional)"),
+            React.createElement("p", { className: "lm-wizard-desc" },
+              "If downloaders (e.g. Torrents, Usenet, JDownloader) save new files to staging folders, Watchtower can monitor them, wait for downloads to settle, and automatically import them into Stash."),
+            React.createElement("div", { className: "lm-wizard-option-card" },
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                React.createElement("div", null,
+                  React.createElement("strong", null, "Automatically Add Completed Videos"),
+                  React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
+                    "Leave existing files alone and auto-import new settled videos into Stash.")
+                ),
+                React.createElement("input", {
+                  type: "checkbox",
+                  style: { width: "1.2rem", height: "1.2rem", cursor: "pointer" },
+                  checked: config.automaticIncomingScan === true,
+                  onChange: e => updateSetting("automaticIncomingScan", e.target.checked)
+                })
+              )
+            ),
+            React.createElement("p", { style: { marginTop: "14px", fontSize: "0.85rem", color: "var(--text-muted, #aab3c5)" } },
+              "You can configure up to 5 specific incoming staging folders at any time under the ",
+              React.createElement("strong", { style: { color: "#fff" } }, "Incoming Downloads"), " tab.")
+          ),
+          step === 3 && React.createElement("div", { className: "lm-wizard-pane" },
+            React.createElement("h3", null, "3. Build Baseline SQLite Inventory Database"),
+            React.createElement("p", { className: "lm-wizard-desc" },
+              "Watchtower indexes all scenes, cryptographic hashes (oshash), and companion artwork/subtitles into its local SQLite database (watchtower.db) for instant collision protection and fast diagnostics."),
+            React.createElement("div", { className: "lm-wizard-index-box" },
+              totalScenes > 0
+                ? React.createElement("div", { className: "lm-wizard-index-status ready" },
+                    React.createElement("div", { style: { fontSize: "2rem" } }, "✓"),
+                    React.createElement("div", null,
+                      React.createElement("strong", null, `Database Indexed: ${totalScenes.toLocaleString()} Scenes Found`),
+                      React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
+                        `Total files mapped: ${inventory.total_files?.toLocaleString() || 0}. Last scanned: ${inventory.last_scanned_at || "recently"}.`)
+                    )
+                  )
+                : React.createElement("div", { className: "lm-wizard-index-status unindexed" },
+                    React.createElement("div", { style: { fontSize: "2rem" } }, "⚡"),
+                    React.createElement("div", null,
+                      React.createElement("strong", null, "Database Ready to Index"),
+                      React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
+                        "Click the button below to scan your collection and build your baseline index.")
+                    )
+                  ),
+              React.createElement("div", { style: { marginTop: "16px", display: "flex", gap: "10px", alignItems: "center" } },
+                React.createElement("button", {
+                  type: "button",
+                  className: "btn btn-primary",
+                  disabled: indexing,
+                  onClick: handleRunIndex
+                }, indexing ? "⚡ Indexing Collection…" : (totalScenes > 0 ? "🔄 Re-Index Database" : "⚡ Build Initial Inventory Now")),
+                indexing && React.createElement("span", { style: { color: "#39ff64", fontSize: "0.88rem" } }, "Scanning Stash scenes into SQLite…")
+              ),
+              indexResult && React.createElement("div", { className: "lm-wizard-index-result" },
+                React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ Indexing Complete: "),
+                `Inventoried ${indexResult.scenes || 0} scenes and ${indexResult.files || 0} files.`
+              ),
+              indexError && React.createElement("div", { className: "lm-message error", style: { marginTop: "10px" } }, indexError)
+            )
+          ),
+          step === 4 && React.createElement("div", { className: "lm-wizard-pane" },
+            React.createElement("h3", null, "4. Choose Naming Convention & Safety Rules"),
+            React.createElement("p", { className: "lm-wizard-desc" },
+              "Select your preferred naming style. Watchtower protects your collection with built-in collision detection to ensure files never overwrite each other."),
+            React.createElement("div", { className: "lm-wizard-presets-grid" },
+              [
+                { id: "standard", title: "Standard (Recommended)", example: "Helix Studios - 2024-05-12 - Sunset Bay (Alex Smith, Jamie Jones).mp4" },
+                { id: "performer_first", title: "Performer Focus", example: "Alex Smith, Jamie Jones - 2024-05-12 - Sunset Bay (Helix Studios).mp4" },
+                { id: "clean_title", title: "Clean Title Only", example: "Sunset Bay (Helix Studios).mp4" }
+              ].map(p => React.createElement("div", {
+                key: p.id,
+                className: `lm-wizard-preset-card ${namingPreset === p.id ? "active" : ""}`,
+                onClick: () => handleApplyPreset(p.id)
+              },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                  React.createElement("strong", null, p.title),
+                  namingPreset === p.id && React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ ACTIVE")
+                ),
+                React.createElement("code", { className: "lm-wizard-preset-example" }, p.example)
+              ))
+            ),
+            React.createElement("div", { className: "lm-wizard-safety-toggles", style: { marginTop: "16px" } },
+              React.createElement("div", { className: "lm-wizard-option-card" },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+                  React.createElement("div", null,
+                    React.createElement("strong", null, "Desktop Notifications for Warnings & Failures"),
+                    React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
+                      "Sends native OS notifications if an external move fails or a drive is offline.")
+                  ),
+                  React.createElement("input", {
+                    type: "checkbox",
+                    style: { width: "1.2rem", height: "1.2rem", cursor: "pointer" },
+                    checked: config.macNotifications !== false,
+                    onChange: e => updateSetting("macNotifications", e.target.checked)
+                  })
+                )
+              )
+            )
+          ),
+          step === 5 && React.createElement("div", { className: "lm-wizard-pane", style: { textAlign: "center", padding: "1.5rem 0" } },
+            React.createElement("div", { style: { fontSize: "3.5rem", marginBottom: "0.5rem" } }, "🎉"),
+            React.createElement("h3", { style: { fontSize: "1.5rem", color: "#39ff64" } }, "You're All Set!"),
+            React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "540px", margin: "0.5rem auto 1.5rem" } },
+              "Watchtower is configured, your baseline database is indexed, and collision safeguards are active."),
+            React.createElement("div", { className: "lm-wizard-quick-links" },
+              React.createElement("button", {
+                type: "button",
+                className: "btn btn-secondary",
+                onClick: () => { handleFinish(); onNavigateTab("terminal"); }
+              }, "💻 Open Live Terminal"),
+              React.createElement("button", {
+                type: "button",
+                className: "btn btn-secondary",
+                onClick: () => { handleFinish(); onNavigateTab("manage"); }
+              }, "🔍 Open Diagnostic Scanner"),
+              React.createElement("button", {
+                type: "button",
+                className: "btn btn-secondary",
+                onClick: () => { handleFinish(); onNavigateTab("guide"); }
+              }, "📖 Open User Guide")
+            )
+          )
+        ),
+        React.createElement("footer", { className: "lm-wizard-footer" },
+          step > 1 && step < 5 && React.createElement("button", {
+            type: "button",
+            className: "btn btn-secondary",
+            onClick: () => setStep(step - 1)
+          }, "⬅ Back"),
+          step < 5 && React.createElement("button", {
+            type: "button",
+            className: "btn btn-primary",
+            style: { marginLeft: "auto" },
+            onClick: () => setStep(step + 1)
+          }, step === 4 ? "Review & Complete ➔" : "Next ➔"),
+          step === 5 && React.createElement("button", {
+            type: "button",
+            className: "btn btn-primary",
+            style: { marginLeft: "auto" },
+            onClick: handleFinish
+          }, "🚀 Finish & Enter Watchtower")
+        )
+      )
+    );
+  }
+
   function Dashboard() {
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
+    const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(false);
+    const [onboardingBannerDismissed, setOnboardingBannerDismissed] = React.useState(false);
     const [config, setConfig] = React.useState({});
     const [busy, setBusy] = React.useState("");
     const [notice, setNotice] = React.useState("");
@@ -2067,6 +2351,21 @@
               React.createElement("span", { className: "lm-badge ok", style: { fontSize: "11px" } }, "Performer.Update.Post"),
               React.createElement("span", { className: "lm-badge ok", style: { fontSize: "11px" } }, "Studio.Update.Post"))),
           React.createElement("small", null, "Automatically synchronizes video filenames whenever scene, performer, or studio metadata is updated."))),
+      panel("Guided Setup & Onboarding", "Re-run the initial 4-step library configuration wizard.",
+        React.createElement("div", { className: "lm-field", style: { padding: "12px 14px", background: "rgba(33, 134, 87, 0.08)", borderRadius: "6px", border: "1px solid rgba(47, 166, 109, 0.3)" } },
+          React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" } },
+            React.createElement("div", null,
+              React.createElement("strong", { style: { color: "#39ff64" } }, "Onboarding Setup Wizard"),
+              React.createElement("p", { style: { margin: "2px 0 0 0", fontSize: "0.82rem", color: "#aab3c5" } }, "Step through library storage verification, incoming staging configuration, and baseline database indexing.")
+            ),
+            React.createElement(Button, {
+              variant: "primary",
+              style: { background: "#218657", borderColor: "#2da76f", color: "#ffffff", fontWeight: 600 },
+              onClick: () => setShowOnboardingWizard(true)
+            }, "🚀 Launch Setup Wizard")
+          )
+        )
+      ),
       panel("Factory Reset", "Reset all Watchtower configuration switches, naming rules, and diagnostic settings back to safe factory defaults.",
         React.createElement("div", { className: "lm-field", style: { padding: "12px 14px", background: "rgba(239, 68, 68, 0.04)", borderRadius: "6px", border: "1px solid rgba(239, 68, 68, 0.2)" } },
           React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" } },
@@ -2364,7 +2663,15 @@
 
       content = React.createElement("div", { className: "lm-help-container" },
         React.createElement("div", { className: "lm-help-header-bar" },
-          React.createElement("strong", null, "📖 Watchtower Complete Reference Manual"),
+          React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "10px" } },
+            React.createElement("strong", null, "📖 Watchtower Complete Reference Manual"),
+            React.createElement("button", {
+              type: "button",
+              className: "btn btn-sm btn-primary lm-wizard-launch-btn",
+              style: { fontSize: "0.78rem", padding: "0.25rem 0.65rem" },
+              onClick: () => setShowOnboardingWizard(true)
+            }, "🚀 Launch Setup Wizard")
+          ),
           React.createElement("input", {
             type: "search",
             className: "lm-help-search-input",
@@ -2414,6 +2721,21 @@
           })
         ))),
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
+      (!config.onboardingCompleted && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
+        onStart: () => setShowOnboardingWizard(true),
+        onDismiss: () => setOnboardingBannerDismissed(true)
+      }) : null,
+      React.createElement(OnboardingWizardModal, {
+        show: showOnboardingWizard,
+        onHide: () => setShowOnboardingWizard(false),
+        data,
+        config,
+        updateSetting,
+        updateSettings,
+        operation,
+        refresh,
+        onNavigateTab: (targetTab) => setTab(targetTab)
+      }),
       React.createElement("div", { className: "lm-layout" },
         React.createElement("nav", { className: "lm-tabs" },
           sections.map(([id, label]) => React.createElement("button", {
