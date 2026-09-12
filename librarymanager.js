@@ -1303,10 +1303,8 @@
               }
             }, "▶ Start Watcher"),
             React.createElement(TaskButton, { name: readOnlyTasks.events, label: "Reconcile Events (Read Only)", showResults: "reports" })))),
-      panel("Watcher Settings & Automation", "Control continuous monitoring, external move reconciliation, and system startup.",
+      panel("Watcher Automation & Behavior", "Configure external move reconciliation and system startup options.",
         React.createElement(React.Fragment, null,
-          React.createElement(Switch, { setting: "autoStartMonitor", label: "Enable Filesystem Monitoring",
-            help: "Continuously watch library folders for moved/renamed files in Finder and completed downloads in your incoming folder." }),
           React.createElement(Switch, { setting: "automaticMoveReconciliation", label: "Reconcile Verified External Moves",
             help: "When a file is moved in Finder and verified by size/hash, ask Stash to scan the new path and reconnect it." }),
           data?.startup?.supported && React.createElement(Switch, { setting: "startAtLogin", label: "Start Monitoring with macOS",
