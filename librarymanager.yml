@@ -77,12 +77,10 @@ settings:
     displayName: Desktop Notifications
     description: Show important Watchtower warnings and failures as native desktop notifications on Windows, macOS, or Linux. Enabled by default.
     type: BOOLEAN
-    default: true
   notifySuccessfulRenames:
     displayName: Notify Successful Renames
     description: Also show a desktop notification after a successful automatic rename. Requires Desktop Notifications. Enabled by default.
     type: BOOLEAN
-    default: true
   autoStartMonitor:
     displayName: Automatically Start Filesystem Monitor
     description: Ensure monitoring is running when the Stash web interface loads. Recommended.
