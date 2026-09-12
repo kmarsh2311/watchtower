@@ -438,6 +438,7 @@
 
     const inventory = data?.inventory;
     const monitor = data?.monitor || {};
+    const unavailableRoots = monitor.unavailable_roots || [];
     const filenamePreview = data?.filename_preview;
     const incoming = data?.incoming || {};
     const incomingFolder = data?.incoming_folder || {};
@@ -1235,7 +1236,7 @@
         React.createElement("div", { className: "lm-info-list" },
           (data?.library_roots || []).length ? (data.library_roots || []).map(root => {
             const rootPath = typeof root === "string" ? root : (root?.path || "");
-            const isUnavailable = (unavailableRoots || []).includes(rootPath);
+            const isUnavailable = (monitor.unavailable_roots || []).includes(rootPath);
             return React.createElement("div", {
               key: rootPath,
               style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px", borderBottom: "1px solid rgba(255,255,255,0.06)" }
