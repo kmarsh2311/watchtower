@@ -663,7 +663,7 @@
         React.createElement("header", { className: "lm-wizard-header" },
           React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "10px" } },
             React.createElement("img", {
-              src: "/plugin/librarymanager/assets/watchtower-icon.png",
+              src: "/plugin/librarymanager/assets/watchtower-icon.gif",
               alt: "",
               style: { width: "32px", height: "32px", borderRadius: "6px" }
             }),
@@ -698,7 +698,7 @@
         React.createElement("div", { className: "lm-wizard-body" },
           step === 0 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}`, style: { textAlign: "center", padding: "1rem 0.5rem" } },
             React.createElement("img", {
-              src: "/plugin/librarymanager/assets/watchtower-icon.png",
+              src: "/plugin/librarymanager/assets/watchtower-icon.gif",
               alt: "Watchtower",
               style: { width: "72px", height: "72px", borderRadius: "14px", marginBottom: "1rem", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }
             }),
