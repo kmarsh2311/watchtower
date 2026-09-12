@@ -1283,13 +1283,13 @@ a.lm-activity-scene-pill:hover {
   position: absolute;
   left: 14.8%;
   top: 18.5%;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   transform: translate(-50%, -50%);
   border-radius: 50%;
-  background: radial-gradient(circle, #ffffff 0%, #39ff64 45%, rgba(32, 230, 74, 0.6) 75%, transparent 100%);
-  box-shadow: 0 0 10px #39ff64, 0 0 22px rgba(57, 255, 100, 0.85);
-  animation: lighthouseFlashSingle 7.5s ease-in-out infinite;
+  background: radial-gradient(circle, #ffffff 0%, #a8ffb8 35%, #39ff64 65%, transparent 100%);
+  box-shadow: 0 0 12px #39ff64, 0 0 24px rgba(57, 255, 100, 0.85);
+  animation: lighthouseFlashSingle 6s ease-in-out infinite;
 }
 
 /* Anamorphic Lens Flare Horizontal Spike */
@@ -1297,47 +1297,47 @@ a.lm-activity-scene-pill:hover {
   position: absolute;
   left: 14.8%;
   top: 18.5%;
-  width: 140px;
-  height: 3px;
+  width: 240px;
+  height: 6px;
   transform: translate(-50%, -50%);
-  background: linear-gradient(90deg, transparent 0%, rgba(57, 255, 100, 0.75) 42%, #ffffff 50%, rgba(57, 255, 100, 0.75) 58%, transparent 100%);
-  filter: blur(0.5px);
-  animation: lighthouseStreakSingle 7.5s ease-in-out infinite;
+  background: linear-gradient(90deg, transparent 0%, rgba(57, 255, 100, 0.2) 20%, rgba(57, 255, 100, 0.85) 44%, #ffffff 50%, rgba(57, 255, 100, 0.85) 56%, rgba(57, 255, 100, 0.2) 80%, transparent 100%);
+  filter: blur(0.8px);
+  animation: lighthouseStreakSingle 6s ease-in-out infinite;
 }
 
-/* Single Beam - Left Arc (Active only when beam sweeps through left hemisphere) */
+/* Single Beam - Left Arc (Active when beam sweeps through left hemisphere) */
 .lm-lighthouse-beam-left {
   position: absolute;
   right: calc(100% - 14.8%);
   top: 18.5%;
-  width: 280px;
-  height: 60px;
-  margin-top: -30px;
+  width: 320px;
+  height: 70px;
+  margin-top: -35px;
   transform-origin: 100% 50%;
-  clip-path: polygon(0% 0%, 100% 46%, 100% 54%, 0% 100%);
-  background: linear-gradient(270deg, rgba(255, 255, 255, 0.95) 0%, rgba(57, 255, 100, 0.65) 14%, rgba(32, 230, 74, 0.3) 48%, rgba(17, 214, 58, 0.06) 82%, transparent 100%);
+  clip-path: polygon(0% 0%, 100% 45%, 100% 55%, 0% 100%);
+  background: linear-gradient(270deg, rgba(255, 255, 255, 0.95) 0%, rgba(57, 255, 100, 0.75) 12%, rgba(32, 230, 74, 0.35) 45%, rgba(17, 214, 58, 0.08) 80%, transparent 100%);
   filter: blur(2px);
   opacity: 0;
-  animation: lighthouseSweepSingleLeft 7.5s ease-in-out infinite;
+  animation: lighthouseSweepSingleLeft 6s ease-in-out infinite;
 }
 
-/* Single Beam - Right Arc (Active only when beam sweeps through right hemisphere) */
+/* Single Beam - Right Arc (Active when beam sweeps through right hemisphere) */
 .lm-lighthouse-beam-right {
   position: absolute;
   left: 14.8%;
   top: 18.5%;
-  width: 620px;
-  height: 80px;
-  margin-top: -40px;
+  width: 650px;
+  height: 90px;
+  margin-top: -45px;
   transform-origin: 0% 50%;
-  clip-path: polygon(0% 46%, 100% 0%, 100% 100%, 0% 54%);
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.95) 0%, rgba(57, 255, 100, 0.65) 12%, rgba(32, 230, 74, 0.3) 45%, rgba(17, 214, 58, 0.06) 80%, transparent 100%);
+  clip-path: polygon(0% 45%, 100% 0%, 100% 100%, 0% 55%);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.95) 0%, rgba(57, 255, 100, 0.75) 10%, rgba(32, 230, 74, 0.35) 45%, rgba(17, 214, 58, 0.08) 80%, transparent 100%);
   filter: blur(2px);
   opacity: 0;
-  animation: lighthouseSweepSingleRight 7.5s ease-in-out infinite;
+  animation: lighthouseSweepSingleRight 6s ease-in-out infinite;
 }
 
-/* Right Arc Keyframes: Emerges from behind tower -> Right profile -> Sweeps forward -> Passes centerline */
+/* Right Arc Keyframes: Sweeps from right profile -> Rotates forward facing camera -> Fades smoothly into center */
 @keyframes lighthouseSweepSingleRight {
   0% {
     transform: rotate(0deg) scaleX(1) scaleY(1);
@@ -1345,20 +1345,24 @@ a.lm-activity-scene-pill:hover {
     filter: blur(1.5px) brightness(1.1);
   }
   15% {
-    transform: rotate(3.5deg) scaleX(0.85) scaleY(1.35);
+    transform: rotate(3deg) scaleX(0.88) scaleY(1.4);
     opacity: 0.95;
     filter: blur(1.5px) brightness(1.35);
   }
-  25% {
-    transform: rotate(2deg) scaleX(0.65) scaleY(1.55);
+  24% {
+    transform: rotate(1.5deg) scaleX(0.7) scaleY(1.8);
     opacity: 1;
-    filter: blur(2px) brightness(1.5);
+    filter: blur(2px) brightness(1.6);
   }
-  27% {
-    transform: rotate(1deg) scaleX(0.4) scaleY(1.4);
+  28% {
+    transform: rotate(0.5deg) scaleX(0.5) scaleY(1.5);
+    opacity: 0.7;
+  }
+  32% {
+    transform: rotate(0deg) scaleX(0.3) scaleY(1.0);
     opacity: 0;
   }
-  28%, 78% {
+  33%, 78% {
     transform: rotate(0deg) scaleX(0.3) scaleY(0.7);
     opacity: 0;
   }
@@ -1379,21 +1383,26 @@ a.lm-activity-scene-pill:hover {
   }
 }
 
-/* Left Arc Keyframes: Receives beam from front flash -> Sweeps to left profile -> Heads behind tower */
+/* Left Arc Keyframes: Picks up seamlessly from forward facing flash -> Sweeps to left profile -> Heads behind tower */
 @keyframes lighthouseSweepSingleLeft {
-  0%, 26% {
-    transform: rotate(0deg) scaleX(0.4) scaleY(1.4);
+  0%, 20% {
+    transform: rotate(0deg) scaleX(0.3) scaleY(1.0);
     opacity: 0;
   }
-  27% {
-    transform: rotate(-2deg) scaleX(0.65) scaleY(1.55);
+  24% {
+    transform: rotate(-0.5deg) scaleX(0.5) scaleY(1.5);
+    opacity: 0.7;
+    filter: blur(2px) brightness(1.6);
+  }
+  28% {
+    transform: rotate(-1.5deg) scaleX(0.7) scaleY(1.8);
     opacity: 1;
-    filter: blur(2px) brightness(1.5);
+    filter: blur(2px) brightness(1.6);
   }
   36% {
-    transform: rotate(-3.5deg) scaleX(0.85) scaleY(1.3);
+    transform: rotate(-3deg) scaleX(0.88) scaleY(1.35);
     opacity: 0.95;
-    filter: blur(1.5px) brightness(1.3);
+    filter: blur(1.5px) brightness(1.35);
   }
   46% {
     transform: rotate(0deg) scaleX(1) scaleY(1);
@@ -1405,54 +1414,74 @@ a.lm-activity-scene-pill:hover {
     opacity: 0.3;
     filter: blur(2px) brightness(0.85);
   }
-  62%, 100% {
+  64%, 100% {
     transform: rotate(0deg) scaleX(0.4) scaleY(0.7);
     opacity: 0;
   }
 }
 
-/* Single Flash: Only fires once per revolution (at 25%) when the single rotating beam points directly at viewer */
+/* Single Flash: Powerful forward bloom when pointing directly at the camera at 26% */
 @keyframes lighthouseFlashSingle {
-  0%, 18% {
+  0%, 16% {
     transform: translate(-50%, -50%) scale(0.85);
     opacity: 0.45;
-    box-shadow: 0 0 6px #39ff64, 0 0 12px rgba(57, 255, 100, 0.35);
+    box-shadow: 0 0 8px #39ff64, 0 0 16px rgba(57, 255, 100, 0.4);
   }
-  25% {
-    transform: translate(-50%, -50%) scale(1.8);
+  22% {
+    transform: translate(-50%, -50%) scale(1.3);
+    opacity: 0.85;
+    box-shadow: 0 0 20px #ffffff, 0 0 35px #39ff64, 0 0 60px rgba(57, 255, 100, 0.85);
+  }
+  26% {
+    transform: translate(-50%, -50%) scale(2.2);
     opacity: 1;
-    box-shadow: 0 0 25px #ffffff, 0 0 45px #39ff64, 0 0 75px rgba(57, 255, 100, 0.95);
+    box-shadow: 0 0 30px #ffffff, 0 0 60px #39ff64, 0 0 100px rgba(57, 255, 100, 1), 0 0 140px rgba(57, 255, 100, 0.6);
   }
-  32% {
+  30% {
+    transform: translate(-50%, -50%) scale(1.4);
+    opacity: 0.85;
+    box-shadow: 0 0 20px #ffffff, 0 0 35px #39ff64, 0 0 60px rgba(57, 255, 100, 0.85);
+  }
+  36% {
     transform: translate(-50%, -50%) scale(0.9);
     opacity: 0.5;
-    box-shadow: 0 0 8px #39ff64, 0 0 14px rgba(57, 255, 100, 0.4);
+    box-shadow: 0 0 8px #39ff64, 0 0 16px rgba(57, 255, 100, 0.4);
   }
-  52%, 80% {
+  54%, 80% {
     transform: translate(-50%, -50%) scale(0.75);
     opacity: 0.28;
     box-shadow: 0 0 4px #39ff64;
   }
-  86%, 100% {
+  88%, 100% {
     transform: translate(-50%, -50%) scale(0.85);
     opacity: 0.45;
-    box-shadow: 0 0 6px #39ff64, 0 0 12px rgba(57, 255, 100, 0.35);
+    box-shadow: 0 0 8px #39ff64, 0 0 16px rgba(57, 255, 100, 0.4);
   }
 }
 
-/* Lens Flare Streak: Spikes horizontally only during the forward flash */
+/* Lens Flare Streak: Brilliant horizontal anamorphic burst when looking at the camera */
 @keyframes lighthouseStreakSingle {
-  0%, 20% {
-    transform: translate(-50%, -50%) scaleX(0.2);
+  0%, 18% {
+    transform: translate(-50%, -50%) scaleX(0.1);
     opacity: 0;
   }
-  25% {
-    transform: translate(-50%, -50%) scaleX(1.5);
-    opacity: 1;
-    filter: blur(0.3px) brightness(1.7);
+  22% {
+    transform: translate(-50%, -50%) scaleX(0.8);
+    opacity: 0.7;
+    filter: blur(0.5px) brightness(1.5);
   }
-  30%, 100% {
-    transform: translate(-50%, -50%) scaleX(0.2);
+  26% {
+    transform: translate(-50%, -50%) scaleX(2.0);
+    opacity: 1;
+    filter: blur(0.3px) brightness(2.2);
+  }
+  30% {
+    transform: translate(-50%, -50%) scaleX(0.9);
+    opacity: 0.7;
+    filter: blur(0.5px) brightness(1.5);
+  }
+  35%, 100% {
+    transform: translate(-50%, -50%) scaleX(0.1);
     opacity: 0;
   }
 }
