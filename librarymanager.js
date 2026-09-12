@@ -427,7 +427,7 @@
           "incomingFolder", "incomingSettleMinutes", "generateContactSheets", "contactSheetGrid",
           "contactSheetBanner", "contactSheetAdjustVertical", "contactSheetScript"].some(key => key in changes);
         if (changes.autoStartMonitor === false || ((restart || stopWhenDisabled) && data?.monitor?.state === "running")) {
-          await operation("stop_monitor");
+          await operation("stop_monitor", { silent: true });
         }
         if (next.autoStartMonitor === true && (restart || changes.autoStartMonitor === true)) {
           await operation("ensure_monitor");

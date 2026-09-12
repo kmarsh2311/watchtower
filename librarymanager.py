@@ -644,9 +644,11 @@ def main():
         result = start_filesystem_monitor(stash, database_path, plugin_input["server_connection"])
         message = result["message"]
     elif mode == "stop_monitor":
+        silent = (plugin_input.get("args") or {}).get("silent") is True
         result = stop_filesystem_monitor(database_path)
         message = result["message"]
-        audit(database_path, "monitor", "stop", result.get("state", "stopped"), detail=message)
+        if not silent:
+            audit(database_path, "monitor", "stop", result.get("state", "stopped"), detail=message)
     elif mode == "monitor_status":
         result = filesystem_monitor_summary(database_path)
         message = (f"Filesystem monitor: {result['state']}; PID {result.get('pid')}; "
