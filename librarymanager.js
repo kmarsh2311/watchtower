@@ -1811,10 +1811,12 @@
 
       const handleSaveFolders = (nextFolders) => {
         const cleaned = nextFolders.map(f => (f || "").trim()).filter(Boolean);
-        const finalList = cleaned.length > 0 ? cleaned.slice(0, 5) : [""];
-        setConfig({ ...config, incomingFolders: finalList, incomingFolder: finalList[0] || "" });
-        updateSetting("incomingFolders", finalList);
-        updateSetting("incomingFolder", finalList[0] || "");
+        const finalList = cleaned.length > 0 ? cleaned.slice(0, 5) : [];
+        setConfig({ ...config, incomingFolders: nextFolders, incomingFolder: nextFolders[0] || "" });
+        updateSettings({
+          incomingFolders: finalList,
+          incomingFolder: finalList[0] || ""
+        });
       };
 
       const handleAddFolder = () => {
@@ -1824,9 +1826,19 @@
       };
 
       const handleRemoveFolder = (index) => {
-        const next = incomingFoldersList.filter((_, idx) => idx !== index);
-        const finalList = next.length > 0 ? next : [""];
-        handleSaveFolders(finalList);
+        if (incomingFoldersList.length <= 1) {
+          const next = [""];
+          setConfig({ ...config, incomingFolders: next, incomingFolder: "" });
+          updateSettings({ incomingFolders: [], incomingFolder: "" });
+        } else {
+          const next = incomingFoldersList.filter((_, idx) => idx !== index);
+          const cleaned = next.map(f => (f || "").trim()).filter(Boolean);
+          setConfig({ ...config, incomingFolders: next, incomingFolder: next[0] || "" });
+          updateSettings({
+            incomingFolders: cleaned,
+            incomingFolder: cleaned[0] || ""
+          });
+        }
       };
 
       content = React.createElement(React.Fragment, null,
@@ -1858,27 +1870,30 @@
               incomingFoldersList.map((folderPath, idx) => {
                 const folderStatus = statusFolders[idx] || {};
                 const isConfigured = Boolean((folderPath || "").trim());
-                const isValid = folderStatus.valid;
+                const isValid = Boolean(folderStatus.valid);
                 return React.createElement("div", { key: idx, className: "lm-incoming-row" },
                   React.createElement("span", { className: "lm-incoming-row-num" }, `#${idx + 1}`),
-                  React.createElement("div", { className: "lm-incoming-row-input-wrap" },
-                    React.createElement("input", {
-                      value: folderPath || "",
-                      className: "form-control",
-                      onChange: event => handleUpdateFolder(idx, event.target.value),
-                      onBlur: () => handleSaveFolders(incomingFoldersList),
-                      placeholder: `/Volumes/Library/Incoming${idx > 0 ? `_${idx + 1}` : ""}`
-                    }),
-                    isConfigured ? React.createElement("span", {
-                      className: `lm-incoming-folder-badge ${isValid ? "ready" : "warning"}`
-                    }, isValid ? "✓ Inside Library" : (folderStatus.reason || "Outside Library")) : null
-                  ),
-                  incomingFoldersList.length > 1 ? React.createElement("button", {
+                  React.createElement("input", {
+                    value: folderPath || "",
+                    className: "form-control lm-incoming-row-input",
+                    onChange: event => handleUpdateFolder(idx, event.target.value),
+                    onBlur: event => {
+                      const next = [...incomingFoldersList];
+                      next[idx] = event.target.value;
+                      handleSaveFolders(next);
+                    },
+                    placeholder: `/Volumes/Library/Incoming${idx > 0 ? `_${idx + 1}` : ""}`
+                  }),
+                  isConfigured ? React.createElement("span", {
+                    className: `lm-incoming-folder-badge ${isValid ? "ready" : "warning"}`
+                  }, isValid ? "✓ Inside Library" : (folderStatus.reason || "Outside Library")) : null,
+                  React.createElement("button", {
                     type: "button",
                     className: "btn btn-danger btn-sm lm-incoming-row-remove",
-                    title: "Remove this incoming folder",
+                    title: incomingFoldersList.length > 1 ? "Remove this incoming folder" : "Clear folder path",
+                    onMouseDown: event => event.preventDefault(),
                     onClick: () => handleRemoveFolder(idx)
-                  }, "✕") : null
+                  }, "✕")
                 );
               })
             ),
