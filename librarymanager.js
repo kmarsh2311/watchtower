@@ -839,10 +839,25 @@
                 ? ` (${Math.round(job.progress * 100)}%)`
                 : "";
               const statusDetail = job.status === "QUEUED" ? "QUEUED IN STASH" : `RUNNING IN STASH${pct}`;
-              return React.createElement("div", { className: "lm-terminal-line running_job", key: `job-${job.id}` },
+              return React.createElement("div", { className: "lm-terminal-line running_job", key: `job-${job.id}`, style: { display: "flex", alignItems: "center", gap: "8px" } },
                 React.createElement("span", null, badgeText),
                 React.createElement("strong", null, job.description),
-                React.createElement("em", null, statusDetail)
+                React.createElement("em", null, statusDetail),
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-btn lm-btn-sm lm-btn-danger",
+                  style: { marginLeft: "auto", padding: "1px 6px", fontSize: "10px", height: "auto", border: "1px solid rgba(255, 68, 68, 0.4)", borderRadius: "3px", background: "rgba(255, 68, 68, 0.15)", color: "#ff6b6b", cursor: "pointer" },
+                  title: "Stop this running task in Stash",
+                  onClick: async (e) => {
+                    e.stopPropagation();
+                    try {
+                      await gql(`mutation StopJob($id: ID!) { stopJob(job_id: $id) }`, { id: String(job.id) });
+                      await refresh();
+                    } catch (err) {
+                      console.error("Failed to stop job:", err);
+                    }
+                  }
+                }, "✕ STOP")
               );
             }),
             waitingAndScanning.map(item => {
