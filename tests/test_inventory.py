@@ -284,6 +284,31 @@ class InventoryTests(unittest.TestCase):
             'Performer A at Beach - Studio Name - Performer A'
         )
 
+    def test_preview_safe_filenames_master_title_source(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            video = root / 'Original_Camera_Take.mp4'
+            video.write_bytes(b'x' * 1000)
+            database = root / 'inventory.sqlite3'
+            
+            # Scene has Stash title 'Scraped Title', Studio 'My Studio', and Performer 'Jane Doe'
+            scene = {
+                'id': '10',
+                'title': 'Scraped Title',
+                'studio': {'name': 'My Studio'},
+                'performers': [{'name': 'Jane Doe'}],
+                'files': [{'id': '20', 'path': str(video), 'size': 1000, 'fingerprints': []}]
+            }
+            inventory(database, [scene])
+
+            # 1. Default (stash_title): uses 'Scraped Title'
+            _, report_default = preview_safe_filenames(database, {'masterTitleSource': 'stash_title'})
+            self.assertTrue(report_default[0]['proposed_path'].endswith('Scraped Title - My Studio - Jane Doe.mp4'))
+
+            # 2. filename: uses 'Original_Camera_Take'
+            _, report_filename = preview_safe_filenames(database, {'masterTitleSource': 'filename'})
+            self.assertTrue(report_filename[0]['proposed_path'].endswith('Original_Camera_Take - My Studio - Jane Doe.mp4'))
+
     def test_expected_plugin_move_is_consumed_once(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"

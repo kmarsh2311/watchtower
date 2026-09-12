@@ -57,6 +57,10 @@ settings:
     displayName: Rename & Contact Sheet Settle Delay
     description: Seconds to wait after a metadata edit before renaming the video and refreshing its contact sheet.
     type: NUMBER
+  masterTitleSource:
+    displayName: Master Title & Base Source
+    description: Choose whether the scene title in filenames is driven by Stash's scraped metadata or the original physical filename on disk.
+    type: STRING
   filenameOrder:
     displayName: Filename Information Order
     description: Choose whether the title, studio or performers appear first. This affects future renames only.

@@ -174,6 +174,13 @@
     [4, "First 4 performers only"],
     [5, "First 5 performers only"]
   ];
+  const filenameSectionCharacters = { dash: " - ", comma: ", ", space: " ", underscore: "_" };
+  const filenamePerformerCharacters = { comma: ", ", space: " ", dash: " - ", ampersand: " & " };
+  const masterTitleSources = [
+    ["stash_title", "Stash Title (Fallback to Filename)"],
+    ["filename", "Original Filename Stem on Disk"],
+    ["strict_title", "Stash Title Only (Skip Blank Titles)"]
+  ];
 
   function ChoiceField({ label, help, value, choices, disabled, onChange }) {
     const [open, setOpen] = React.useState(false);
@@ -227,10 +234,25 @@
         const currentBasename = scene.files?.[0]?.basename || scene.files?.[0]?.path?.split(/[\\/]/).pop() || "unknown.mp4";
         const ext = currentBasename.includes(".") ? "." + currentBasename.split(".").pop() : ".mp4";
 
+        const diskStem = currentBasename.includes(".") ? currentBasename.substring(0, currentBasename.lastIndexOf(".")) : currentBasename;
+        const sourceMode = config.masterTitleSource || "stash_title";
+        let rawTitle = "";
+        if (sourceMode === "filename") {
+          rawTitle = diskStem;
+        } else if (sourceMode === "strict_title") {
+          rawTitle = scene.title || "";
+        } else {
+          rawTitle = scene.title || diskStem;
+        }
+
+        const performerLimit = Number(config.maxPerformersInFilename || 0);
+        let scenePerfs = (scene.performers || []).map(p => p.name);
+        if (performerLimit > 0) scenePerfs = scenePerfs.slice(0, performerLimit);
+
         const parts = {
-          title: scene.title || "Untitled",
-          studio: scene.studio?.name || "",
-          performers: (scene.performers || []).map(p => p.name).join(filenamePerformerCharacters[config.filenamePerformerSeparator] || ", ")
+          title: rawTitle,
+          studio: config.includeStudio !== false ? (scene.studio?.name || "") : "",
+          performers: config.includePerformers !== false ? scenePerfs.join(filenamePerformerCharacters[config.filenamePerformerSeparator] || ", ") : ""
         };
         const order = (config.filenameOrder || "title,studio,performers").split(",");
         const proposedStem = order.map(p => parts[p]).filter(Boolean)
@@ -1347,7 +1369,8 @@
             React.createElement(ChoiceField, { label: "Information Order", help: "Choose what appears first, second and third.", value: config.filenameOrder || "title,studio,performers", choices: filenameOrders, onChange: value => updateSetting("filenameOrder", value) }),
             React.createElement(ChoiceField, { label: "Between the Main Parts", help: "Choose what appears between the title, studio and performer list.", value: config.filenameSectionSeparator || "dash", choices: sectionSeparators, onChange: value => updateSetting("filenameSectionSeparator", value) }),
             React.createElement(ChoiceField, { label: "Between Performer Names", help: "Choose what appears between two or more performer names.", value: config.filenamePerformerSeparator || "comma", choices: performerSeparators, onChange: value => updateSetting("filenamePerformerSeparator", value) }),
-            React.createElement(ChoiceField, { label: "Maximum Performers", help: "Limit how many performers are included in filenames.", value: Number(config.maxPerformersInFilename || 0), choices: performerCountLimits, onChange: value => updateSetting("maxPerformersInFilename", Number(value)) })),
+            React.createElement(ChoiceField, { label: "Maximum Performers", help: "Limit how many performers are included in filenames.", value: Number(config.maxPerformersInFilename || 0), choices: performerCountLimits, onChange: value => updateSetting("maxPerformersInFilename", Number(value)) }),
+            React.createElement(ChoiceField, { label: "Master Title Source", help: "Choose if scene title comes from Stash metadata or original disk filename.", value: config.masterTitleSource || "stash_title", choices: masterTitleSources, onChange: value => updateSetting("masterTitleSource", value) })),
           React.createElement("div", { className: "lm-subpanel", style: { marginTop: "14px", padding: "12px 14px", border: "1px solid rgba(140, 155, 185, 0.2)", borderRadius: "6px", background: "rgba(10, 20, 34, 0.25)" } },
             React.createElement("strong", { style: { display: "block", marginBottom: "8px", fontSize: "0.95rem", color: "var(--lm-accent-green, #39ff64)" } }, "Filename Inclusion & Title Cleaning Rules"),
             React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "10px 18px" } },

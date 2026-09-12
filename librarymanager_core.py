@@ -1523,14 +1523,11 @@ def _should_strip_metadata_from_title(filename_options: dict | None, row=None, t
 
 
 def _sync_filename_state(connection, state, row, current: Path, performers: list[str], filename_options: dict | None = None):
-    """Synchronize the stable base with current Stash metadata and the physical filename.
-
-    When stripMetadataFromTitle is enabled, embedded performers and studio are safely
-    extracted from the Stash title so names are not duplicated in the generated filename.
-    If stripping would leave the title empty, the original title is preserved verbatim.
-    """
+    """Synchronize the stable base with current Stash metadata and the physical filename."""
+    opts = filename_options or {}
+    master_source = str(opts.get("masterTitleSource") or "stash_title").lower()
     now = utc_now()
-    title = str(row["title"] or "").strip()
+    raw_stash_title = str(row["title"] or "").strip()
     current_studio = str(row["studio"] or "").strip() or None
 
     try:
@@ -1552,29 +1549,42 @@ def _sync_filename_state(connection, state, row, current: Path, performers: list
     last_generated = str(state["last_generated_stem"] or "").strip()
     externally_changed = bool(last_generated and current.stem != last_generated)
 
-    strip_title = _should_strip_metadata_from_title(filename_options, row, title)
+    strip_title = _should_strip_metadata_from_title(opts, row, raw_stash_title)
     studios_to_strip = [value for value in (previous_studio, current_studio) if value]
     performers_to_strip = list(previous_performers) + list(performers)
 
-    if title:
-        source = "title"
-        source_title = title
-        if strip_title:
-            cleaned = _strip_managed_metadata(title, studios_to_strip, performers_to_strip)
-            # Guardrail: never empty the title base
-            base = cleaned if len(cleaned) >= 2 else title
-        else:
-            base = title
-    else:
-        # With no Stash title, the filename carries the useful scene-name text. Whenever
-        # metadata changes, rescan the *current* filename in the same pass so newly added
-        # metadata already baked into that name is extracted/repositioned immediately.
-        if metadata_changed or externally_changed:
+    if master_source == "filename":
+        if metadata_changed or externally_changed or source != "filename":
             base = current.stem
             source = "filename"
             source_title = None
-
-        base = _strip_managed_metadata(base, studios_to_strip, performers_to_strip)
+        base = _strip_managed_metadata(base, studios_to_strip, performers_to_strip, opts)
+    elif master_source == "strict_title":
+        source = "title"
+        source_title = raw_stash_title
+        if raw_stash_title:
+            if strip_title:
+                cleaned = _strip_managed_metadata(raw_stash_title, studios_to_strip, performers_to_strip, opts)
+                base = cleaned if len(cleaned) >= 2 else raw_stash_title
+            else:
+                base = raw_stash_title
+        else:
+            base = ""
+    else:  # "stash_title" (default)
+        if raw_stash_title:
+            source = "title"
+            source_title = raw_stash_title
+            if strip_title:
+                cleaned = _strip_managed_metadata(raw_stash_title, studios_to_strip, performers_to_strip, opts)
+                base = cleaned if len(cleaned) >= 2 else raw_stash_title
+            else:
+                base = raw_stash_title
+        else:
+            if metadata_changed or externally_changed or source == "title":
+                base = current.stem
+                source = "filename"
+                source_title = None
+            base = _strip_managed_metadata(base, studios_to_strip, performers_to_strip, opts)
 
     connection.execute(
         """UPDATE filename_state SET base_stem=?,base_source=?,source_title=?,manual_studio=?,
@@ -1587,21 +1597,37 @@ def _sync_filename_state(connection, state, row, current: Path, performers: list
 
 def _create_filename_state(connection, row, current: Path, performers: list[str], filename_options: dict | None = None):
     """Create filename state from Stash title when known, otherwise the existing physical stem."""
+    opts = filename_options or {}
+    master_source = str(opts.get("masterTitleSource") or "stash_title").lower()
     now = utc_now()
-    title = str(row["title"] or "").strip()
+    raw_stash_title = str(row["title"] or "").strip()
     studio = str(row["studio"] or "").strip() or None
-    raw_base = title or current.stem
-    strip_title = _should_strip_metadata_from_title(filename_options, row, title)
-    if title:
+
+    if master_source == "filename":
+        title = ""
+        source = "filename"
+        raw_base = current.stem
+    elif master_source == "strict_title":
+        title = raw_stash_title
+        source = "title"
+        raw_base = raw_stash_title
+    else:  # "stash_title" (default)
+        title = raw_stash_title
+        source = "title" if title else "filename"
+        raw_base = title or current.stem
+
+    strip_title = _should_strip_metadata_from_title(opts, row, raw_base)
+    if source == "title" and title:
         if strip_title:
-            cleaned = _strip_managed_metadata(title, [studio] if studio else [], performers)
+            cleaned = _strip_managed_metadata(title, [studio] if studio else [], performers, opts)
             clean_base = cleaned if len(cleaned) >= 2 else title
         else:
             clean_base = title
+    elif raw_base:
+        clean_base = _strip_managed_metadata(raw_base, [studio] if studio else [], performers, opts)
     else:
-        clean_base = _strip_managed_metadata(raw_base, [studio] if studio else [], performers)
+        clean_base = ""
 
-    source = "title" if title else "filename"
     connection.execute(
         """INSERT INTO filename_state(file_id,base_stem,base_source,source_title,last_generated_stem,
            manual_studio,manual_performers_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
