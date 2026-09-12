@@ -1429,10 +1429,10 @@
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "generateContactSheets", defaultValue: false,
             label: "Generate Visual Contact Sheets (CSM)",
-            help: "Automatically generate a visual contact sheet (.mp4.jpg) when new videos finish downloading." }),
+            help: "Automatically generate a visual contact sheet companion image (.mp4.jpg) for new videos within your configured location scope." }),
           React.createElement(Switch, { setting: "refreshContactSheetsOnRename", defaultValue: true,
             label: "Refresh Contact Sheets on Metadata Edits",
-            help: "Re-render contact sheets with updated title/performer banners when scene metadata is edited in Stash. If turned off, existing contact sheets are kept and safely renamed alongside the video." }),
+            help: "Re-render contact sheets with updated title and performer banners when scene metadata is edited in Stash. If turned off, existing contact sheets are kept and safely renamed alongside the video." }),
           React.createElement("div", { className: "lm-filename-style-grid", style: { marginTop: "12px" } },
             React.createElement(ChoiceField, {
               label: "Contact Sheet Location Scope",
