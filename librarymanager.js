@@ -947,32 +947,6 @@
     }
 
 
-    function SummaryBanner() {
-      const s = data?.activity_summary || {};
-      if (!data) return null;
-      const since = s.since
-        ? `Since last full inventory (${new Date(s.since).toLocaleDateString()})`
-        : "In the last 7 days";
-      const stats = [
-        { label: "Renames", value: s.renames ?? 0, icon: "✏️", warn: false },
-        { label: "Imports added", value: s.imported ?? 0, icon: "📥", warn: false },
-        { label: "Warnings", value: s.warnings ?? 0, icon: "⚠️", warn: (s.warnings ?? 0) > 0 },
-        { label: "Errors", value: s.errors ?? 0, icon: "🔴", warn: (s.errors ?? 0) > 0 },
-      ];
-      return React.createElement("div", { className: "lm-summary-banner" },
-        React.createElement("p", { className: "lm-summary-since" }, since),
-        React.createElement("div", { className: "lm-summary-grid" },
-          stats.map(stat =>
-            React.createElement("div", { key: stat.label, className: "lm-summary-stat" + (stat.warn ? " warn" : "") },
-              React.createElement("span", { className: "lm-summary-icon" }, stat.icon),
-              React.createElement("span", { className: "lm-summary-value" }, stat.value),
-              React.createElement("span", { className: "lm-summary-label" }, stat.label)
-            )
-          )
-        )
-      );
-    }
-
     function RecentActivity() {
       const rows = (data?.activity || []).filter(row => row.category !== "monitor").slice(0, 8);
       return panel("Recent activity", "The latest useful actions, with their date and time. Open an item for its full path and explanation.",
@@ -1034,7 +1008,6 @@
             tone: data?.rename_queue?.failed ? "warn" : "ok"
           })),
         SwitchIndicators()),
-      React.createElement(SummaryBanner),
       RetroStatus(),
       showFilenamePreview && filenamePreview && panel("Filename preview",
         `${filenamePreview.run.examined_count} files checked: ${filenamePreview.run.proposed_count} would change, ${filenamePreview.run.unchanged_count} already match and ${filenamePreview.run.conflict_count} are blocked. Showing up to 200 changes or conflicts.`,

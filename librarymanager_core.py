@@ -541,24 +541,6 @@ def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
                 (preview_run["id"],),
             )]
         pending_events = pending_filesystem_events(database_path)
-        # Activity summary: counts since last completed inventory (or last 7 days)
-        since_clause = (
-            f"'{inventory_row['started_at']}'" if inventory_row
-            else "datetime('now', '-7 days')"
-        )
-        summary_rows = connection.execute(
-            f"""SELECT category, status, severity, COUNT(*) AS cnt
-                FROM activity_log
-                WHERE recorded_at >= {since_clause}
-                GROUP BY category, status, severity"""
-        ).fetchall()
-        activity_summary = {
-            "renames":  sum(r["cnt"] for r in summary_rows if r["category"] == "rename" and r["status"] in ("renamed", "skipped")),
-            "imported": sum(r["cnt"] for r in summary_rows if r["category"] == "incoming" and r["status"] == "imported"),
-            "warnings": sum(r["cnt"] for r in summary_rows if r["severity"] == "warning"),
-            "errors":   sum(r["cnt"] for r in summary_rows if r["severity"] == "error"),
-            "since":    inventory_row["started_at"] if inventory_row else None,
-        }
         return {
             "inventory": dict(inventory_row) if inventory_row else None,
             "rename_queue": queue_counts,
@@ -567,7 +549,6 @@ def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
             "filename_preview": {"run": dict(preview_run), "rows": preview_rows} if preview_run else None,
             "pending_events": pending_events,
             "incoming": incoming_summary(database_path),
-            "activity_summary": activity_summary,
         }
     finally:
         connection.close()
