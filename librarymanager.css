@@ -1720,3 +1720,115 @@ a.lm-activity-scene-pill:hover {
     transform: translateX(-50%) translateY(0);
   }
 }
+
+/* Help & Guide Section */
+.lm-help-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.lm-help-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 1rem;
+}
+
+.lm-help-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 1.25rem;
+  transition: border-color 0.2s ease, background 0.2s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.lm-help-card:hover {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.lm-help-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-bottom: 0.85rem;
+}
+
+.lm-help-icon {
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.lm-help-card-header strong {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-color, #ffffff);
+}
+
+.lm-help-body {
+  font-size: 0.88rem;
+  line-height: 1.55;
+  color: var(--text-muted, #aab3c5);
+}
+
+.lm-help-body p {
+  margin: 0 0 0.75rem 0;
+}
+
+.lm-help-body p:last-child {
+  margin-bottom: 0;
+}
+
+.lm-help-body ul {
+  margin: 0.25rem 0 0.75rem 1.25rem;
+  padding: 0;
+}
+
+.lm-help-body li {
+  margin-bottom: 0.35rem;
+}
+
+.lm-help-body strong {
+  color: var(--text-color, #ffffff);
+}
+
+.lm-help-body code, .lm-help-body kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #79c0ff;
+}
+
+.lm-help-alert {
+  margin-top: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+}
+
+.lm-help-alert.info {
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: #38bdf8;
+}
+
+.lm-help-alert.tip {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  color: #4ade80;
+}
+
+.lm-help-alert.warn {
+  background: rgba(234, 179, 8, 0.08);
+  border: 1px solid rgba(234, 179, 8, 0.25);
+  color: #eab308;
+}
