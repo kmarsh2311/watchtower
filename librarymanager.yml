@@ -74,7 +74,7 @@ settings:
     description: Minutes that a video must remain completely unchanged before Library Manager asks Stash to add it. Default is 5.
     type: NUMBER
   generateContactSheets:
-    displayName: Generate Finder Contact Sheets
+    displayName: Generate Visual Contact Sheets (CSM)
     description: Automatically generate a visual contact sheet companion image (.mp4.jpg) for new downloads in your incoming folder.
     type: BOOLEAN
   contactSheetGrid:

@@ -411,7 +411,7 @@ def process_rename_queue(stash, database_path):
                                         "recorded",
                                         scene_id=str(scene_id),
                                         new_path=sheet_p,
-                                        detail=f"Contact sheet regenerated with new metadata for Finder browsing"
+                                        detail=f"Contact sheet regenerated with new metadata for visual file browsing"
                                     )
                                     maybe_notify(
                                         config,

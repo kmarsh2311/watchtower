@@ -565,7 +565,7 @@ class CompletedDownloadWorker(threading.Thread):
                             "recorded",
                             scene_id=scene["id"],
                             new_path=sheet_p,
-                            detail=f"Generated {csm_res.get('grid', self.contact_sheet_grid)} contact sheet for Finder browsing"
+                            detail=f"Generated {csm_res.get('grid', self.contact_sheet_grid)} contact sheet for visual file browsing"
                         )
                         record_activity(
                             self.database_path,

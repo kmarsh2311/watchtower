@@ -1401,3 +1401,24 @@ a.lm-activity-scene-pill:hover {
 .lm-btn-stop:active:not(:disabled) {
   transform: translateY(0);
 }
+
+/* Watcher Action Button Glyphs */
+.lm-btn-glyph {
+  display: inline-block;
+  line-height: 1;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+
+.lm-btn-glyph-restart {
+  font-size: 1.18rem;
+  font-weight: 700;
+}
+
+.lm-btn-glyph-stop {
+  font-size: 0.95rem;
+}
+
+.lm-btn-glyph-start {
+  font-size: 0.95rem;
+}

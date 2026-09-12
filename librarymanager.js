@@ -472,7 +472,7 @@
       const isIncomingScope = config.contactSheetScope === "incoming";
       const switches = [
         { label: "Watcher", key: "autoStartMonitor", active: config.autoStartMonitor === true, state: config.autoStartMonitor === true ? "ON" : "OFF", help: "Automatically starts filesystem monitor", tab: "monitor" },
-        { label: "Reconcile", key: "automaticMoveReconciliation", active: config.automaticMoveReconciliation === true, state: config.automaticMoveReconciliation === true ? "ON" : "OFF", help: "Automatically updates Stash when files are moved in Finder", tab: "monitor" },
+        { label: "Reconcile", key: "automaticMoveReconciliation", active: config.automaticMoveReconciliation === true, state: config.automaticMoveReconciliation === true ? "ON" : "OFF", help: "Automatically updates Stash when files are moved or renamed externally", tab: "monitor" },
         { label: "Auto-Rename", key: "automaticRenaming", active: config.automaticRenaming === true, state: config.testSceneId ? `TEST ${config.testSceneId}` : (config.automaticRenaming === true ? "ON" : "OFF"), help: config.testSceneId ? `Active (Limited to Test Scene ${config.testSceneId})` : "Automatically renames files when metadata is edited", tab: "manage" },
         { label: "Incoming", key: "automaticIncomingScan", active: config.automaticIncomingScan === true, state: config.automaticIncomingScan === true ? "ON" : "OFF", help: "Watches incoming folder and adds completed downloads", tab: "incoming" },
         { label: "Clean Titles", key: "stripMetadataFromTitle", active: config.stripMetadataFromTitle !== false, state: config.stripMetadataFromTitle !== false ? "ON" : "OFF", help: "Removes duplicate studio/performers from generated filenames", tab: "manage" },
@@ -763,7 +763,9 @@
                     setBusy("");
                   }
                 }
-              }, "⟳ RESTART WATCHER"),
+              },
+                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-restart" }, "⟳"),
+                "RESTART WATCHER"),
               failedIncoming.length > 1 && React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn retry",
@@ -1183,7 +1185,7 @@
           React.createElement("div", { className: "lm-actions", style: { marginTop: "14px" } },
             React.createElement(TaskButton, { name: readOnlyTasks.filenames, label: "Preview All Filenames (Read Only)", showResults: "filenames", help: "Shows what would change using these choices across your entire library without renaming anything." })))))
     else if (tab === "monitor") content = React.createElement(React.Fragment, null,
-      panel("Filesystem Monitor Status", "The background watcher monitors your Stash library folders, detects moved or renamed files in Finder, and safely reconnects them to Stash.",
+      panel("Filesystem Monitor Status", "The background watcher monitors your Stash library folders, detects files moved or renamed outside of Stash, and safely reconnects them.",
         React.createElement(React.Fragment, null,
           React.createElement("div", { className: "lm-status-grid compact" },
             React.createElement(StatusCard, {
@@ -1225,7 +1227,9 @@
                     setBusy("");
                   }
                 }
-              }, "⟳ Restart Watcher"),
+              },
+                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-restart" }, "⟳"),
+                "Restart Watcher"),
               React.createElement(Button, {
                 className: "lm-btn-stop",
                 disabled: !!busy,
@@ -1244,7 +1248,9 @@
                     setBusy("");
                   }
                 }
-              }, "■ Stop Watcher")
+              },
+                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-stop" }, "■"),
+                "Stop Watcher")
             ) : isMonitorStale ? React.createElement(React.Fragment, null,
               React.createElement(Button, {
                 variant: "primary",
@@ -1265,7 +1271,9 @@
                     setBusy("");
                   }
                 }
-              }, "⟳ RESTART WATCHER"),
+              },
+                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-restart" }, "⟳"),
+                "RESTART WATCHER"),
               React.createElement(Button, {
                 className: "lm-btn-stop",
                 disabled: !!busy,
@@ -1284,7 +1292,9 @@
                     setBusy("");
                   }
                 }
-              }, "■ Stop Watcher")
+              },
+                React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-stop" }, "■"),
+                "Stop Watcher")
             ) : React.createElement(Button, {
               variant: "primary",
               disabled: !!busy,
@@ -1303,12 +1313,14 @@
                   setBusy("");
                 }
               }
-            }, "▶ Start Watcher"),
+            },
+              React.createElement("span", { className: "lm-btn-glyph lm-btn-glyph-start" }, "▶"),
+              "Start Watcher"),
             React.createElement(TaskButton, { name: readOnlyTasks.events, label: "Reconcile Events (Read Only)", showResults: "reports" })))),
       panel("Watcher Automation & Behavior", "Configure external move reconciliation and system startup options.",
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "automaticMoveReconciliation", label: "Reconcile Verified External Moves",
-            help: "When a file is moved in Finder and verified by size/hash, ask Stash to scan the new path and reconnect it." }),
+            help: "When a file is moved outside of Stash and verified by size/hash, ask Stash to scan the new path and reconnect it." }),
           data?.startup?.supported && React.createElement(Switch, { setting: "startAtLogin", label: "Start Monitoring with macOS",
             help: data.startup.enabled ? "The watcher starts with macOS and waits for Stash if necessary." : "Start the background watcher at login and retry once a minute until Stash is available." }))),
       panel("Monitored Library Roots", "All configured Stash scene library folders tracked by the background filesystem monitor.",
@@ -1356,10 +1368,10 @@
           React.createElement("p", { className: "lm-help", style: { marginTop: "10px" } },
             "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."))))
     else if (tab === "csm") content = React.createElement(React.Fragment, null,
-      panel("Finder Contact Sheets (CSM)", "Generate multi-frame visual contact sheet companion images (.mp4.jpg) alongside your video files.",
+      panel("Contact Sheets (CSM)", "Generate multi-frame visual contact sheet companion images (.mp4.jpg) alongside your video files.",
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "generateContactSheets", defaultValue: false,
-            label: "Generate Finder Contact Sheets",
+            label: "Generate Visual Contact Sheets (CSM)",
             help: "Automatically generate a visual contact sheet companion image (.mp4.jpg) when new videos arrive." }),
           React.createElement("div", { className: "lm-filename-style-grid", style: { marginTop: "12px" } },
             React.createElement(ChoiceField, {
