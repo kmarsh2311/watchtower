@@ -365,7 +365,7 @@
 
     return React.createElement("div", { className: "lm-real-scene-tester" },
       React.createElement("div", { className: "lm-real-scene-header" },
-        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" } },
+        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "flex-start", flexWrap: "wrap", gap: "8px" } },
           React.createElement("strong", null, "Test Rules with a Real Scene"),
           React.createElement("span", {
             style: {
@@ -377,10 +377,9 @@
               border: "1px solid rgba(74, 222, 128, 0.3)",
               fontWeight: 500,
               display: "inline-flex",
-              alignItems: "center",
-              gap: "4px"
+              alignItems: "center"
             }
-          }, "✓ Safe Dry-Run — No files are modified")),
+          }, "Safe Dry-Run — No files are modified")),
         React.createElement("small", null, "Enter a Scene ID, search by title/performer, or pick a recent scene to simulate renaming. No files are modified.")),
       React.createElement("div", { className: "lm-real-scene-inputs" },
         React.createElement("input", {
