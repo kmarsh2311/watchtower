@@ -557,6 +557,7 @@
 
     const handleFinish = async (targetTab = "overview") => {
       await updateSetting("onboardingCompleted", true);
+      window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
       onHide();
       onNavigateTab(targetTab);
     };
@@ -844,14 +845,6 @@
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
     const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(false);
-
-    React.useEffect(() => {
-      // Gentle entrance delay on load so page renders smoothly
-      const timer = window.setTimeout(() => {
-        setShowOnboardingWizard(true);
-      }, 250);
-      return () => window.clearTimeout(timer);
-    }, []);
     const [onboardingBannerDismissed, setOnboardingBannerDismissed] = React.useState(false);
     const [config, setConfig] = React.useState({});
     const [busy, setBusy] = React.useState("");
@@ -907,6 +900,9 @@
         const [raw, settings] = await Promise.all([operation("dashboard", { limit: 250 }), getConfig()]);
         const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
         setData({ ...payload, _liveReceivedAt: Date.now() }); setConfig(settings);
+        if (settings.onboardingCompleted !== true) {
+          setShowOnboardingWizard(true);
+        }
         window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
       } catch (e) { setError(e.message); }
       finally { if (isUserClick === true) setBusy(""); }
@@ -2850,7 +2846,7 @@
           })
         ))),
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
-      (data !== null && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
+      (data !== null && config.onboardingCompleted !== true && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
         onStart: () => setShowOnboardingWizard(true),
         onDismiss: () => setOnboardingBannerDismissed(true)
       }) : null,
@@ -2892,14 +2888,31 @@
   }
 
     function NavStatus() {
-    const [health, setHealth] = React.useState({ tone: "checking", title: "Library Manager: checking watcher…", status: null });
+    const [health, setHealth] = React.useState({ tone: "checking", title: "Watchtower", status: null });
+    const [onboarded, setOnboarded] = React.useState(false);
     const [showHud, setShowHud] = React.useState(false);
     const hudTimer = React.useRef(null);
 
     const check = React.useCallback(async () => {
       try {
-        const raw = await operation("monitor_health");
+        const [raw, cfg] = await Promise.all([
+          operation("monitor_health"),
+          getConfig().catch(() => ({}))
+        ]);
+        const isCompleted = cfg?.onboardingCompleted === true;
+        setOnboarded(isCompleted);
+
         const status = typeof raw === "string" ? JSON.parse(raw) : raw;
+
+        if (!isCompleted) {
+          setHealth({
+            tone: "setup",
+            title: "Watchtower: Setup required — click to configure",
+            status
+          });
+          return;
+        }
+
         const heartbeatAge = status.heartbeat_at ? Date.now() - Date.parse(status.heartbeat_at) : Infinity;
         const unavailable = status.unavailable_roots?.length || 0;
         const pending = status.pending_events || 0;
@@ -2948,7 +2961,7 @@
       onMouseEnter: () => {
         window.clearTimeout(hudTimer.current);
         check();
-        setShowHud(true);
+        if (onboarded) setShowHud(true);
       },
       onMouseLeave: () => { hudTimer.current = window.setTimeout(() => setShowHud(false), 250); }
     },
@@ -2958,7 +2971,7 @@
           className: `minimal d-flex align-items-center h-100 lm-nav-button lm-health-${health.tone}`
         }, React.createElement("img", { className: "lm-watchtower-icon",
           src: "/plugin/librarymanager/assets/watchtower-icon.png", alt: "" }))),
-      showHud && React.createElement("div", {
+      showHud && onboarded && React.createElement("div", {
         className: "lm-navbar-hud",
         onMouseEnter: () => window.clearTimeout(hudTimer.current),
         onMouseLeave: () => setShowHud(false)
