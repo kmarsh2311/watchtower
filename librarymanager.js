@@ -1482,7 +1482,7 @@
               label: "Contact Sheet Layout",
               help: "Number of timestamped scene snapshots per contact sheet.",
               value: config.contactSheetGrid || "4x4",
-              choices: [["4x4", "4×4 (16 frames) — Standard"], ["4x5", "4×5 (20 frames) — Detailed"], ["5x5", "5×5 (25 frames) — Dense Overview"], ["3x4", "3×4 (12 frames) — Compact"], ["4x6", "4×6 (24 frames) — Extended"]],
+              choices: [["5x4", "5×4 (20 frames) — Widescreen 16:9 (Recommended)"], ["4x4", "4×4 (16 frames) — Standard"], ["4x5", "4×5 (20 frames) — Detailed"], ["5x5", "5×5 (25 frames) — Dense Overview"], ["3x4", "3×4 (12 frames) — Compact"], ["4x6", "4×6 (24 frames) — Extended"]],
               
               onChange: value => updateSetting("contactSheetGrid", value)
             })),

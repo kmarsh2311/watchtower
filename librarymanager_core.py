@@ -2116,7 +2116,7 @@ def generate_video_contact_sheet(
     step_sec = (end_sec - start_sec) / max(1, total_frames - 1)
     timestamps = [start_sec + i * step_sec for i in range(total_frames)]
 
-    scale_w = 460 if cols <= 4 else 360
+    scale_w = 460 if cols <= 4 else (376 if cols == 5 else 310)
     t_start = time.time()
 
     with tempfile.TemporaryDirectory(prefix="watchtower_csm_") as tmp_dir_str:

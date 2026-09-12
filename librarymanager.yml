@@ -83,7 +83,7 @@ settings:
     type: BOOLEAN
   contactSheetGrid:
     displayName: Contact Sheet Layout
-    description: Grid layout for generated contact sheets, such as 4x4 (16 frames) or 4x5 (20 frames).
+    description: Grid layout for generated contact sheets, such as 5x4 (20 frames widescreen) or 4x4 (16 frames).
     type: STRING
   contactSheetBanner:
     displayName: Include Header Banner
