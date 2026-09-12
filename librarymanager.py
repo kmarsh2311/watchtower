@@ -688,9 +688,47 @@ def main():
         stash = StashInterface(plugin_input["server_connection"])
         result = start_filesystem_monitor(stash, database_path, plugin_input["server_connection"])
         message = result["message"]
+    elif mode == "record_config_change":
+        changes = plugin_input.get("args", {}).get("changes") or {}
+        for key, val in changes.items():
+            if key == "automaticRenaming":
+                status = "enabled" if val else "disabled"
+                detail = f"Automatic Renaming was {status} by user in settings"
+                audit(database_path, "config", "automatic renaming", status, detail=detail)
+            elif key == "autoStartMonitor":
+                status = "enabled" if val else "disabled"
+                detail = f"Watcher auto-start was {status} by user in settings"
+                audit(database_path, "config", "watcher auto-start", status, detail=detail)
+            elif key == "automaticMoveReconciliation":
+                status = "enabled" if val else "disabled"
+                detail = f"External move reconciliation was {status} by user in settings"
+                audit(database_path, "config", "move reconciliation", status, detail=detail)
+            elif key == "generateContactSheets":
+                status = "enabled" if val else "disabled"
+                detail = f"Contact sheet generation was {status} by user in settings"
+                audit(database_path, "config", "contact sheet generation", status, detail=detail)
+            elif key == "renameSettleSeconds":
+                audit(database_path, "config", "settle delay", "updated", detail=f"Metadata edit settle delay set to {val}s")
+            elif key == "incomingFolder":
+                audit(database_path, "config", "incoming folder", "updated", detail=f"Incoming folder set to {val or 'none'}")
+            elif key == "incomingSettleMinutes":
+                audit(database_path, "config", "incoming delay", "updated", detail=f"Incoming settle delay set to {val}m")
+            elif key == "testSceneId":
+                if val:
+                    audit(database_path, "config", "test scene limit", "active", detail=f"Automatic renaming restricted to Test Scene {val}")
+                else:
+                    audit(database_path, "config", "test scene limit", "cleared", detail="Test scene limit removed; automatic renaming applies to all scenes")
+            elif key == "stripMetadataFromTitle":
+                status = "enabled" if val else "disabled"
+                audit(database_path, "config", "title metadata strip", status, detail=f"Embedded performer/studio stripping was {status}")
+            else:
+                audit(database_path, "config", str(key), "updated", detail=f"Setting '{key}' updated to {val}")
+        message = json.dumps({"recorded": True})
     elif mode == "reload_monitor":
         stash = StashInterface(plugin_input["server_connection"])
         reloaded = reload_monitor_runtime(stash, database_path)
+        if reloaded:
+            audit(database_path, "monitor", "hot-reload", "reloaded", detail="Watcher daemon hot-reloaded configuration successfully")
         message = json.dumps({"reloaded": reloaded})
     elif mode == "stop_monitor":
         result = stop_filesystem_monitor(database_path)

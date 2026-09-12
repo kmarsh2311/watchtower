@@ -421,6 +421,7 @@
       setConfig(next); setError("");
       try {
         await saveConfig(next);
+        await operation("record_config_change", { changes }).catch(() => {});
         if (Object.prototype.hasOwnProperty.call(changes, "startAtLogin")) {
           await operation("configure_startup", { enabled: next.startAtLogin === true });
         }
@@ -1125,11 +1126,19 @@
                 badgeText = "RENAMED";
               } else if (row.category === "reconciliation" && row.status === "updated") {
                 badgeText = "RECONNECTED";
+              } else if (row.category === "config") {
+                badgeClass = "config";
+                badgeText = "CONFIG";
+              } else if (row.category === "monitor") {
+                badgeClass = "monitor";
+                badgeText = "WATCHER";
               } else if (row.status === "deleted") {
                 badgeText = "DELETED";
               }
 
-              const targetName = basename(row.new_path || row.old_path || row.action || "Event");
+              const targetName = (row.category === "config" || row.category === "monitor")
+                ? (row.detail || row.action)
+                : basename(row.new_path || row.old_path || row.detail || row.action || "Event");
 
               return React.createElement("div", {
                 key: row.id,

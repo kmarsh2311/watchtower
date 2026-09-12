@@ -464,6 +464,20 @@
   text-shadow: 0 0 5px rgba(255, 181, 46, .5);
 }
 
+.lm-terminal-badge.config {
+  background: rgba(0, 180, 255, .15);
+  border-color: #00b4ff;
+  color: #00d4ff;
+  text-shadow: 0 0 5px rgba(0, 180, 255, .4);
+}
+
+.lm-terminal-badge.monitor {
+  background: rgba(180, 100, 255, .15);
+  border-color: #b464ff;
+  color: #c98aff;
+  text-shadow: 0 0 5px rgba(180, 100, 255, .4);
+}
+
 .lm-terminal-stream-name {
   overflow: hidden;
   text-overflow: ellipsis;
