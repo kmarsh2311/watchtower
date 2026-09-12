@@ -2169,6 +2169,8 @@ a.lm-activity-scene-pill:hover {
   padding: 1.5rem !important;
   box-sizing: border-box !important;
   animation: lmFadeInBackdrop 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+  overscroll-behavior: contain !important;
+  touch-action: none !important;
 }
 
 .lm-wizard-backdrop.lm-exiting {
@@ -2191,6 +2193,7 @@ a.lm-activity-scene-pill:hover {
   display: flex !important;
   flex-direction: column !important;
   overflow: hidden !important;
+  overscroll-behavior: contain !important;
   color: #e9edf5 !important;
   animation: lmDialogEnter 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.08s backwards !important;
   -webkit-font-smoothing: antialiased !important;
@@ -2359,10 +2362,16 @@ a.lm-activity-scene-pill:hover {
   border-radius: 0.45rem !important;
 }
 .lm-wizard-index-box {
-  padding: 1.1rem !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: 220px !important;
+  padding: 1.8rem 1.4rem !important;
   background: rgba(0, 0, 0, 0.3) !important;
   border: 1px solid rgba(140, 155, 185, 0.2) !important;
   border-radius: 0.5rem !important;
+  text-align: center !important;
 }
 .lm-wizard-index-status {
   display: flex !important;
@@ -2432,23 +2441,90 @@ a.lm-activity-scene-pill:hover {
 }
 
 .lm-wizard-feature-chip {
+  position: relative !important;
   display: flex !important;
   align-items: flex-start !important;
-  gap: 0.85rem !important;
-  padding: 0.75rem 1rem !important;
-  background: rgba(0, 0, 0, 0.28) !important;
+  gap: 0.75rem !important;
+  padding: 0.7rem 0.85rem !important;
+  background: rgba(14, 22, 38, 0.6) !important;
   border: 1px solid rgba(140, 155, 185, 0.18) !important;
   border-radius: 0.45rem !important;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease !important;
+  cursor: pointer !important;
+}
+.lm-wizard-feature-chip:hover {
+  background: rgba(22, 36, 62, 0.9) !important;
+  border-color: rgba(57, 255, 100, 0.55) !important;
+  transform: translateY(-2px) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 12px rgba(57, 255, 100, 0.18) !important;
 }
 .lm-wizard-feature-chip strong {
   display: block !important;
   color: #ffffff !important;
-  font-size: 0.9rem !important;
+  font-size: 0.88rem !important;
   margin-bottom: 0.15rem !important;
 }
 .lm-wizard-feature-chip p {
   margin: 0 !important;
   color: var(--text-muted, #aab3c5) !important;
-  font-size: 0.82rem !important;
+  font-size: 0.78rem !important;
   line-height: 1.35 !important;
+}
+.lm-chip-info-cue {
+  font-size: 0.7rem !important;
+  opacity: 0.4 !important;
+  transition: opacity 0.2s ease, transform 0.2s ease !important;
+  flex-shrink: 0 !important;
+}
+.lm-wizard-feature-chip:hover .lm-chip-info-cue {
+  opacity: 1 !important;
+  transform: scale(1.15) !important;
+}
+.lm-wizard-chip-tooltip {
+  position: absolute !important;
+  bottom: calc(100% + 8px) !important;
+  width: 270px !important;
+  padding: 0.7rem 0.85rem !important;
+  background: #0d1626 !important;
+  border: 1px solid rgba(57, 255, 100, 0.45) !important;
+  border-radius: 0.45rem !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.8), 0 0 18px rgba(57, 255, 100, 0.25) !important;
+  color: #dce4f2 !important;
+  font-size: 0.78rem !important;
+  line-height: 1.4 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  visibility: hidden !important;
+  transition: opacity 0.22s cubic-bezier(0.16, 1, 0.3, 1), transform 0.22s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.22s ease !important;
+  z-index: 100 !important;
+  transform: translateY(6px) !important;
+}
+.lm-wizard-chip-tooltip.tooltip-left {
+  left: 0 !important;
+}
+.lm-wizard-chip-tooltip.tooltip-left::after {
+  content: "" !important;
+  position: absolute !important;
+  top: 100% !important;
+  left: 24px !important;
+  border-width: 6px !important;
+  border-style: solid !important;
+  border-color: rgba(57, 255, 100, 0.45) transparent transparent transparent !important;
+}
+.lm-wizard-chip-tooltip.tooltip-right {
+  right: 0 !important;
+}
+.lm-wizard-chip-tooltip.tooltip-right::after {
+  content: "" !important;
+  position: absolute !important;
+  top: 100% !important;
+  right: 24px !important;
+  border-width: 6px !important;
+  border-style: solid !important;
+  border-color: rgba(57, 255, 100, 0.45) transparent transparent transparent !important;
+}
+.lm-wizard-feature-chip:hover .lm-wizard-chip-tooltip {
+  opacity: 1 !important;
+  visibility: visible !important;
+  transform: translateY(0) !important;
 }
