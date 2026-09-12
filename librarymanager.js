@@ -754,9 +754,53 @@
             )
           ),
           step === 4 && React.createElement("div", { className: "lm-wizard-pane" },
-            React.createElement("h3", null, "4. Choose Naming Convention & Safety Rules"),
+            React.createElement("h3", null, "4. Automated Filename Standardization"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "Select your preferred naming style below. Automatic Renaming is OFF by default to keep your existing files completely safe until you choose to enable it in Settings."),
+              "Watchtower can automatically keep your physical filenames organized and synchronized with Stash metadata."),
+            React.createElement("div", {
+              className: "lm-wizard-callout",
+              style: { marginBottom: "14px", background: "rgba(33, 134, 87, 0.12)", borderColor: "rgba(47, 166, 109, 0.4)" }
+            },
+              React.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "flex-start" } },
+                React.createElement("span", { style: { fontSize: "1.15rem" } }, "🛡️"),
+                React.createElement("div", null,
+                  React.createElement("strong", { style: { color: "#39ff64" } }, "Non-Destructive & Safe"),
+                  React.createElement("p", { style: { margin: "2px 0 0 0", fontSize: "0.82rem", color: "#ccd6ea", lineHeight: 1.4 } },
+                    "When enabled, video renames automatically sync companion artwork (.jpg/.png) and subtitles (.vtt/.srt) with collision prevention and automatic rollback.")
+                )
+              )
+            ),
+            React.createElement("div", {
+              className: "lm-wizard-option-card",
+              style: {
+                marginBottom: "14px",
+                borderColor: config.automaticRenaming === true ? "#2fa66d" : "rgba(140, 155, 185, 0.25)",
+                background: config.automaticRenaming === true ? "rgba(47, 166, 109, 0.1)" : "rgba(0, 0, 0, 0.25)"
+              }
+            },
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" } },
+                React.createElement("div", null,
+                  React.createElement("strong", { style: { fontSize: "0.95rem" } }, "Enable Automatic Renaming?"),
+                  React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.83rem" } },
+                    config.automaticRenaming === true
+                      ? "Active — Stash metadata edits will automatically standardize filenames on disk."
+                      : "Disabled (Recommended for setup) — Files remain untouched. You can test single scenes first in Filename Management before turning this on.")
+                ),
+                React.createElement("button", {
+                  type: "button",
+                  className: `btn ${config.automaticRenaming === true ? "btn-primary" : "btn-secondary"}`,
+                  style: { minWidth: "90px", fontWeight: 700, padding: "0.4rem 0.8rem", fontSize: "0.84rem" },
+                  onClick: (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    updateSetting("automaticRenaming", !(config.automaticRenaming === true));
+                  }
+                }, config.automaticRenaming === true ? "✓ Enabled" : "Disabled (Off)")
+              )
+            ),
+            React.createElement("strong", { style: { display: "block", marginBottom: "8px", fontSize: "0.88rem", color: "#e9edf5" } },
+              "Preferred Naming Style Format:"
+            ),
             React.createElement("div", { className: "lm-wizard-presets-grid" },
               [
                 { id: "standard", title: "Standard (Recommended)", example: "Studio Name - 2024-05-12 - Scene Title (Performer One, Performer Two).mp4" },
@@ -774,8 +818,8 @@
                 React.createElement("code", { className: "lm-wizard-preset-example" }, p.example)
               ))
             ),
-            React.createElement("p", { style: { marginTop: "16px", fontSize: "0.84rem", color: "var(--text-muted, #aab3c5)" } },
-              "💡 You can customize separators, multi-performer caps, title cleaning rules, and desktop notifications anytime in the Settings tab.")
+            React.createElement("p", { style: { marginTop: "14px", fontSize: "0.82rem", color: "var(--text-muted, #aab3c5)" } },
+              "💡 You can fine-tune separators, title cleaning rules, and test single scenes safely in the Filename Management tab anytime.")
           ),
           step === 5 && React.createElement("div", { className: "lm-wizard-pane", style: { textAlign: "center", padding: "1.6rem 0.5rem" } },
             React.createElement("div", { style: { fontSize: "3.5rem", marginBottom: "0.4rem" } }, "🎉"),
