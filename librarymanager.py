@@ -1233,7 +1233,7 @@ def main():
         roots = fetch_library_roots(stash)
         payload = dashboard_data(database_path, (plugin_input.get("args") or {}).get("limit", 250))
         payload["monitor"].pop("token", None)
-        payload["library_roots"] = roots
+        payload["library_roots"] = [{"path": root, "exists": os.path.exists(root)} for root in roots]
         payload["incoming_folder"] = incoming_folder_status(config, roots)
         payload["incoming_folders"] = incoming_folders_status(config, roots)
         payload["startup"] = macos_startup_status()

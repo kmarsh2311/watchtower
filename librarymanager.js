@@ -727,11 +727,17 @@
               "Watchtower uses your Stash-configured library directories to monitor files and coordinate safe disk operations."),
             React.createElement("div", { className: "lm-wizard-roots-list" },
               libraryRoots.length > 0
-                ? libraryRoots.map(r => React.createElement("div", { key: r.path, className: "lm-wizard-root-row" },
-                    React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "📁 Root:"),
-                    React.createElement("span", { className: "lm-wizard-root-path", title: r.path }, r.path),
-                    React.createElement("span", { className: `lm-badge ${r.exists ? "ok" : "err"}` }, r.exists ? "Online" : "Missing")
-                  ))
+                ? libraryRoots.map((r, idx) => {
+                    const rootPath = typeof r === "string" ? r : (r?.path || "");
+                    const isOnline = typeof r === "object" && typeof r?.exists === "boolean"
+                      ? r.exists
+                      : !(data?.monitor?.unavailable_roots || []).includes(rootPath);
+                    return React.createElement("div", { key: rootPath || idx, className: "lm-wizard-root-row" },
+                      React.createElement("span", { style: { color: "#39ff64", fontWeight: "700", display: "inline-flex", alignItems: "center", gap: "4px" } }, "📁 Root:"),
+                      React.createElement("span", { className: "lm-wizard-root-path", title: rootPath }, rootPath),
+                      React.createElement("span", { className: `lm-badge ${isOnline ? "ok" : "err"}` }, isOnline ? "Online" : "Missing")
+                    );
+                  })
                 : React.createElement("p", { style: { color: "#ffb52e" } }, "No library folders detected from Stash.")
             ),
             React.createElement("div", { className: "lm-wizard-callout" },
