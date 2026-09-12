@@ -336,24 +336,30 @@
       }
     };
 
-    const pickRecent = () => {
-      const recentRows = (data?.activity || []).filter(r => r.scene_id);
-      const uniqueScenes = [];
-      const seen = new Set();
-      for (const r of recentRows) {
-        if (!seen.has(String(r.scene_id))) {
-          seen.add(String(r.scene_id));
-          uniqueScenes.push({ id: String(r.scene_id), title: basename(r.new_path || r.old_path || `Scene ${r.scene_id}`) });
-          if (uniqueScenes.length >= 6) break;
+    const pickRecent = async () => {
+      setLoading(true); setErrorMsg(""); setSearchResults([]);
+      try {
+        const res = await gql(`query RecentScenes {
+          findScenes(filter: { per_page: 6, sort: "created_at", direction: DESC }) {
+            scenes {
+              id
+              title
+              studio { name }
+              performers { name }
+              paths { screenshot }
+            }
+          }
+        }`);
+        const scenes = res?.findScenes?.scenes || [];
+        if (scenes.length) {
+          setSearchResults(scenes);
+        } else {
+          setErrorMsg("No scenes found in library to pick from.");
         }
-      }
-      if (uniqueScenes.length === 1) {
-        setSceneIdInput(uniqueScenes[0].id);
-        runPreviewForSceneId(uniqueScenes[0].id);
-      } else if (uniqueScenes.length > 1) {
-        setSearchResults(uniqueScenes);
-      } else {
-        handleSearchOrTest("1");
+      } catch (err) {
+        setErrorMsg(err.message || String(err));
+      } finally {
+        setLoading(false);
       }
     };
 
@@ -574,7 +580,7 @@
         if (data?.monitor?.state === "running") {
           await operation("reload_monitor");
         }
-        setNotice("Settings saved.");
+        // Silent setting update to avoid distracting toasts while testing
         window.setTimeout(refresh, 500);
       }
       catch (e) { setError(e.message); await refresh(); }
