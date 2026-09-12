@@ -462,7 +462,7 @@
           type: "button",
           className: "btn btn-secondary lm-onboarding-dismiss-btn",
           onClick: onDismiss,
-          title: "Dismiss and configure settings manually"
+          title: "Dismiss for this session"
         }, "✕ Dismiss")
       )
     );
@@ -480,6 +480,39 @@
     const libraryRoots = data?.library_roots || [];
     const inventory = data?.inventory || {};
     const totalScenes = inventory?.total_scenes || 0;
+
+    // Incoming multi-folder handling in wizard
+    const rawFolders = Array.isArray(config.incomingFolders)
+      ? config.incomingFolders
+      : (config.incomingFolder ? [config.incomingFolder] : [""]);
+    const incomingFoldersList = rawFolders.length > 0 ? rawFolders : [""];
+    const multiStatus = data?.incoming_folders || { folders: [], valid_count: 0, total_count: 0, all_valid: false };
+    const statusFolders = multiStatus.folders || [];
+
+    const handleUpdateFolder = (index, val) => {
+      const next = [...incomingFoldersList];
+      next[index] = val;
+      updateSettings({ incomingFolders: next, incomingFolder: next[0] || "" });
+    };
+
+    const handleAddFolder = () => {
+      if (incomingFoldersList.length >= 5) return;
+      const next = [...incomingFoldersList, ""];
+      updateSettings({ incomingFolders: next });
+    };
+
+    const handleRemoveFolder = (index) => {
+      if (incomingFoldersList.length <= 1) {
+        updateSettings({ incomingFolders: [""], incomingFolder: "" });
+      } else {
+        const next = incomingFoldersList.filter((_, idx) => idx !== index);
+        const cleaned = next.map(f => (f || "").trim()).filter(Boolean);
+        updateSettings({
+          incomingFolders: next,
+          incomingFolder: cleaned[0] || ""
+        });
+      }
+    };
 
     const handleRunIndex = async () => {
       setIndexing(true);
@@ -521,9 +554,10 @@
       }
     };
 
-    const handleFinish = async () => {
+    const handleFinish = async (targetTab = "overview") => {
       await updateSetting("onboardingCompleted", true);
       onHide();
+      onNavigateTab(targetTab);
     };
 
     const stepsList = [
@@ -577,7 +611,7 @@
           step === 1 && React.createElement("div", { className: "lm-wizard-pane" },
             React.createElement("h3", null, "1. Verify Stash Library Storage Roots"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "Watchtower automatically connects to your Stash instance and monitors all active library roots for file creations, moves, and renames."),
+              "Watchtower connects to your Stash instance and automatically monitors all active library roots for file creations, moves, and renames."),
             React.createElement("div", { className: "lm-wizard-roots-list" },
               libraryRoots.length > 0
                 ? libraryRoots.map((r, i) => React.createElement("div", { key: i, className: "lm-wizard-root-row" },
@@ -589,14 +623,14 @@
                     "⚠️ No library roots discovered in Stash. Make sure you have at least one folder configured in Stash Settings → Library.")
             ),
             React.createElement("div", { className: "lm-wizard-callout" },
-              React.createElement("strong", null, "💡 Safe & Read-Only: "),
-              "Watchtower never deletes media files on disk. It maintains an event log in SQLite to protect your metadata whenever files are moved externally.")
+              React.createElement("strong", null, "ℹ️ Stash Managed Roots: "),
+              "Storage roots are automatically discovered from Stash. To add or remove storage folders, adjust your paths in Stash Settings → Library.")
           ),
           step === 2 && React.createElement("div", { className: "lm-wizard-pane" },
             React.createElement("h3", null, "2. Incoming Downloads & Auto-Ingest (Optional)"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "If downloaders (e.g. Torrents, Usenet, JDownloader) save new files to staging folders, Watchtower can monitor them, wait for downloads to settle, and automatically import them into Stash."),
-            React.createElement("div", { className: "lm-wizard-option-card" },
+              "Configure up to 5 staging folders where downloaders (Torrents, Usenet, JDownloader, AirDrop) save files. Watchtower can monitor them, wait for downloads to settle, and automatically import them into Stash."),
+            React.createElement("div", { className: "lm-wizard-option-card", style: { marginBottom: "14px" } },
               React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
                 React.createElement("div", null,
                   React.createElement("strong", null, "Automatically Add Completed Videos"),
@@ -611,52 +645,82 @@
                 })
               )
             ),
-            React.createElement("p", { style: { marginTop: "14px", fontSize: "0.85rem", color: "var(--text-muted, #aab3c5)" } },
-              "You can configure up to 5 specific incoming staging folders at any time under the ",
-              React.createElement("strong", { style: { color: "#fff" } }, "Incoming Downloads"), " tab.")
+            React.createElement("div", { className: "lm-incoming-list-container" },
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" } },
+                React.createElement("strong", { style: { fontSize: "0.88rem" } }, `Watched Incoming Folders (${incomingFoldersList.length}/5)`),
+                React.createElement("button", {
+                  type: "button",
+                  className: "btn btn-secondary btn-sm lm-incoming-add-btn",
+                  disabled: incomingFoldersList.length >= 5,
+                  onClick: handleAddFolder,
+                  title: incomingFoldersList.length >= 5 ? "Maximum 5 folders reached" : "Add another incoming staging folder"
+                }, incomingFoldersList.length >= 5 ? "Max 5 Folders" : "+ Add Folder")
+              ),
+              incomingFoldersList.map((folderPath, idx) => {
+                const folderStatus = statusFolders[idx] || {};
+                const isConfigured = Boolean((folderPath || "").trim());
+                const isValid = Boolean(folderStatus.valid);
+                return React.createElement("div", { key: idx, className: "lm-incoming-row" },
+                  React.createElement("span", { className: "lm-incoming-row-num" }, `#${idx + 1}`),
+                  React.createElement("input", {
+                    value: folderPath || "",
+                    className: "lm-incoming-row-input",
+                    onChange: event => handleUpdateFolder(idx, event.target.value),
+                    placeholder: `/Volumes/Library/Incoming${idx > 0 ? `_${idx + 1}` : ""}`
+                  }),
+                  isConfigured ? React.createElement("span", {
+                    className: `lm-incoming-status-pill ${isValid ? "ok" : "warn"}`
+                  }, isValid ? "✓ Inside Library" : "Outside Library") : null,
+                  React.createElement("button", {
+                    type: "button",
+                    className: "lm-incoming-row-remove",
+                    title: incomingFoldersList.length > 1 ? "Remove this incoming folder" : "Clear folder path",
+                    onMouseDown: event => event.preventDefault(),
+                    onClick: () => handleRemoveFolder(idx)
+                  }, "✕")
+                );
+              })
+            )
           ),
           step === 3 && React.createElement("div", { className: "lm-wizard-pane" },
             React.createElement("h3", null, "3. Build Baseline SQLite Inventory Database"),
             React.createElement("p", { className: "lm-wizard-desc" },
               "Watchtower indexes all scenes, cryptographic hashes (oshash), and companion artwork/subtitles into its local SQLite database (watchtower.db) for instant collision protection and fast diagnostics."),
-            React.createElement("div", { className: "lm-wizard-index-box" },
+            React.createElement("div", { className: "lm-wizard-index-box", style: { textAlign: "center", padding: "1.6rem 1rem" } },
               totalScenes > 0
-                ? React.createElement("div", { className: "lm-wizard-index-status ready" },
-                    React.createElement("div", { style: { fontSize: "2rem" } }, "✓"),
-                    React.createElement("div", null,
-                      React.createElement("strong", null, `Database Indexed: ${totalScenes.toLocaleString()} Scenes Found`),
-                      React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
-                        `Total files mapped: ${inventory.total_files?.toLocaleString() || 0}. Last scanned: ${inventory.last_scanned_at || "recently"}.`)
-                    )
+                ? React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" } },
+                    React.createElement("div", { style: { fontSize: "2.2rem", color: "#39ff64" } }, "✓"),
+                    React.createElement("strong", { style: { fontSize: "1.05rem" } }, `Database Indexed: ${totalScenes.toLocaleString()} Scenes Found`),
+                    React.createElement("p", { style: { margin: "2px 0 14px 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
+                      `Total files mapped: ${inventory.total_files?.toLocaleString() || 0}. Last scanned: ${inventory.last_scanned_at || "recently"}.`)
                   )
-                : React.createElement("div", { className: "lm-wizard-index-status unindexed" },
-                    React.createElement("div", { style: { fontSize: "2rem" } }, "⚡"),
-                    React.createElement("div", null,
-                      React.createElement("strong", null, "Database Ready to Index"),
-                      React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
-                        "Click the button below to scan your collection and build your baseline index.")
-                    )
+                : React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "6px" } },
+                    React.createElement("div", { style: { fontSize: "2.2rem", color: "#ffb52e" } }, "⚡"),
+                    React.createElement("strong", { style: { fontSize: "1.05rem" } }, "Database Ready to Index"),
+                    React.createElement("p", { style: { margin: "2px 0 14px 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
+                      "Click below to scan your collection and build your baseline index.")
                   ),
-              React.createElement("div", { style: { marginTop: "16px", display: "flex", gap: "10px", alignItems: "center" } },
+              React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "10px" } },
                 React.createElement("button", {
                   type: "button",
                   className: "btn btn-primary",
+                  style: { padding: "0.55rem 1.4rem", fontSize: "0.95rem", fontWeight: 700 },
                   disabled: indexing,
                   onClick: handleRunIndex
                 }, indexing ? "⚡ Indexing Collection…" : (totalScenes > 0 ? "🔄 Re-Index Database" : "⚡ Build Initial Inventory Now")),
                 indexing && React.createElement("span", { style: { color: "#39ff64", fontSize: "0.88rem" } }, "Scanning Stash scenes into SQLite…")
               ),
-              indexResult && React.createElement("div", { className: "lm-wizard-index-result" },
+              indexResult && React.createElement("div", { className: "lm-wizard-index-result", style: { marginTop: "14px", display: "inline-block" } },
                 React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ Indexing Complete: "),
                 `Inventoried ${indexResult.scenes || 0} scenes and ${indexResult.files || 0} files.`
               ),
-              indexError && React.createElement("div", { className: "lm-message error", style: { marginTop: "10px" } }, indexError)
+              indexError && React.createElement("div", { className: "lm-message error", style: { marginTop: "12px" } }, indexError)
             )
           ),
           step === 4 && React.createElement("div", { className: "lm-wizard-pane" },
             React.createElement("h3", null, "4. Choose Naming Convention & Safety Rules"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "Select your preferred naming style. Watchtower protects your collection with built-in collision detection to ensure files never overwrite each other."),
+              "How would you like Watchtower to format filenames when scene metadata is edited? Automatic Renaming is OFF by default so you can test safely."),
             React.createElement("div", { className: "lm-wizard-presets-grid" },
               [
                 { id: "standard", title: "Standard (Recommended)", example: "Helix Studios - 2024-05-12 - Sunset Bay (Alex Smith, Jamie Jones).mp4" },
@@ -674,13 +738,13 @@
                 React.createElement("code", { className: "lm-wizard-preset-example" }, p.example)
               ))
             ),
-            React.createElement("div", { className: "lm-wizard-safety-toggles", style: { marginTop: "16px" } },
+            React.createElement("div", { className: "lm-wizard-safety-toggles", style: { marginTop: "14px" } },
               React.createElement("div", { className: "lm-wizard-option-card" },
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
                   React.createElement("div", null,
-                    React.createElement("strong", null, "Desktop Notifications for Warnings & Failures"),
+                    React.createElement("strong", null, "Desktop Notifications for Warnings & Offline Drives"),
                     React.createElement("p", { style: { margin: "2px 0 0 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } },
-                      "Sends native OS notifications if an external move fails or a drive is offline.")
+                      "Recommended ON. Sends native OS alerts if an external move fails or a drive goes offline.")
                   ),
                   React.createElement("input", {
                     type: "checkbox",
@@ -690,29 +754,21 @@
                   })
                 )
               )
-            )
+            ),
+            React.createElement("p", { style: { marginTop: "12px", fontSize: "0.82rem", color: "var(--text-muted, #aab3c5)" } },
+              "💡 You can fine-tune separators, title cleaning, and contact sheets in the Settings tabs.")
           ),
-          step === 5 && React.createElement("div", { className: "lm-wizard-pane", style: { textAlign: "center", padding: "1.5rem 0" } },
-            React.createElement("div", { style: { fontSize: "3.5rem", marginBottom: "0.5rem" } }, "🎉"),
-            React.createElement("h3", { style: { fontSize: "1.5rem", color: "#39ff64" } }, "You're All Set!"),
-            React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "540px", margin: "0.5rem auto 1.5rem" } },
-              "Watchtower is configured, your baseline database is indexed, and collision safeguards are active."),
-            React.createElement("div", { className: "lm-wizard-quick-links" },
+          step === 5 && React.createElement("div", { className: "lm-wizard-pane", style: { textAlign: "center", padding: "1.6rem 0.5rem" } },
+            React.createElement("div", { style: { fontSize: "3.5rem", marginBottom: "0.4rem" } }, "🎉"),
+            React.createElement("h3", { style: { fontSize: "1.45rem", color: "#39ff64" } }, "You're All Set!"),
+            React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "520px", margin: "0.4rem auto 1.4rem" } },
+              "Watchtower is configured, your baseline database is indexed, and collision safeguards are active. You can explore settings or check the manual anytime."),
+            React.createElement("div", { style: { display: "flex", justifyContent: "center" } },
               React.createElement("button", {
                 type: "button",
                 className: "btn btn-secondary",
-                onClick: () => { handleFinish(); onNavigateTab("terminal"); }
-              }, "💻 Open Live Terminal"),
-              React.createElement("button", {
-                type: "button",
-                className: "btn btn-secondary",
-                onClick: () => { handleFinish(); onNavigateTab("manage"); }
-              }, "🔍 Open Diagnostic Scanner"),
-              React.createElement("button", {
-                type: "button",
-                className: "btn btn-secondary",
-                onClick: () => { handleFinish(); onNavigateTab("guide"); }
-              }, "📖 Open User Guide")
+                onClick: () => handleFinish("guide")
+              }, "📖 Open Help & Reference Manual")
             )
           )
         ),
@@ -731,9 +787,9 @@
           step === 5 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
-            style: { marginLeft: "auto" },
-            onClick: handleFinish
-          }, "🚀 Finish & Enter Watchtower")
+            style: { marginLeft: "auto", background: "#218657", borderColor: "#2da76f", fontWeight: 700 },
+            onClick: () => handleFinish("overview")
+          }, "🚀 Finish & Go to Overview")
         )
       )
     );
@@ -2745,12 +2801,9 @@
           })
         ))),
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
-      (!config.onboardingCompleted && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
+      (data !== null && config && config.onboardingCompleted !== true && !onboardingBannerDismissed) ? React.createElement(OnboardingBanner, {
         onStart: () => setShowOnboardingWizard(true),
-        onDismiss: () => {
-          setOnboardingBannerDismissed(true);
-          updateSetting("onboardingCompleted", true);
-        }
+        onDismiss: () => setOnboardingBannerDismissed(true)
       }) : null,
       React.createElement(OnboardingWizardModal, {
         show: showOnboardingWizard,
