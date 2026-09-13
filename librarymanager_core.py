@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS rename_queue (
     available_at REAL NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
     attempts INTEGER NOT NULL DEFAULT 0,
+    processing_started_at REAL,
     last_error TEXT
 );
 CREATE TABLE IF NOT EXISTS rename_worker_state (
@@ -351,6 +352,8 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
                     "ALTER TABLE incoming_files ADD COLUMN settle_seconds INTEGER NOT NULL DEFAULT 300")
         _safe_alter(connection, "inventory_runs", "stash_scene_count",
                     "ALTER TABLE inventory_runs ADD COLUMN stash_scene_count INTEGER NOT NULL DEFAULT 0")
+        _safe_alter(connection, "rename_queue", "processing_started_at",
+                    "ALTER TABLE rename_queue ADD COLUMN processing_started_at REAL")
         connection.execute(
             """UPDATE inventory_runs SET stash_scene_count=(SELECT COUNT(DISTINCT scene_id) FROM files)
                WHERE status='complete' AND stash_scene_count=0"""
@@ -797,10 +800,10 @@ def enqueue_rename(database_path: Path, scene_id: str, now_timestamp: float, deb
     try:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
-            """INSERT INTO rename_queue(scene_id,enqueued_at,available_at,status,attempts,last_error)
-               VALUES (?,?,?,'pending',0,NULL)
+            """INSERT INTO rename_queue(scene_id,enqueued_at,available_at,status,attempts,processing_started_at,last_error)
+               VALUES (?,?,?,'pending',0,NULL,NULL)
                ON CONFLICT(scene_id) DO UPDATE SET enqueued_at=excluded.enqueued_at,
-                   available_at=excluded.available_at,status='pending',last_error=NULL""",
+               available_at=excluded.available_at,status='pending',processing_started_at=NULL,last_error=NULL""",
             (str(scene_id), now_timestamp, now_timestamp + debounce_seconds),
         )
         scheduled = connection.execute("SELECT scheduled FROM rename_worker_state WHERE id=1").fetchone()[0]
@@ -864,8 +867,8 @@ def claim_due_rename(database_path: Path, now_timestamp: float):
         # Recover any renames stranded in 'processing' by a previously crashed worker.
         stale_cutoff = now_timestamp - _STALE_PROCESSING_SECONDS
         connection.execute(
-            """UPDATE rename_queue SET status='pending'
-               WHERE status='processing' AND enqueued_at <= ?""",
+            """UPDATE rename_queue SET status='pending',processing_started_at=NULL
+               WHERE status='processing' AND COALESCE(processing_started_at,enqueued_at) <= ?""",
             (stale_cutoff,),
         )
         row = connection.execute(
@@ -880,7 +883,8 @@ def claim_due_rename(database_path: Path, now_timestamp: float):
             return None, next_row["next_at"], next_row["pending"]
         scene_id = row["scene_id"]
         connection.execute(
-            "UPDATE rename_queue SET status='processing',attempts=attempts+1 WHERE scene_id=?", (scene_id,)
+            "UPDATE rename_queue SET status='processing',processing_started_at=?,attempts=attempts+1 WHERE scene_id=?",
+            (now_timestamp, scene_id)
         )
         connection.commit()
         return scene_id, None, None

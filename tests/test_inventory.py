@@ -25,7 +25,8 @@ from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             incoming_folder_status, incoming_folders_status,
                             read_inventory_progress, require_bulk_dismissal,
                             write_inventory_progress)
-from librarymanager_monitor import CompletedDownloadWorker, tracked_move
+from librarymanager_monitor import (CompletedDownloadWorker, relocate_companions_transactionally,
+                                    tracked_move)
 
 
 class InventoryTests(unittest.TestCase):
@@ -521,6 +522,65 @@ class InventoryTests(unittest.TestCase):
             scene_id, _, _ = claim_due_rename(database, 101.5)
             self.assertEqual(scene_id, "10")
             finish_queued_rename(database, scene_id, "skipped", "test")
+
+    def test_processing_rename_age_starts_when_claimed_not_when_enqueued(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            enqueue_rename(database, "10", 1.0, debounce_seconds=0)
+            scene_id, _, _ = claim_due_rename(database, 1000.0)
+            self.assertEqual(scene_id, "10")
+            scene_id, _, pending = claim_due_rename(database, 1001.0)
+            self.assertIsNone(scene_id)
+            self.assertEqual(pending, 0)
+            with librarymanager_core.connect(database) as connection:
+                row = connection.execute(
+                    "SELECT status,processing_started_at FROM rename_queue WHERE scene_id='10'"
+                ).fetchone()
+            self.assertEqual(row["status"], "processing")
+            self.assertEqual(row["processing_started_at"], 1000.0)
+
+    def test_external_companion_moves_roll_back_as_one_unit(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            old_folder, new_folder = root / "Old", root / "New"
+            old_folder.mkdir()
+            new_folder.mkdir()
+            source_video = old_folder / "Scene.mp4"
+            destination_video = new_folder / "Scene Renamed.mp4"
+            first = old_folder / "Scene.jpg"
+            second = old_folder / "Scene.srt"
+            first.write_text("image")
+            second.write_text("subtitle")
+            database = root / "inventory.sqlite3"
+            original_rename = Path.rename
+
+            def fail_second_forward(path_object, target):
+                if path_object == second and Path(target).parent == new_folder:
+                    raise OSError("simulated second companion failure")
+                return original_rename(path_object, target)
+
+            with patch.object(Path, "rename", autospec=True, side_effect=fail_second_forward):
+                with self.assertRaisesRegex(RuntimeError, "completed moves were restored"):
+                    relocate_companions_transactionally(database, str(source_video), str(destination_video))
+            self.assertTrue(first.exists())
+            self.assertTrue(second.exists())
+            self.assertFalse((new_folder / "Scene Renamed.jpg").exists())
+            self.assertFalse((new_folder / "Scene Renamed.srt").exists())
+
+    def test_external_companion_move_preflights_all_destinations(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            old_folder, new_folder = root / "Old", root / "New"
+            old_folder.mkdir()
+            new_folder.mkdir()
+            source_video = old_folder / "Scene.mp4"
+            destination_video = new_folder / "Renamed.mp4"
+            source_sidecar = old_folder / "Scene.srt"
+            source_sidecar.write_text("source")
+            (new_folder / "Renamed.srt").write_text("existing")
+            with self.assertRaises(FileExistsError):
+                relocate_companions_transactionally(root / "inventory.sqlite3", str(source_video), str(destination_video))
+            self.assertTrue(source_sidecar.exists())
 
     def test_filesystem_events_are_read_only_and_coalesced(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
