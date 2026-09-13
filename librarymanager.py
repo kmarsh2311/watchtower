@@ -281,6 +281,19 @@ def refresh_scene(stash, database_path, scene_id):
     refresh_scene_inventory(database_path, scene)
 
 
+def recover_local_rename_cache(stash, database_path, scene_id, result):
+    """Re-read Stash after a confirmed rename whose local cache update failed."""
+    if not result.get("action_performed") or result.get("local_cache_updated") is not False:
+        return result
+    try:
+        refresh_scene(stash, database_path, scene_id)
+        return {**result, "status": "renamed", "local_cache_updated": True,
+                "reason": "Stash confirmed the rename and Watchtower refreshed its local record"}
+    except Exception as recovery_error:
+        return {**result, "status": "renamed_with_warning", "local_cache_updated": False,
+                "reason": f"{result.get('reason', 'The local record needs refreshing')}; recovery failed: {recovery_error}"}
+
+
 def automatic_scene_allowed(config, scene_id):
     """A configured test scene acts as a hard scope lock for automatic hooks."""
     test_scene_id = str((config or {}).get("testSceneId") or "").strip()
@@ -708,6 +721,7 @@ def process_rename_queue(stash, database_path):
                         "destination_folder": folder, "destination_basename": basename}),
                     config,
                 )
+                result = recover_local_rename_cache(stash, database_path, scene_id, result)
                 finish_queued_rename(database_path, scene_id, result.get("status", "unknown"), result.get("reason", ""))
                 audit(database_path, "rename", "automatic rename", result.get("status", "unknown"),
                       scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
@@ -1360,6 +1374,7 @@ def main():
                 lambda file_id, folder, basename: stash.move_files({"ids": [file_id], "destination_folder": folder,
                                                                     "destination_basename": basename}),
             )
+            result = recover_local_rename_cache(stash, database_path, scene_id, result)
             audit(database_path, "rename", "manual filename correction", result.get("status", "unknown"),
                   scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
                   new_path=result.get("proposed_path"), detail=result.get("reason", ""))
@@ -1386,6 +1401,7 @@ def main():
                                                                     "destination_basename": basename}),
                 active_config,
             )
+            result = recover_local_rename_cache(stash, database_path, scene_id, result)
             audit(database_path, "rename", "test scene rename", result.get("status", "unknown"),
                   scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
                   new_path=result.get("proposed_path"), detail=result.get("reason", ""))

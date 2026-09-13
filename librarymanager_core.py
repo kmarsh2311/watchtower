@@ -362,6 +362,8 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
 def connect(database_path: Path) -> sqlite3.Connection:
     connection = sqlite3.connect(database_path, timeout=30)
     connection.row_factory = sqlite3.Row
+    # SQLite does not persist this per-connection setting.
+    connection.execute("PRAGMA foreign_keys=ON")
     _ensure_schema(connection, database_path)
     return connection
 
@@ -1530,7 +1532,7 @@ def _should_strip_metadata_from_title(filename_options: dict | None, row=None, t
                 pass
         if check_title:
             has_delimiters = bool(re.search(r"\s*-\s*", check_title) or re.search(r"\[.*?\]|\(.*?\)", check_title))
-            is_pairing = bool(re.search(r"(?i)(?:and|with|meets|vs|&)", check_title))
+            is_pairing = bool(re.search(r"(?i)(?:\b(?:and|with|meets|vs)\b|&)", check_title))
             if is_pairing and not has_delimiters:
                 return False
 
@@ -1897,6 +1899,7 @@ def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename
         if preview.get("status") != "ready":
             return preview
         moved_sidecars = []
+        video_renamed = False
         try:
             for item in preview["associated_files"]:
                 source, target = Path(item["source"]), Path(item["target"])
@@ -1909,8 +1912,10 @@ def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename
             result = move_file(preview["file_id"], str(current.parent), proposed.name)
             if result is False or result is None:
                 raise RuntimeError("Stash did not confirm the file rename")
-            connection = connect(database_path)
+            video_renamed = True
+            connection = None
             try:
+                connection = connect(database_path)
                 connection.execute(
                     "UPDATE filename_state SET last_generated_stem=?,updated_at=? WHERE file_id=?",
                     (proposed.stem, utc_now(), preview["file_id"]),
@@ -1925,8 +1930,16 @@ def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename
                         (str(target), utc_now(), str(source))
                     )
                 connection.commit()
+            except Exception as database_error:
+                if connection is not None:
+                    connection.rollback()
+                return {**preview, "status": "renamed_with_warning",
+                        "reason": f"Stash renamed the video, but Watchtower must refresh its local record: {database_error}",
+                        "renamed_sidecars": [{"source": str(source), "target": str(target)} for source, target in moved_sidecars],
+                        "action_performed": True, "local_cache_updated": False}
             finally:
-                connection.close()
+                if connection is not None:
+                    connection.close()
             # Sidecars are part of the same successful rename transaction, but make
             # them visible in Recent Activity as separate informational entries.
             # Logging is deliberately best-effort so a log write can never turn a
@@ -1949,12 +1962,13 @@ def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename
                     pass
             return {**preview, "status": "renamed", "reason": "Stash confirmed the rename",
                     "renamed_sidecars": [{"source": str(source), "target": str(target)} for source, target in moved_sidecars],
-                    "action_performed": True}
+                    "action_performed": True, "local_cache_updated": True}
         except Exception:
-            for source, target in reversed(moved_sidecars):
-                if target.exists() and not source.exists():
-                    expect_filesystem_move(database_path, str(target), str(source))
-                    target.rename(source)
+            if not video_renamed:
+                for source, target in reversed(moved_sidecars):
+                    if target.exists() and not source.exists():
+                        expect_filesystem_move(database_path, str(target), str(source))
+                        target.rename(source)
             raise
 
 
@@ -2016,6 +2030,7 @@ def apply_manual_filename(database_path: Path, scene_id: str, requested_name: st
         if preview.get("status") != "ready":
             return preview
         moved_sidecars = []
+        video_renamed = False
         try:
             for item in preview["associated_files"]:
                 source, target = Path(item["source"]), Path(item["target"])
@@ -2027,8 +2042,10 @@ def apply_manual_filename(database_path: Path, scene_id: str, requested_name: st
             result = move_file(preview["file_id"], str(current.parent), proposed.name)
             if result is False or result is None:
                 raise RuntimeError("Stash did not confirm the file rename")
-            connection = connect(database_path)
+            video_renamed = True
+            connection = None
             try:
+                connection = connect(database_path)
                 connection.execute("UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=? WHERE file_id=?",
                                    (str(proposed), proposed.name, utc_now(), preview["file_id"]))
                 connection.execute(
@@ -2042,8 +2059,16 @@ def apply_manual_filename(database_path: Path, scene_id: str, requested_name: st
                      json.dumps(preview.get("metadata_performers") or [], ensure_ascii=False), utc_now(), utc_now()),
                 )
                 connection.commit()
+            except Exception as database_error:
+                if connection is not None:
+                    connection.rollback()
+                return {**preview, "status": "renamed_with_warning",
+                        "reason": f"Stash renamed the video, but Watchtower must refresh its local record: {database_error}",
+                        "renamed_sidecars": [{"source": str(source), "target": str(target)} for source, target in moved_sidecars],
+                        "action_performed": True, "local_cache_updated": False}
             finally:
-                connection.close()
+                if connection is not None:
+                    connection.close()
             # Log successful companion-file renames separately so manual filename
             # corrections show their JPG/other sidecar updates in Recent Activity.
             # Keep this best-effort: logging must never undo a completed rename.
@@ -2065,12 +2090,13 @@ def apply_manual_filename(database_path: Path, scene_id: str, requested_name: st
                     pass
             return {**preview, "status": "renamed", "reason": "Stash confirmed the manual correction",
                     "renamed_sidecars": [{"source": str(source), "target": str(target)} for source, target in moved_sidecars],
-                    "action_performed": True}
+                    "action_performed": True, "local_cache_updated": True}
         except Exception:
-            for source, target in reversed(moved_sidecars):
-                if target.exists() and not source.exists():
-                    expect_filesystem_move(database_path, str(target), str(source))
-                    target.rename(source)
+            if not video_renamed:
+                for source, target in reversed(moved_sidecars):
+                    if target.exists() and not source.exists():
+                        expect_filesystem_move(database_path, str(target), str(source))
+                        target.rename(source)
             raise
 
 

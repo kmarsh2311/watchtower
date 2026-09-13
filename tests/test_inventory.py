@@ -3,7 +3,11 @@ import tempfile
 import time
 import unittest
 import os
+import json
 from pathlib import Path
+from unittest.mock import patch
+
+import librarymanager_core
 
 from librarymanager_core import (build_merge_preview, build_resolution_plan, inventory,
                                  opensubtitles_hash, preview_safe_filenames, preview_scene_filename,
@@ -15,6 +19,7 @@ from librarymanager_core import preview_manual_filename
 from librarymanager_core import consume_expected_move, expect_filesystem_move, resolve_filesystem_event
 from librarymanager_core import scene_naming_signature
 from librarymanager_core import _proposed_stem, incoming_summary
+from librarymanager_core import _should_strip_metadata_from_title
 from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             contact_sheet_scope_name, get_configured_incoming_folders,
                             incoming_folder_status, incoming_folders_status,
@@ -24,6 +29,23 @@ from librarymanager_monitor import CompletedDownloadWorker, tracked_move
 
 
 class InventoryTests(unittest.TestCase):
+    def test_every_database_connection_enables_foreign_keys(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            first = librarymanager_core.connect(database)
+            first.close()
+            second = librarymanager_core.connect(database)
+            try:
+                self.assertEqual(second.execute("PRAGMA foreign_keys").fetchone()[0], 1)
+            finally:
+                second.close()
+
+    def test_official_pairing_titles_are_detected_with_real_word_boundaries(self):
+        row = {"scene_metadata_json": json.dumps({"stash_ids": ["stashbox|123"]})}
+        self.assertFalse(_should_strip_metadata_from_title({}, row, "Jade and Xander"))
+        self.assertFalse(_should_strip_metadata_from_title({}, row, "Jade & Xander"))
+        self.assertTrue(_should_strip_metadata_from_title({}, row, "Jade-Xander [Studio]"))
+
     def test_contact_sheet_summary_names_all_configured_folders(self):
         self.assertEqual(
             contact_sheet_scope_name(["/library/Incoming", "/library/AirDrop"]),
@@ -737,6 +759,38 @@ class InventoryTests(unittest.TestCase):
             self.assertTrue((root / "Correct.mp4").exists())
             self.assertTrue((root / "Correct.jpg").exists())
 
+    def test_manual_rename_keeps_video_and_sidecar_together_when_cache_update_fails(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            video = root / "Wrong.mp4"
+            sidecar = root / "Wrong.srt"
+            video.write_bytes(b"video")
+            sidecar.write_text("subtitle")
+            database = root / "inventory.sqlite3"
+            inventory(database, [{"id": "10", "title": "", "studio": None, "performers": [],
+                                  "files": [{"id": "20", "path": str(video), "size": 5}]}])
+            original_connect = librarymanager_core.connect
+            video_renamed = False
+
+            def fake_move(_file_id, folder, basename):
+                nonlocal video_renamed
+                video.rename(Path(folder) / basename)
+                video_renamed = True
+                return True
+
+            def fail_after_stash_rename(path):
+                if video_renamed:
+                    raise sqlite3.OperationalError("simulated cache failure")
+                return original_connect(path)
+
+            with patch.object(librarymanager_core, "connect", side_effect=fail_after_stash_rename):
+                result = apply_manual_filename(database, "10", "Correct.mp4", fake_move)
+            self.assertEqual(result["status"], "renamed_with_warning")
+            self.assertFalse(result["local_cache_updated"])
+            self.assertTrue((root / "Correct.mp4").exists())
+            self.assertTrue((root / "Correct.srt").exists())
+            self.assertFalse(sidecar.exists())
+
     def test_manual_correction_remembers_and_removes_later_unassigned_performer(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -831,6 +885,38 @@ class InventoryTests(unittest.TestCase):
             self.assertTrue(result["action_performed"])
             self.assertTrue((root / "Original - Studio.mp4").exists())
             self.assertTrue((root / "Original - Studio.srt").exists())
+
+    def test_automatic_rename_keeps_sidecar_with_video_when_cache_update_fails(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            video = root / "Original.mp4"
+            sidecar = root / "Original.srt"
+            video.write_bytes(b"video")
+            sidecar.write_text("subtitle")
+            database = root / "inventory.sqlite3"
+            inventory(database, [{"id": "10", "title": "", "studio": {"name": "Studio"}, "performers": [],
+                                  "files": [{"id": "20", "path": str(video), "size": 5}]}])
+            preview_safe_filenames(database)
+            original_connect = librarymanager_core.connect
+            video_renamed = False
+
+            def fake_move(_file_id, folder, basename):
+                nonlocal video_renamed
+                video.rename(Path(folder) / basename)
+                video_renamed = True
+                return True
+
+            def fail_after_stash_rename(path):
+                if video_renamed:
+                    raise sqlite3.OperationalError("simulated cache failure")
+                return original_connect(path)
+
+            with patch.object(librarymanager_core, "connect", side_effect=fail_after_stash_rename):
+                result = apply_scene_filename(database, "10", fake_move)
+            self.assertEqual(result["status"], "renamed_with_warning")
+            self.assertTrue((root / "Original - Studio.mp4").exists())
+            self.assertTrue((root / "Original - Studio.srt").exists())
+            self.assertFalse(sidecar.exists())
 
     def test_single_scene_apply_moves_both_image_companion_styles(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
