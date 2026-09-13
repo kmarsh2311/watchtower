@@ -1,7 +1,9 @@
+import base64
 import json
 import os
 import shutil
 import subprocess
+import stat
 import sys
 import tempfile
 import unittest
@@ -51,6 +53,7 @@ class CrossPlatformSimulationTests(unittest.TestCase):
                 runtime_data = json.loads(runtime_file.read_text(encoding="utf-8"))
                 self.assertEqual(runtime_data["server_connection"]["ApiKey"], "test-key")
                 self.assertEqual(runtime_data["database"], str(fake_db))
+                self.assertEqual(stat.S_IMODE(runtime_file.stat().st_mode), 0o600)
 
                 # 5. Disable startup
                 off_status = librarymanager.configure_system_startup(False, server_conn, fake_db)
@@ -87,6 +90,8 @@ class CrossPlatformSimulationTests(unittest.TestCase):
                 self.assertIn("Name=Watchtower Stash Monitor", desktop_text)
                 self.assertIn("librarymanager_startup.py", desktop_text)
                 self.assertIn("X-GNOME-Autostart-enabled=true", desktop_text)
+                runtime_file = Path(librarymanager.__file__).with_name("startup-runtime.json")
+                self.assertEqual(stat.S_IMODE(runtime_file.stat().st_mode), 0o600)
 
                 # 4. Disable startup
                 off_status = librarymanager.configure_system_startup(False, server_conn, fake_db)
@@ -99,7 +104,7 @@ class CrossPlatformSimulationTests(unittest.TestCase):
 
             # Test notification with double quotes, special characters, and emojis
             test_title = 'Stash "Library" Manager'
-            test_message = 'Scene "Super Title: 100% & More" was renamed!'
+            test_message = 'Scene "$(Write-Output unsafe)" was renamed!'
 
             librarymanager.send_system_notification(test_title, test_message)
 
@@ -108,8 +113,11 @@ class CrossPlatformSimulationTests(unittest.TestCase):
             self.assertEqual(args[0], "powershell")
             ps_command = args[4]
             self.assertIn("Windows.UI.Notifications.ToastNotificationManager", ps_command)
-            self.assertIn('Stash `"Library`" Manager', ps_command)
-            self.assertIn('Scene `"Super Title: 100% & More`" was renamed!', ps_command)
+            self.assertNotIn(test_title, ps_command)
+            self.assertNotIn(test_message, ps_command)
+            self.assertIn(base64.b64encode(test_title.encode("utf-8")).decode("ascii"), ps_command)
+            self.assertIn(base64.b64encode(test_message.encode("utf-8")).decode("ascii"), ps_command)
+            self.assertIn("FromBase64String", ps_command)
 
     def test_linux_notification_via_notify_send(self):
         with patch.object(sys, "platform", "linux"),              patch("librarymanager_monitor.shutil.which", return_value="/usr/bin/notify-send"), patch("librarymanager_monitor.subprocess.run") as mock_run:
@@ -129,9 +137,13 @@ class CrossPlatformSimulationTests(unittest.TestCase):
         # 1. On Windows
         with patch.object(sys, "platform", "win32"), patch("librarymanager_monitor.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
-            librarymanager_monitor.notify(True, "New video added: test.mp4")
+            unsafe_message = "New video added: $(Write-Output unsafe).mp4"
+            librarymanager_monitor.notify(True, unsafe_message)
             self.assertTrue(mock_run.called)
             self.assertEqual(mock_run.call_args[0][0][0], "powershell")
+            ps_command = mock_run.call_args[0][0][4]
+            self.assertNotIn(unsafe_message, ps_command)
+            self.assertIn(base64.b64encode(unsafe_message.encode("utf-8")).decode("ascii"), ps_command)
 
         # 2. On Linux with notify-send
         with patch.object(sys, "platform", "linux"),              patch("librarymanager_monitor.shutil.which", return_value="/usr/bin/notify-send"), patch("librarymanager_monitor.subprocess.run") as mock_run:

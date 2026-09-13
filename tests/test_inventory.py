@@ -15,11 +15,47 @@ from librarymanager_core import preview_manual_filename
 from librarymanager_core import consume_expected_move, expect_filesystem_move, resolve_filesystem_event
 from librarymanager_core import scene_naming_signature
 from librarymanager_core import _proposed_stem, incoming_summary
-from librarymanager import automatic_scene_allowed, incoming_folder_status, incoming_folders_status, get_configured_incoming_folders
+from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
+                            contact_sheet_scope_name, get_configured_incoming_folders,
+                            incoming_folder_status, incoming_folders_status,
+                            require_bulk_dismissal)
 from librarymanager_monitor import CompletedDownloadWorker, tracked_move
 
 
 class InventoryTests(unittest.TestCase):
+    def test_contact_sheet_summary_names_all_configured_folders(self):
+        self.assertEqual(
+            contact_sheet_scope_name(["/library/Incoming", "/library/AirDrop"]),
+            "Incoming, AirDrop",
+        )
+
+    def test_scene_removal_refuses_when_another_scene_file_exists(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            deleted = root / "deleted.mp4"
+            remaining = root / "remaining.mp4"
+            remaining.write_bytes(b"video")
+            scene = {"files": [{"path": str(deleted)}, {"path": str(remaining)}]}
+            with self.assertRaisesRegex(ValueError, "another video file"):
+                assert_scene_removal_safe(scene, str(deleted))
+
+    def test_scene_removal_allows_only_missing_files(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            deleted = root / "deleted.mp4"
+            other_missing = root / "also-missing.mp4"
+            scene = {"files": [{"path": str(deleted)}, {"path": str(other_missing)}]}
+            assert_scene_removal_safe(scene, str(deleted))
+
+    def test_scene_removal_refuses_when_scene_files_cannot_be_verified(self):
+        with self.assertRaisesRegex(ValueError, "could not verify"):
+            assert_scene_removal_safe({"id": "10"}, "/missing/video.mp4")
+
+    def test_bulk_review_is_explicitly_dismissal_only(self):
+        require_bulk_dismissal("dismiss")
+        with self.assertRaisesRegex(ValueError, "one item at a time"):
+            require_bulk_dismissal("remove_stash_scene")
+
     def test_completed_download_waits_then_runs_one_targeted_scan(self):
         class FakeStash:
             def __init__(self, path):

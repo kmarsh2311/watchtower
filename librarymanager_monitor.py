@@ -2,6 +2,7 @@
 """Background filesystem watcher for Stash Library Manager."""
 
 import argparse
+import base64
 import logging
 import json
 import os
@@ -148,13 +149,14 @@ def notify(enabled, message):
                             "-e", "end run", "--", str(message), "Stash Library Manager"],
                            capture_output=True, text=True, timeout=10, check=False)
         elif sys.platform == "win32":
-            msg_esc = str(message).replace('"', '`"')
+            message_b64 = base64.b64encode(str(message).encode("utf-8")).decode("ascii")
             ps_cmd = (
                 f'[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; '
+                f'$message = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{message_b64}")); '
                 f'$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); '
                 f'$textNodes = $template.GetElementsByTagName("text"); '
                 f'$textNodes.Item(0).AppendChild($template.CreateTextNode("Stash Library Manager")) > $null; '
-                f'$textNodes.Item(1).AppendChild($template.CreateTextNode("{msg_esc}")) > $null; '
+                f'$textNodes.Item(1).AppendChild($template.CreateTextNode($message)) > $null; '
                 f'$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Stash Library Manager"); '
                 f'$notification = [Windows.UI.Notifications.ToastNotification]::new($template); '
                 f'$notifier.Show($notification)'

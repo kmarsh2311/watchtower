@@ -102,7 +102,7 @@ Instead of waiting for slow manual library sweeps or worrying if external file m
 
 Watchtower is engineered to guarantee that your media collection is never damaged:
 * **Safe Defaults:** All initial scans, inventory runs, and filename previews are strictly 100% read-only.
-* **Isolated SQLite Database:** Watchtower maintains its own WAL-mode database (`watchtower.db`) and never modifies Stash's internal SQLite database directly.
+* **Isolated SQLite Database:** Watchtower maintains its own WAL-mode database (`librarymanager.sqlite3`) and never modifies Stash's internal SQLite database directly.
 * **Stash Native Operations:** All primary file moves and renames are executed through Stash's native `moveFiles` GraphQL API, keeping Stash's internal path indices valid.
 * **Symlink Safe:** Path containment checks resolve symlinks before testing folder boundaries, preventing accidental out-of-bounds operations.
 

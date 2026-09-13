@@ -5,7 +5,7 @@
 # 🗼 Watchtower for Stash
 ### The 24/7 Real-Time Filesystem Watcher, Automated Ingest Pipeline & Media Inventory Guardian for Stash
 
-[![Version](https://img.shields.io/badge/version-1.0.0-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases)
+[![Version](https://img.shields.io/badge/version-1.0.1-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases)
 [![Stash](https://img.shields.io/badge/Stash-v0.26+-ff0055?style=for-the-badge)](https://github.com/stashapp/stash)
 [![Python](https://img.shields.io/badge/Python-3.10+-39ff64?style=for-the-badge)](https://python.org)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
@@ -125,7 +125,7 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 ## 🚀 Quick Start Guide
 
 1. **Guided Onboarding:** Click the **📚** icon in the Stash navigation bar to launch the 6-step setup wizard.
-2. **Build Baseline Index:** In Step 4, click **⚡ Build Initial Inventory Now** to map your scenes into `watchtower.db`.
+2. **Build Baseline Index:** In Step 4, click **⚡ Build Initial Inventory Now** to map your scenes into `librarymanager.sqlite3`.
 3. **Configure Watched Folders:** Add your incoming download folder (e.g. `/Volumes/Media/Incoming`) to enable automated ingest.
 4. **Enable 24/7 Monitoring:** Turn on **Start Monitoring with OS** to keep your library guarded 24/7.
 5. **Tune Filename Rules:** Choose your preferred naming format and separators in the **Filename Management** tab.
@@ -151,7 +151,7 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 
 Watchtower is engineered to guarantee that your media collection is never damaged:
 * **Safe Defaults:** All initial scans, inventory runs, and filename previews are strictly 100% read-only.
-* **Isolated SQLite Database:** Watchtower maintains its own WAL-mode database (`watchtower.db`) and never modifies Stash's internal SQLite database directly.
+* **Isolated SQLite Database:** Watchtower maintains its own WAL-mode database (`librarymanager.sqlite3`) and never modifies Stash's internal SQLite database directly.
 * **Stash Native Operations:** All primary file moves and renames are executed through Stash's native `moveFiles` GraphQL API, keeping Stash's internal path indices valid.
 * **Symlink Safe:** Path containment checks resolve symlinks before testing folder boundaries, preventing accidental out-of-bounds operations.
 

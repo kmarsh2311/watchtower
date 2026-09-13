@@ -447,7 +447,7 @@
   }
 
 
-  function OnboardingBanner({ onStart, onDismiss }) {
+  function OnboardingBanner({ onStart }) {
     return React.createElement("div", { className: "lm-onboarding-banner" },
       React.createElement("div", { className: "lm-onboarding-banner-icon-wrap" },
         React.createElement("img", {
@@ -466,12 +466,7 @@
           className: "btn btn-primary lm-onboarding-start-btn",
           onClick: onStart
         }, "🚀 Start Guided Setup (3 mins)"),
-        React.createElement("button", {
-          type: "button",
-          className: "btn btn-secondary lm-onboarding-dismiss-btn",
-          onClick: onDismiss,
-          title: "Dismiss for this session"
-        }, "✕ Dismiss")
+        React.createElement("span", { className: "lm-onboarding-required" }, "Required before Watchtower can operate")
       )
     );
   }
@@ -538,7 +533,14 @@
 
     const libraryRoots = data?.library_roots || [];
     const inventory = data?.inventory || {};
-    const totalScenes = inventory?.total_scenes || 0;
+    const totalScenes = inventory?.stash_scene_count ?? inventory?.total_scenes ?? 0;
+    const totalFiles = inventory?.stash_file_count ?? inventory?.total_files ?? 0;
+    const availableRoots = libraryRoots.filter(root => {
+      const path = typeof root === "string" ? root : root?.path;
+      return Boolean(path) && (typeof root === "string" || root.exists === true);
+    });
+    const inventoryComplete = inventory?.status === "complete" && Boolean(inventory?.completed_at);
+    const setupReady = availableRoots.length > 0 && inventoryComplete;
 
     // Incoming multi-folder handling in wizard
     const rawFolders = Array.isArray(config.incomingFolders)
@@ -554,7 +556,7 @@
     };
 
     const handleCloseGracefully = (targetTab = null) => {
-      if (isExiting) return;
+      if (isExiting || indexing) return;
       setIsExiting(true);
       window.setTimeout(() => {
         onHide();
@@ -603,6 +605,11 @@
     };
 
     const handleFinish = (targetTab = "overview") => {
+      if (!setupReady) {
+        setIndexError("Complete the initial inventory and make sure at least one Stash library folder is online before finishing setup.");
+        goToStep(4);
+        return;
+      }
       handleCloseGracefully(targetTab);
       updateSetting("onboardingCompleted", true).catch(() => {});
       window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
@@ -643,7 +650,7 @@
         icon: "📥",
         title: "Watched Download Folders",
         short: "Safely imports finished videos from your download folders.",
-        details: "Monitors temporary or completed download staging areas. Once a download finishes writing and settles, it is moved safely into your Stash collection.",
+        details: "Monitors temporary or completed download staging areas. Once a download finishes writing and settles, Watchtower asks Stash to scan and add it from its existing folder.",
         side: "right"
       },
       {
@@ -667,7 +674,12 @@
       className: `lm-wizard-backdrop ${isExiting ? "lm-exiting" : ""}`,
       onWheel: (e) => { if (e.target === e.currentTarget) e.preventDefault(); }
     },
-      React.createElement("div", { className: `lm-wizard-dialog ${isExiting ? "lm-exiting" : ""}` },
+      React.createElement("div", {
+        className: `lm-wizard-dialog ${isExiting ? "lm-exiting" : ""}`,
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "lm-wizard-title"
+      },
         React.createElement("header", { className: "lm-wizard-header" },
           React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "10px" } },
             React.createElement("img", {
@@ -678,14 +690,16 @@
             React.createElement("div", null,
               React.createElement("span", { className: "lm-wizard-badge" },
                 step === 0 ? "WELCOME" : step === 7 ? "COMPLETE" : `STEP ${step} OF 6`),
-              React.createElement("h2", null, "Watchtower Guided Setup")
+              React.createElement("h2", { id: "lm-wizard-title" }, "Watchtower Guided Setup")
             )
           ),
           React.createElement("button", {
             type: "button",
             className: "lm-wizard-close-btn",
+            disabled: indexing,
+            "aria-disabled": indexing ? "true" : undefined,
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleCloseGracefully(); },
-            title: "Close Setup Wizard"
+            title: indexing ? "Please wait while Watchtower indexes your library" : "Close Setup Wizard"
           }, "✕")
         ),
         step > 0 && step < 7 && React.createElement("div", { className: "lm-wizard-stepper" },
@@ -695,8 +709,8 @@
             return React.createElement("div", {
               key: s.num,
               className: `lm-wizard-step-item ${isCurrent ? "current" : ""} ${isDone ? "done" : ""}`,
-              onClick: () => { if (s.num < step) goToStep(s.num); },
-              style: { cursor: s.num < step ? "pointer" : "default" }
+              onClick: () => { if (!indexing && s.num < step) goToStep(s.num); },
+              style: { cursor: !indexing && s.num < step ? "pointer" : "default" }
             },
               React.createElement("div", { className: "lm-wizard-step-circle" }, isDone ? "✓" : s.num),
               React.createElement("span", { className: "lm-wizard-step-label" }, s.label)
@@ -802,7 +816,7 @@
           step === 3 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
             React.createElement("h3", null, "3. Watched Download Folders"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "Watch up to 5 incoming download folders. When downloaded videos finish saving, Watchtower automatically moves them into your Stash collection."),
+              "Watch up to 5 incoming download folders. When downloaded videos finish saving, Watchtower asks Stash to scan and add them from those folders."),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
               React.createElement("strong", null, `Watched Folders (${incomingFoldersList.length}/5)`),
               incomingFoldersList.length < 5 && React.createElement("button", {
@@ -868,19 +882,19 @@
               })
             ),
             React.createElement("div", { className: "lm-wizard-callout" },
-              "💡 Incoming files are automatically moved to your primary Stash library root once download writes are completed.")
+              "💡 Completed videos stay in their incoming folders. Watchtower asks Stash to scan and add them there.")
           ),
           step === 4 && React.createElement("div", { className: `lm-wizard-pane lm-pane-${stepDirection}` },
             React.createElement("h3", null, "4. Index Library Database"),
             React.createElement("p", { className: "lm-wizard-desc" },
-              "Watchtower indexes all scenes and hashes into its local SQLite database (watchtower.db) for instant collision protection and fast diagnostics. This single scan completes everything needed to initialize your library."),
+              "Watchtower records Stash scenes, file paths and available fingerprints in its local librarymanager.sqlite3 database for collision protection and diagnostics. This scan creates the baseline needed to initialize your library."),
             React.createElement("div", { className: "lm-wizard-index-box" },
               totalScenes > 0
                 ? React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "6px", width: "100%" } },
                     React.createElement("div", { style: { fontSize: "2.4rem", color: "#39ff64", lineHeight: 1 } }, "✓"),
                     React.createElement("strong", { style: { fontSize: "1.1rem", color: "#ffffff" } }, `Database Indexed: ${totalScenes.toLocaleString()} Scenes Found`),
                     React.createElement("p", { style: { margin: "2px 0 16px 0", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem", maxWidth: "440px" } },
-                      `Total files mapped: ${inventory.total_files?.toLocaleString() || 0}. Last scanned: ${inventory.last_scanned_at || "recently"}.`)
+                      `Total files mapped: ${Number(totalFiles).toLocaleString()}. Last scanned: ${inventory.completed_at || "recently"}.`)
                   )
                 : React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: "6px", width: "100%" } },
                     React.createElement("div", { style: { fontSize: "2.4rem", color: "#ffb52e", lineHeight: 1 } }, "⚡"),
@@ -895,12 +909,16 @@
                   style: { padding: "0.6rem 1.6rem", fontSize: "0.95rem", fontWeight: 700 },
                   disabled: indexing,
                   onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleRunIndex(); }
-                }, indexing ? "⚡ Indexing Collection…" : (totalScenes > 0 ? "🔄 Re-Index Database" : "⚡ Build Initial Inventory Now")),
-                indexing && React.createElement("span", { style: { color: "#39ff64", fontSize: "0.88rem", marginTop: "4px" } }, "Scanning Stash scenes into SQLite…")
+                }, indexing ? "⚡ Indexing Collection…" : (indexError ? "↻ Try Again" : (totalScenes > 0 ? "🔄 Re-Index Database" : "⚡ Build Initial Inventory Now"))),
+                indexing && React.createElement("span", {
+                  role: "status",
+                  "aria-live": "polite",
+                  style: { color: "#39ff64", fontSize: "0.88rem", marginTop: "4px" }
+                }, "Indexing your library… Please keep this setup window open. This may take a few minutes.")
               ),
               indexResult && React.createElement("div", { className: "lm-wizard-index-result", style: { marginTop: "16px", maxWidth: "480px" } },
                 React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ Indexing Complete: "),
-                `Inventoried ${indexResult.scenes || 0} scenes and ${indexResult.files || 0} files into watchtower.db.`
+                `Inventoried ${indexResult.scenes || 0} scenes and ${indexResult.files || 0} files into librarymanager.sqlite3.`
               ),
               indexError && React.createElement("div", { className: "lm-message error", style: { marginTop: "14px", maxWidth: "480px" } }, indexError)
             )
@@ -996,7 +1014,11 @@
             React.createElement("div", { style: { fontSize: "3.5rem", marginBottom: "0.4rem" } }, "🎉"),
             React.createElement("h3", { style: { fontSize: "1.45rem", color: "#39ff64" } }, "You're All Set!"),
             React.createElement("p", { className: "lm-wizard-desc", style: { maxWidth: "520px", margin: "0.4rem auto 1.4rem" } },
-              "Watchtower is configured, your baseline database is indexed, and collision safeguards are active. You can explore settings or check the manual anytime."),
+              setupReady
+                ? `Required setup is complete. Automatic renaming is ${config.automaticRenaming === true ? "on" : "off"}, and automatic contact sheets are ${config.generateContactSheets === true ? "on" : "off"}.`
+                : "Setup is not complete yet. An online Stash library folder and a completed initial inventory are required."),
+            !setupReady && React.createElement("div", { className: "lm-message error" },
+              "Return to Index Database and complete the initial inventory before finishing."),
             React.createElement("div", { style: { display: "flex", justifyContent: "center" } },
               React.createElement("button", {
                 type: "button",
@@ -1016,17 +1038,24 @@
           step > 0 && step < 7 && React.createElement("button", {
             type: "button",
             className: "btn btn-secondary",
+            disabled: indexing,
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(step - 1); }
           }, step === 1 ? "⬅ Back to Welcome" : "⬅ Back"),
           step > 0 && step < 7 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
+            disabled: indexing || (step === 4 && !inventoryComplete),
+            title: step === 4 && !inventoryComplete
+              ? (indexing ? "Watchtower is indexing your library" : "Build the initial inventory before continuing")
+              : undefined,
             style: { marginLeft: "auto" },
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(step + 1); }
           }, step === 6 ? "Review & Complete ➔" : "Next ➔"),
           step === 7 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
+            disabled: !setupReady,
+            title: setupReady ? "Complete setup" : "Complete the initial inventory first",
             style: { marginLeft: "auto", background: "#218657", borderColor: "#2da76f", fontWeight: 700 },
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleFinish("overview"); }
           }, "🚀 Finish & Go to Overview")
@@ -1044,7 +1073,7 @@
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
     const [showOnboardingWizard, setShowOnboardingWizard] = React.useState(false);
-    const [onboardingBannerDismissed, setOnboardingBannerDismissed] = React.useState(false);
+    const onboardingClosedForSession = React.useRef(false);
     const [config, setConfig] = React.useState({});
     const [busy, setBusy] = React.useState("");
     const [notice, setNotice] = React.useState("");
@@ -1099,7 +1128,7 @@
         const [raw, settings] = await Promise.all([operation("dashboard", { limit: 250 }), getConfig()]);
         const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
         setData({ ...payload, _liveReceivedAt: Date.now() }); setConfig(settings);
-        if (settings.onboardingCompleted !== true) {
+        if (settings.onboardingCompleted !== true && !onboardingClosedForSession.current) {
           setShowOnboardingWizard(true);
         }
         window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
@@ -1325,13 +1354,13 @@
       finally { setBusy(""); }
     }
 
-    async function resolveAllPendingEvents(resolution = "dismiss") {
+    async function resolveAllPendingEvents() {
       const count = monitor.pending_events || data?.pending_events?.length || 0;
       if (!count) return;
       if (!window.confirm(`Dismiss all ${count} pending filesystem change${count === 1 ? "" : "s"}?\n\nThis marks them as reviewed with no further action taken.`)) return;
       setBusy("review:all"); setError("");
       try {
-        await operation("resolve_all_filesystem_events", { resolution });
+        await operation("resolve_all_filesystem_events", { resolution: "dismiss" });
         setData(prev => prev ? { ...prev, pending_events: [], monitor: { ...prev.monitor, pending_events: 0 } } : prev);
         await refresh();
       } catch (reviewError) {
@@ -2927,7 +2956,7 @@
             React.createElement("ul", { key: "ul1" },
               React.createElement("li", null, React.createElement("strong", null, "Test Scene ID: "), "Enter a single numeric scene ID. While populated, Automatic Renaming is strictly restricted to this scene ID only, protecting the rest of your library."),
               React.createElement("li", null, React.createElement("strong", null, "Preview Test Rename: "), "Preflights the test scene and displays a modal showing Current vs Proposed filename, status, and associated companion sidecars without changing files."),
-              React.createElement("li", null, React.createElement("strong", null, "Apply Configured Test Rename: "), "Executes the rename on disk ONLY for the configured Test Scene ID. Protected by an \"Allow One Test Rename\" confirmation checkbox.")
+              React.createElement("li", null, React.createElement("strong", null, "Apply Configured Test Rename: "), "Executes the rename on disk only for the configured Test Scene ID after a confirmation prompt.")
             ),
             React.createElement("h3", { key: "h3_2" }, "Every Diagnostic Button Explained"),
             React.createElement("ul", { key: "ul2" },
@@ -3045,13 +3074,18 @@
           })
         ))),
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
-      (data !== null && !onboardingBannerDismissed && config?.onboardingCompleted !== true) ? React.createElement(OnboardingBanner, {
-        onStart: () => setShowOnboardingWizard(true),
-        onDismiss: () => setOnboardingBannerDismissed(true)
+      (data !== null && config?.onboardingCompleted !== true) ? React.createElement(OnboardingBanner, {
+        onStart: () => {
+          onboardingClosedForSession.current = false;
+          setShowOnboardingWizard(true);
+        }
       }) : null,
       React.createElement(OnboardingWizardModal, {
         show: showOnboardingWizard,
-        onHide: () => setShowOnboardingWizard(false),
+        onHide: () => {
+          onboardingClosedForSession.current = true;
+          setShowOnboardingWizard(false);
+        },
         data,
         config,
         updateSetting,
@@ -3309,7 +3343,7 @@
   }
 
   window.StashLibraryManager = Object.freeze({
-    version: "1.0.0",
+    version: "1.0.1",
     openFilenameCorrection(sceneId) {
       const normalized = String(sceneId || "").trim();
       if (!/^\d+$/.test(normalized)) throw new Error("Library Manager requires a valid Scene ID");

@@ -1,6 +1,6 @@
 name: Watchtower
 description: Safely inventories Stash scene files and reports filesystem differences.
-version: 1.0.0
+version: 1.0.1
 ui:
   javascript:
     - librarymanager.js
@@ -86,8 +86,8 @@ settings:
     description: Ensure monitoring is running when the Stash web interface loads. Recommended.
     type: BOOLEAN
   startAtLogin:
-    displayName: Start Monitoring with macOS
-    description: Start the background watcher at login and retry once a minute until Stash is available.
+    displayName: Start Monitoring at Login
+    description: Start the background watcher when you sign in on macOS, Windows or Linux, and retry once a minute until Stash is available.
     type: BOOLEAN
   automaticMoveReconciliation:
     displayName: Reconcile Verified External Moves
@@ -95,11 +95,11 @@ settings:
     type: BOOLEAN
   automaticIncomingScan:
     displayName: Automatically Add Completed Videos
-    description: Watch one chosen incoming folder and ask Stash to add a new video after it has completely finished downloading.
+    description: Watch your chosen incoming folders and ask Stash to add each new video after it has completely finished downloading.
     type: BOOLEAN
   incomingFolder:
-    displayName: Incoming Folder
-    description: One folder inside your Stash library where new downloads arrive before you organise them.
+    displayName: Incoming Folders
+    description: Up to five folders inside your Stash libraries where new downloads arrive before you organise them.
     type: STRING
   incomingSettleMinutes:
     displayName: Wait Before Adding a Video
@@ -163,7 +163,7 @@ tasks:
     defaultArgs:
       mode: preview_test_rename
   - name: Apply Configured Test Rename
-    description: Rename only Test Scene ID after Allow One Test Rename is enabled. Uses Stash's native file operation.
+    description: Rename only the configured Test Scene ID after confirmation. Uses Stash's native file operation.
     defaultArgs:
       mode: apply_test_rename
   - name: Process Rename Queue
@@ -171,7 +171,7 @@ tasks:
     defaultArgs:
       mode: process_rename_queue
   - name: Start Read-Only Filesystem Monitor
-    description: Start background monitoring of configured Stash library roots. Events are recorded only.
+    description: Start background monitoring. Depending on your settings, Watchtower can record changes, reconnect verified moves, add completed downloads and generate contact sheets.
     defaultArgs:
       mode: start_monitor
   - name: Stop Filesystem Monitor

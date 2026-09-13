@@ -479,9 +479,16 @@
 }
 
 .lm-terminal-stream-name {
+  display: -webkit-box;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.35;
+  max-height: 2.7em;
   font-size: .84rem;
 }
 
@@ -2084,6 +2091,18 @@ a.lm-activity-scene-pill:hover {
 .lm-onboarding-dismiss-btn:hover {
   background: rgba(255, 255, 255, 0.15);
   color: #ffffff;
+}
+.lm-onboarding-required {
+  display: inline-flex;
+  align-items: center;
+  padding: .35rem .65rem;
+  border: 1px solid rgba(255, 181, 46, .45);
+  border-radius: .35rem;
+  background: rgba(255, 181, 46, .1);
+  color: #ffcf66;
+  font-size: .78rem;
+  font-weight: 700;
+  text-align: center;
 }
 
 /* Onboarding Wizard Modal Overlay & Graceful Luminous Animations */

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Stash entry point for the read-only Library Manager inventory."""
 
+import base64
 import json
 import csv
 import logging
@@ -118,14 +119,16 @@ def send_system_notification(title, message):
             if result.returncode:
                 activity_logger().debug("osascript notification returned %s: %s", result.returncode, result.stderr)
         elif sys.platform == "win32":
-            title_esc = str(title).replace('"', '`"')
-            msg_esc = str(message).replace('"', '`"')
+            title_b64 = base64.b64encode(str(title).encode("utf-8")).decode("ascii")
+            message_b64 = base64.b64encode(str(message).encode("utf-8")).decode("ascii")
             ps_cmd = (
                 f'[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; '
+                f'$title = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{title_b64}")); '
+                f'$message = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{message_b64}")); '
                 f'$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); '
                 f'$textNodes = $template.GetElementsByTagName("text"); '
-                f'$textNodes.Item(0).AppendChild($template.CreateTextNode("{title_esc}")) > $null; '
-                f'$textNodes.Item(1).AppendChild($template.CreateTextNode("{msg_esc}")) > $null; '
+                f'$textNodes.Item(0).AppendChild($template.CreateTextNode($title)) > $null; '
+                f'$textNodes.Item(1).AppendChild($template.CreateTextNode($message)) > $null; '
                 f'$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Stash Library Manager"); '
                 f'$notification = [Windows.UI.Notifications.ToastNotification]::new($template); '
                 f'$notifier.Show($notification)'
@@ -148,6 +151,34 @@ def maybe_notify(config, message, *, success=False):
     if success and not (config or {}).get("notifySuccessfulRenames"):
         return
     send_system_notification("Stash Library Manager", message)
+
+
+def contact_sheet_scope_name(configured_folders):
+    """Return a concise label for one or more configured incoming folders."""
+    return ", ".join(Path(path).name or str(path) for path in configured_folders)
+
+
+def assert_scene_removal_safe(scene, deleted_path):
+    """Refuse to remove a scene while another one of its video files still exists."""
+    scene_files = scene.get("files") if isinstance(scene, dict) else None
+    if scene_files is None:
+        raise ValueError("Watchtower could not verify this scene's current files, so it was not removed")
+    normalized_deleted_path = os.path.normcase(os.path.realpath(deleted_path))
+    for scene_file in scene_files:
+        scene_path = str((scene_file or {}).get("path") or "")
+        if not scene_path:
+            continue
+        normalized_scene_path = os.path.normcase(os.path.realpath(scene_path))
+        if normalized_scene_path != normalized_deleted_path and Path(scene_path).is_file():
+            raise ValueError(
+                "This scene still has another video file on disk, so Watchtower will not remove the scene"
+            )
+
+
+def require_bulk_dismissal(resolution):
+    """Bulk review is acknowledgement-only; corrective actions require per-item checks."""
+    if str(resolution or "dismiss") != "dismiss":
+        raise ValueError("Bulk review can only dismiss changes; resolve corrective actions one item at a time")
 
 
 def dashboard_reports():
@@ -356,6 +387,7 @@ def configure_system_startup(enabled, server_connection, database_path):
         runner_path.parent.mkdir(parents=True, exist_ok=True)
         runtime_path.write_text(json.dumps({"server_connection": server_connection or {},
                                             "database": str(database_path)}), encoding="utf-8")
+        runtime_path.chmod(0o600)
         py_exec = sys.executable
         if py_exec.lower().endswith("python.exe"):
             pyw_exec = py_exec[:-10] + "pythonw.exe"
@@ -375,6 +407,7 @@ def configure_system_startup(enabled, server_connection, database_path):
         runner_path.parent.mkdir(parents=True, exist_ok=True)
         runtime_path.write_text(json.dumps({"server_connection": server_connection or {},
                                             "database": str(database_path)}), encoding="utf-8")
+        runtime_path.chmod(0o600)
         script_path = str(Path(__file__).with_name("librarymanager_startup.py"))
         desktop_entry = "\n".join([
             "[Desktop Entry]",
@@ -828,8 +861,9 @@ def main():
                 elif res.get("status") == "error":
                     errors.append(f"{vid.name}: {res.get('error')}")
             err_str = f" Errors: {', '.join(errors)}" if errors else ""
+            scope_name = contact_sheet_scope_name(configured_folders)
             message = (
-                f"Generated {generated_count} contact sheet(s) in {incoming_path.name}. "
+                f"Generated {generated_count} contact sheet(s) in {scope_name}. "
                 f"{skipped_count} already had artwork.{err_str}"
             )
     elif mode in ("inventory", "build_inventory"):
@@ -1117,6 +1151,7 @@ def main():
     elif mode == "resolve_all_filesystem_events":
         arguments = plugin_input.get("args") or {}
         resolution = str(arguments.get("resolution") or "dismiss")
+        require_bulk_dismissal(resolution)
         connection = connect(database_path)
         try:
             cursor = connection.cursor()
@@ -1161,6 +1196,7 @@ def main():
                 raise ValueError("Watchtower cannot identify a Stash scene for this deleted file")
             scene = stash.find_scene(int(scene_id))
             if scene:
+                assert_scene_removal_safe(scene, event["source_path"])
                 stash.destroy_scene(int(scene_id), delete_file=False)
                 detail = f"Removed stale Stash scene {scene_id}; the video file was already absent"
             else:
