@@ -1025,6 +1025,9 @@ def claim_monitor_ownership(database_path, token, pid, roots, unavailable):
                     os.kill(existing_pid, 0)
                     connection.rollback()
                     return False
+                except PermissionError:
+                    connection.rollback()
+                    return False
                 except OSError:
                     pass
         connection.execute(

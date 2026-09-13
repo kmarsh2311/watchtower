@@ -486,6 +486,8 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
         try:
             os.kill(int(current["pid"]), 0)
             return {**current, "message": "Filesystem monitor is already running or starting"}
+        except PermissionError:
+            return {**current, "message": "Filesystem monitor is already running or starting"}
         except OSError:
             pass
     roots = fetch_library_roots(stash)

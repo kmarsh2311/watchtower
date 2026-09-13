@@ -20,6 +20,7 @@ from librarymanager_core import preview_manual_filename
 from librarymanager_core import consume_expected_move, expect_filesystem_move, resolve_filesystem_event
 from librarymanager_core import scene_naming_signature
 from librarymanager_core import _proposed_stem, incoming_summary
+from librarymanager_core import _is_pid_alive
 from librarymanager_core import _should_strip_metadata_from_title
 from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             contact_sheet_scope_name, get_configured_incoming_folders,
@@ -31,6 +32,14 @@ from librarymanager_monitor import (CompletedDownloadWorker, claim_monitor_owner
 
 
 class InventoryTests(unittest.TestCase):
+    def test_permission_denied_pid_probe_still_means_process_is_alive(self):
+        with patch("librarymanager_core.os.kill", side_effect=PermissionError):
+            self.assertTrue(_is_pid_alive(12345))
+
+    def test_missing_pid_probe_means_process_is_dead(self):
+        with patch("librarymanager_core.os.kill", side_effect=ProcessLookupError):
+            self.assertFalse(_is_pid_alive(12345))
+
     def test_monitor_database_has_single_live_owner(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"

@@ -962,6 +962,17 @@ def resolve_filesystem_event(database_path: Path, event_type: str, source_path: 
 def _is_pid_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        # A protected process still exists; macOS may deny signal probes from
+        # the Stash plugin host even when both processes belong to the user.
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    except OSError:
+        return False
 
 
 def _pid_matches_monitor(pid: int | None, token: str | None):
@@ -990,13 +1001,6 @@ def _pid_matches_monitor(pid: int | None, token: str | None):
         return "librarymanager_monitor.py" in command and str(token) in command
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ProcessLookupError, ValueError):
-        return False
-
-
 def filesystem_monitor_summary(database_path: Path) -> dict:
     connection = connect(database_path)
     try:
