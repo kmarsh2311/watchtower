@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.4 — 2026-09-13
+
+- Prevent weak or ambiguous companion-file matches from moving artwork, subtitles or other sidecars to the wrong scene.
+- Restrict weak companion matching to the video's directory while allowing only explicit, unique compound matches across directories.
+- Preserve manual external video renames unless Stash reports an explicit naming-metadata change.
+- Add opt-in compatibility for strong same-folder replacements created by FileFlows, HandBrake, Tdarr and similar transcoders.
+- Support both delete-first and created-first transcoder replacement workflows, including extension changes and videos without companions.
+- Keep strict size/hash move verification as the default and leave ambiguous replacement candidates for review.
+- Prevent companion destination collisions from overwriting existing files and resolve stale create/delete events after confirmed reconnection.
+
 ## 1.0.3 — 2026-09-13
 
 - Keep renamed videos and companion files together if Stash succeeds but Watchtower's local cache update fails, then recover the cache from Stash when possible.
