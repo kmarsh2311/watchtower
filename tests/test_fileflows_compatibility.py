@@ -96,3 +96,34 @@ def test_delete_create_replacement_does_not_trigger_move_reconciliation():
             video.write_bytes(b'new transcoded content')
             handler.on_created(created)
         worker.submit.assert_not_called()
+
+
+def test_extension_changing_transcode_leaves_old_companions_untouched_when_verification_fails():
+    """A real transcode is not a verified move, so Watchtower must not rename its old sidecars."""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        db = root / 'watchtower.sqlite3'
+        original = root / 'movie.mp4'
+        transcoded = root / 'movie.mkv'
+        compound_cover = root / 'movie.mp4.jpg'
+        subtitle = root / 'movie.srt'
+        funscript = root / 'movie.funscript'
+
+        original.write_bytes(b'old-h264' * 30000)
+        compound_cover.write_bytes(b'cover')
+        subtitle.write_text('subtitle', encoding='utf-8')
+        funscript.write_text('{"actions": []}', encoding='utf-8')
+        _insert_tracked_file(db, original)
+
+        # Simulate FileFlows producing a new HEVC file with a changed container/content.
+        transcoded.write_bytes(b'new-h265-encoded-output' * 12000)
+        row, reason = tracked_move(db, str(original), str(transcoded))
+
+        assert row is None
+        assert 'differs' in reason.lower()
+        assert compound_cover.exists()
+        assert subtitle.exists()
+        assert funscript.exists()
+        assert not (root / 'movie.mkv.jpg').exists()
+        assert not (root / 'movie.mkv.srt').exists()
+        assert not (root / 'movie.mkv.funscript').exists()
