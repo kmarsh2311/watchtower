@@ -4,7 +4,9 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import librarymanager_monitor
-from librarymanager_core import connect, opensubtitles_hash, recent_activity, resolve_filesystem_event
+from librarymanager_core import (connect, opensubtitles_hash, pending_filesystem_events,
+                                 pending_transcoder_candidates, promote_transcoder_candidate,
+                                 recent_activity, resolve_filesystem_event)
 from librarymanager_monitor import (LibraryEventHandler, MoveWorker,
                                     TRANSCODER_DECISION_WINDOW_SECONDS,
                                     likely_transcoder_replacement,
@@ -167,6 +169,81 @@ def test_created_first_delete_later_submits_after_decision_window():
         worker.submit.assert_called_once_with(str(source), str(destination))
 
 
+def test_created_first_candidate_is_persistent_and_not_an_amber_problem():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td); database = root / 'db.sqlite3'
+        source = root / 'movie.mp4'; destination = root / 'movie hevc.mkv'
+        source.write_bytes(b'old'); _insert(database, source); destination.write_bytes(b'new')
+        handler = LibraryEventHandler(database, MagicMock(transcoder_compatibility=True), False)
+        handler.on_created(MagicMock(is_directory=False, src_path=str(destination)))
+        assert pending_transcoder_candidates(database)[0]['source_path'] == str(source)
+        assert pending_filesystem_events(database) == []
+
+
+def test_multiple_batch_candidates_are_each_persisted():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td); database = root / 'db.sqlite3'
+        handler = LibraryEventHandler(database, MagicMock(transcoder_compatibility=True), False)
+        for number in (1, 2):
+            source = root / f'movie {number}.mp4'; candidate = root / f'movie {number} encoded.mp4'
+            source.write_bytes(b'old'); _insert(database, source, str(number), str(number + 10))
+            candidate.write_bytes(b'new')
+            handler.on_created(MagicMock(is_directory=False, src_path=str(candidate)))
+        assert len(pending_transcoder_candidates(database)) == 2
+
+
+def test_candidate_deletion_clears_persistent_waiting_state():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td); database = root / 'db.sqlite3'
+        source = root / 'movie.mp4'; candidate = root / 'movie encoded.mp4'
+        source.write_bytes(b'old'); _insert(database, source); candidate.write_bytes(b'new')
+        handler = LibraryEventHandler(database, MagicMock(transcoder_compatibility=True), False)
+        handler.on_created(MagicMock(is_directory=False, src_path=str(candidate)))
+        candidate.unlink(); handler.on_deleted(MagicMock(is_directory=False, src_path=str(candidate)))
+        assert pending_transcoder_candidates(database) == []
+        assert pending_filesystem_events(database) == []
+
+
+def test_restart_restores_missing_source_decision_from_persistent_candidate():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td); database = root / 'db.sqlite3'
+        source = root / 'movie.mp4'; candidate = root / 'movie encoded.mp4'
+        source.write_bytes(b'old'); _insert(database, source); candidate.write_bytes(b'new')
+        LibraryEventHandler(database, MagicMock(transcoder_compatibility=True), False).on_created(
+            MagicMock(is_directory=False, src_path=str(candidate)))
+        source.unlink()
+        worker = MagicMock(transcoder_compatibility=True)
+        restored = LibraryEventHandler(database, worker, False)
+        with patch('librarymanager_monitor.threading.Timer') as timer:
+            restored.restore_transcoder_candidates(); _decision_callback(timer)()
+        worker.submit.assert_called_once_with(str(source), str(candidate))
+
+
+def test_promoted_independent_candidate_is_not_reclassified_by_duplicate_event():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td); database = root / 'db.sqlite3'
+        source = root / 'movie.mp4'; candidate = root / 'movie encoded.mp4'
+        source.write_bytes(b'old'); _insert(database, source); candidate.write_bytes(b'new')
+        handler = LibraryEventHandler(database, MagicMock(transcoder_compatibility=True), False)
+        event = MagicMock(is_directory=False, src_path=str(candidate))
+        handler.on_created(event); promote_transcoder_candidate(database, str(candidate)); handler.on_created(event)
+        assert pending_transcoder_candidates(database) == []
+        assert pending_filesystem_events(database)[0]['source_path'] == str(candidate)
+
+
+def test_moved_into_place_encoder_output_becomes_neutral_candidate():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td); database = root / 'db.sqlite3'
+        source = root / 'movie.mp4'; candidate = root / 'movie encoded.mp4'
+        source.write_bytes(b'old'); _insert(database, source); candidate.write_bytes(b'new')
+        worker = MagicMock(transcoder_compatibility=True)
+        handler = LibraryEventHandler(database, worker, False)
+        handler.on_moved(MagicMock(is_directory=False, src_path=str(root / 'encoder.tmp'), dest_path=str(candidate)))
+        assert pending_transcoder_candidates(database)[0]['candidate_path'] == str(candidate)
+        assert pending_filesystem_events(database) == []
+        worker.submit.assert_not_called()
+
+
 def test_disabled_compatibility_does_not_schedule_or_submit():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
@@ -298,3 +375,16 @@ def test_exactly_one_unowned_candidate_completes_reconnection_without_companions
         _run_one(MoveWorker(database, stash, True, False, True), source, destination)
         stash.metadata_scan.assert_called_once_with(paths=[str(destination)])
         assert _inventory_path(database) == str(destination)
+
+
+def test_successful_reconnection_clears_candidate_and_deferred_events():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td); database = root / 'db.sqlite3'
+        source = root / 'movie.mp4'; destination = root / 'movie encoded.mp4'
+        source.write_bytes(b'old'); _insert(database, source); destination.write_bytes(b'new')
+        handler = LibraryEventHandler(database, MagicMock(transcoder_compatibility=True), False)
+        handler.on_created(MagicMock(is_directory=False, src_path=str(destination)))
+        source.unlink(); handler.on_deleted(MagicMock(is_directory=False, src_path=str(source)))
+        _run_one(MoveWorker(database, _successful_stash(destination), True, False, True), source, destination)
+        assert pending_transcoder_candidates(database) == []
+        assert pending_filesystem_events(database) == []

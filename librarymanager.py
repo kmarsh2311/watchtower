@@ -24,7 +24,8 @@ from librarymanager_core import (
                                  finish_queued_rename, inventory, preview_safe_filenames,
                                  preview_manual_filename, preview_scene_filename, reconcile_missing_files, refresh_scene_inventory,
                                  release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
-                                 reconcile_filesystem_events, pending_filesystem_events, utc_now)
+                                 reconcile_filesystem_events, pending_filesystem_events,
+                                 pending_transcoder_candidates, promote_transcoder_candidate, utc_now)
 from librarymanager_core import dashboard_data, incoming_summary, record_activity, recent_activity, cancel_pending_rename, make_pending_rename_due
 
 
@@ -1249,6 +1250,7 @@ def main():
             "active_jobs": active_jobs,
             "activity": recent_activity(database_path, 250),
             "pending_events": pending_filesystem_events(database_path),
+            "transcoder_candidates": pending_transcoder_candidates(database_path),
             "server_time": time.time(),
             "current_scene_count": current_scene_count(stash),
         }
@@ -1345,6 +1347,15 @@ def main():
               detail=f"Bulk dismissed {count} filesystem events", metadata={"count": count})
         message = json.dumps({"status": "dismissed", "count": count,
                               "detail": f"Dismissed {count} change{'s' if count != 1 else ''}"}, ensure_ascii=False)
+    elif mode == "promote_transcoder_candidate":
+        candidate_path = str((plugin_input.get("args") or {}).get("candidate_path") or "")
+        if not candidate_path:
+            raise ValueError("Candidate path required")
+        promote_transcoder_candidate(database_path, candidate_path)
+        audit(database_path, "filesystem", "transcoder candidate", "review",
+              new_path=candidate_path,
+              detail="User chose to review the encoded file as an independent new file")
+        message = json.dumps({"status": "pending", "candidate_path": candidate_path}, ensure_ascii=False)
     elif mode == "resolve_filesystem_event":
         stash = StashInterface(plugin_input["server_connection"])
         arguments = plugin_input.get("args") or {}

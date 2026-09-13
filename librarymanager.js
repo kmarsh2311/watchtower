@@ -1780,6 +1780,7 @@
         return true;
       });
       const failedIncoming = allActive.filter(item => item.status === "failed");
+      const transcoderCandidates = data?.transcoder_candidates || [];
       const unavailableRoots = monitor.unavailable_roots || [];
       const unresolved = data?.pending_events || [];
       const unresolvedCount = monitor.pending_events != null ? monitor.pending_events : unresolved.length;
@@ -1947,7 +1948,33 @@
 
         React.createElement("div", { className: "lm-terminal-section" },
           React.createElement("h3", null, "HAPPENING NOW"),
-          (waitingAndScanning.length || activeJobs.length) ? React.createElement(React.Fragment, null,
+          (waitingAndScanning.length || activeJobs.length || transcoderCandidates.length) ? React.createElement(React.Fragment, null,
+            transcoderCandidates.map(item => React.createElement("div", {
+              className: "lm-terminal-line transcoder_candidate",
+              key: `transcoder-${item.candidate_path}`
+            },
+              React.createElement("span", null, "ENCODE READY"),
+              React.createElement("strong", null, basename(item.candidate_path)),
+              React.createElement("em", null, `WAITING FOR ORIGINAL TO BE REMOVED: ${basename(item.source_path)}`),
+              React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn details",
+                disabled: !!busy,
+                title: "Stop treating this as an encoded replacement and review it as a separate new file",
+                onClick: async () => {
+                  setBusy(`promote-transcoder:${item.candidate_path}`);
+                  setError("");
+                  try {
+                    await operation("promote_transcoder_candidate", { candidate_path: item.candidate_path });
+                    await refresh();
+                  } catch (e) {
+                    setError(`Could not review encoded file separately: ${e.message}`);
+                  } finally {
+                    setBusy("");
+                  }
+                }
+              }, "REVIEW AS NEW FILE")
+            )),
             activeJobs.map(job => {
               const isScan = /scan/i.test(job.description);
               const isRename = /rename/i.test(job.description);

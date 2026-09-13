@@ -356,6 +356,94 @@ def destination_inventory_conflict(database_path, destination, source_row, conne
             connection.close()
 
 
+def register_transcoder_candidate(database_path, candidate):
+    """Persist a neutral candidate only when it maps to one existing inventoried source."""
+    candidate_path = Path(candidate)
+    connection = connect(database_path)
+    try:
+        prior = connection.execute(
+            "SELECT status FROM transcoder_candidates WHERE candidate_path=?", (str(candidate_path),)
+        ).fetchone()
+        if prior and prior["status"] == "independent":
+            return None
+        rows = [dict(row) for row in connection.execute("SELECT file_id,scene_id,path FROM files")]
+    finally:
+        connection.close()
+    sources = [row for row in rows if Path(row["path"]).is_file()
+               and likely_transcoder_replacement(row["path"], candidate_path)
+               and not destination_inventory_conflict(database_path, candidate_path, row)]
+    if len(sources) != 1:
+        return None
+    source = sources[0]["path"]
+    now = utc_now()
+    connection = connect(database_path)
+    try:
+        connection.execute(
+            """INSERT INTO transcoder_candidates(candidate_path,source_path,detected_at,updated_at,status,detail)
+               VALUES (?,?,?,?, 'waiting', ?)
+               ON CONFLICT(candidate_path) DO UPDATE SET source_path=excluded.source_path,
+                   updated_at=excluded.updated_at,
+                   status=CASE WHEN transcoder_candidates.status='independent'
+                               THEN 'independent' ELSE 'waiting' END,
+                   detail=CASE WHEN transcoder_candidates.status='independent'
+                               THEN transcoder_candidates.detail ELSE excluded.detail END""",
+            (str(candidate_path), source, now, now,
+             "Possible encoded replacement detected; waiting for the original file"),
+        )
+        connection.commit()
+        return source
+    finally:
+        connection.close()
+
+
+def remove_transcoder_candidate(database_path, candidate_path):
+    connection = connect(database_path)
+    try:
+        row = connection.execute(
+            "SELECT source_path FROM transcoder_candidates WHERE candidate_path=?",
+            (str(candidate_path),),
+        ).fetchone()
+        connection.execute("DELETE FROM transcoder_candidates WHERE candidate_path=?", (str(candidate_path),))
+        connection.commit()
+        return row["source_path"] if row else None
+    finally:
+        connection.close()
+
+
+def promote_transcoder_review(database_path, source, detail):
+    """Expose deferred created/deleted events only when automatic replacement cannot proceed."""
+    connection = connect(database_path)
+    try:
+        candidates = [row["candidate_path"] for row in connection.execute(
+            "SELECT candidate_path FROM transcoder_candidates WHERE source_path=?", (str(source),)
+        )]
+        connection.execute(
+            "UPDATE filesystem_events SET status='pending' WHERE event_type='deleted' AND source_path=?",
+            (str(source),),
+        )
+        for candidate in candidates:
+            connection.execute(
+                "UPDATE filesystem_events SET status='pending' WHERE event_type='created' AND source_path=?",
+                (candidate,),
+            )
+        connection.execute(
+            "UPDATE transcoder_candidates SET status='review',updated_at=?,detail=? WHERE source_path=?",
+            (utc_now(), str(detail), str(source)),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def clear_transcoder_candidates(database_path, source):
+    connection = connect(database_path)
+    try:
+        connection.execute("DELETE FROM transcoder_candidates WHERE source_path=?", (str(source),))
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def transcoder_replacement_decision(database_path, source, source_row):
     """Select the sole safe same-folder replacement, or fail closed with a reason."""
     source_path = Path(source)
@@ -457,6 +545,7 @@ class MoveWorker(threading.Thread):
             source, destination = self.items.get()
             if source is None:
                 break
+            compatibility_candidate = False
             try:
                 row, reason = tracked_move(self.database_path, source, destination)
                 transcode_replacement = False
@@ -484,6 +573,7 @@ class MoveWorker(threading.Thread):
                                         severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
                                         old_path=source, new_path=destination, detail=detail)
                         notify(self.notifications, f"Transcoder replacement needs review: {Path(destination).name}")
+                        promote_transcoder_review(self.database_path, source, detail)
                         continue
                 record_activity(self.database_path, "filesystem",
                                 "transcoder replacement" if transcode_replacement else "external move",
@@ -514,6 +604,7 @@ class MoveWorker(threading.Thread):
                                             severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
                                             old_path=source, new_path=destination, detail=detail)
                             notify(self.notifications, f"Transcoder replacement changed during scan; review scene {row['scene_id']}")
+                            promote_transcoder_review(self.database_path, source, detail)
                             continue
                     connection = connect(self.database_path)
                     try:
@@ -529,6 +620,7 @@ class MoveWorker(threading.Thread):
                                             severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
                                             old_path=source, new_path=destination, detail=conflict)
                             notify(self.notifications, f"Transcoder replacement ownership changed; review scene {row['scene_id']}")
+                            promote_transcoder_review(self.database_path, source, conflict)
                             continue
                         connection.execute("UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=?,missing_since=NULL WHERE file_id=?",
                                            (destination, Path(destination).name, utc_now(), row["file_id"]))
@@ -543,6 +635,10 @@ class MoveWorker(threading.Thread):
                         resolve_filesystem_event(self.database_path, "created", destination)
                     else:
                         resolve_filesystem_event(self.database_path, "moved", source, destination)
+                    if compatibility_candidate:
+                        resolve_filesystem_event(self.database_path, "deleted", source)
+                        resolve_filesystem_event(self.database_path, "created", destination)
+                        clear_transcoder_candidates(self.database_path, source)
                     notify(self.notifications, f"Stash updated: {Path(destination).name}")
 
                     # Companion relocation is all-or-nothing: a partial failure restores
@@ -567,10 +663,14 @@ class MoveWorker(threading.Thread):
                                     severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
                                     old_path=source, new_path=destination, detail=detail)
                     notify(self.notifications, f"Stash did not adopt moved file; review scene {row['scene_id']}")
+                    if compatibility_candidate:
+                        promote_transcoder_review(self.database_path, source, detail)
             except Exception as error:
                 record_activity(self.database_path, "reconciliation", "external move", "failed",
                                 severity="error", old_path=source, new_path=destination, detail=str(error))
                 notify(self.notifications, f"Move reconciliation failed: {Path(destination).name}")
+                if compatibility_candidate:
+                    promote_transcoder_review(self.database_path, source, str(error))
 
 
 class CompletedDownloadWorker(threading.Thread):
@@ -1163,6 +1263,26 @@ class LibraryEventHandler(FileSystemEventHandler):
         self._transcoder_decision_timers: dict[str, threading.Timer] = {}
         self._recent_creates_lock = threading.Lock()
 
+    def restore_transcoder_candidates(self):
+        """Restore persistent candidate decisions after a watcher or Stash restart."""
+        connection = connect(self.database_path)
+        try:
+            rows = [dict(row) for row in connection.execute(
+                "SELECT candidate_path,source_path FROM transcoder_candidates WHERE status='waiting'"
+            )]
+        finally:
+            connection.close()
+        missing_sources = set()
+        for row in rows:
+            if not Path(row["candidate_path"]).is_file():
+                remove_transcoder_candidate(self.database_path, row["candidate_path"])
+                resolve_filesystem_event(self.database_path, "created", row["candidate_path"])
+            elif not Path(row["source_path"]).exists():
+                missing_sources.add(row["source_path"])
+        for source in sorted(missing_sources):
+            record_filesystem_event(self.database_path, "deleted", source, initial_status="waiting")
+            self._schedule_transcoder_decision(source)
+
     def _schedule_transcoder_decision(self, source):
         def decide():
             with self._recent_creates_lock:
@@ -1173,7 +1293,8 @@ class LibraryEventHandler(FileSystemEventHandler):
             selected, reason = transcoder_replacement_decision(self.database_path, source, row)
             if selected:
                 self.worker.submit(source, selected)
-            elif reason != "No plausible same-folder transcoder replacement exists":
+            else:
+                promote_transcoder_review(self.database_path, source, reason)
                 record_activity(self.database_path, "filesystem", "transcoder replacement", "review",
                                 severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
                                 old_path=source, detail=reason)
@@ -1224,12 +1345,23 @@ class LibraryEventHandler(FileSystemEventHandler):
                 self._recent_deleted_videos = {k: v for k, v in self._recent_deleted_videos.items() if v > cutoff}
                 video_cutoff = now - 600.0
                 self._recent_video_candidates = {k: v for k, v in self._recent_video_candidates.items() if v > video_cutoff}
-            record_filesystem_event(self.database_path, "created", event.src_path, is_directory=event.is_directory, initial_status="pending")
+            candidate_source = None
+            if (getattr(self.worker, "transcoder_compatibility", False) is True
+                    and Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS):
+                candidate_source = register_transcoder_candidate(self.database_path, event.src_path)
+            record_filesystem_event(
+                self.database_path, "created", event.src_path, is_directory=event.is_directory,
+                initial_status="waiting" if candidate_source else "pending"
+            )
 
     def on_deleted(self, event):
         if event.is_directory:
             return
         if self._relevant(event.src_path, event.is_directory):
+            removed_candidate_source = remove_transcoder_candidate(self.database_path, event.src_path)
+            if removed_candidate_source:
+                resolve_filesystem_event(self.database_path, "created", event.src_path)
+                return
             if self.incoming_worker:
                 with self.incoming_worker.lock:
                     self.incoming_worker.candidates.pop(event.src_path, None)
@@ -1241,11 +1373,24 @@ class LibraryEventHandler(FileSystemEventHandler):
                         self._recent_deleted_videos[event.src_path] = now
                         video_cutoff = now - 600.0
                         self._recent_video_candidates = {k: v for k, v in self._recent_video_candidates.items() if v > video_cutoff}
-                record_filesystem_event(self.database_path, "deleted", event.src_path, is_directory=event.is_directory, initial_status="pending")
+                should_decide = False
                 if (getattr(self.worker, "transcoder_compatibility", False) is True
                         and Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS):
+                    source_row = inventoried_source(self.database_path, event.src_path)
+                    if source_row:
+                        # A delete-first transcoder may not have emitted its final create/move
+                        # yet. Always grant an inventoried video the short decision window;
+                        # the callback enumerates the complete folder and fails closed.
+                        should_decide = True
+                record_filesystem_event(
+                    self.database_path, "deleted", event.src_path,
+                    is_directory=event.is_directory,
+                    initial_status="waiting" if should_decide else "pending"
+                )
+                if should_decide:
                     self._schedule_transcoder_decision(event.src_path)
-                if not event.is_directory and Path(event.src_path).suffix.lower() in WATCHED_EXTENSIONS:
+                if (not should_decide and not event.is_directory
+                        and Path(event.src_path).suffix.lower() in WATCHED_EXTENSIONS):
                     threading.Timer(3, self._notify_if_still_missing, args=(event.src_path,)).start()
 
     def _notify_if_still_missing(self, path):
@@ -1297,6 +1442,17 @@ class LibraryEventHandler(FileSystemEventHandler):
                 return
             incoming_candidate = bool(self.incoming_worker and self.incoming_worker.submit(event.dest_path))
             if incoming_candidate and Path(event.src_path).suffix.lower() not in VIDEO_EXTENSIONS:
+                return
+            candidate_source = None
+            if (getattr(self.worker, "transcoder_compatibility", False) is True
+                    and Path(event.dest_path).suffix.lower() in VIDEO_EXTENSIONS):
+                remove_transcoder_candidate(self.database_path, event.src_path)
+                candidate_source = register_transcoder_candidate(self.database_path, event.dest_path)
+            if candidate_source:
+                record_filesystem_event(
+                    self.database_path, "created", event.dest_path,
+                    is_directory=False, initial_status="waiting"
+                )
                 return
             record_filesystem_event(self.database_path, "moved", event.src_path, event.dest_path, event.is_directory, initial_status="pending")
             if not event.is_directory and Path(event.dest_path).suffix.lower() in VIDEO_EXTENSIONS:
@@ -1437,6 +1593,8 @@ def main():
     worker.start()
     incoming_worker.start()
     observer.start()
+    if worker.transcoder_compatibility:
+        handler.restore_transcoder_candidates()
     try:
         while True:
             reload_monitor_if_code_changed(

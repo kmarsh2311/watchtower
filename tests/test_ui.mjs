@@ -6,6 +6,14 @@ const javascript = readFileSync(new URL("../librarymanager.js", import.meta.url)
 const css = readFileSync(new URL("../librarymanager.css", import.meta.url), "utf8");
 const manifest = readFileSync(new URL("../librarymanager.yml", import.meta.url), "utf8");
 
+test("transcoder candidates are neutral work in progress with an independent-file action", () => {
+  assert.match(javascript, /data\?\.transcoder_candidates \|\| \[\]/);
+  assert.match(javascript, /ENCODE READY/);
+  assert.match(javascript, /WAITING FOR ORIGINAL TO BE REMOVED/);
+  assert.match(javascript, /promote_transcoder_candidate/);
+  assert.match(javascript, /REVIEW AS NEW FILE/);
+});
+
 function loadNamedFunction(name) {
   const marker = `  function ${name}`;
   const start = javascript.indexOf(marker);

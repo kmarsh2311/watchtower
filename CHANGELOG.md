@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.6 — 2026-09-13
+
+- Track plausible encoded replacements as neutral, persistent work in progress while the original remains available.
+- Preserve overnight and batch transcoding candidates across Watchtower and Stash restarts without raising premature problem alerts.
+- Reconcile only after the original disappears and the five-second decision window finds exactly one unowned candidate.
+- Keep ambiguity and ownership conflicts fail-closed before scanning, after scanning and during the final inventory update.
+- Let users explicitly review a candidate as an independent new file without cancelling other scheduled reconciliation work.
+- Clear abandoned candidates when their encoded output disappears and expose failed reconciliation as an actionable review.
+
 ## 1.0.5 — 2026-09-13
 
 - Fail closed when a transcoder replacement destination belongs to another file or scene.

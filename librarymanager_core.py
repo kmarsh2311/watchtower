@@ -183,6 +183,15 @@ CREATE TABLE IF NOT EXISTS filesystem_events (
     event_count INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL DEFAULT 'pending'
 );
+CREATE TABLE IF NOT EXISTS transcoder_candidates (
+    candidate_path TEXT PRIMARY KEY,
+    source_path TEXT NOT NULL,
+    detected_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'waiting',
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_transcoder_candidates_source ON transcoder_candidates(source_path);
 CREATE TABLE IF NOT EXISTS filesystem_monitor_status (
     id INTEGER PRIMARY KEY CHECK(id=1),
     token TEXT,
@@ -587,6 +596,7 @@ def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
             "activity": recent_activity(database_path, activity_limit),
             "filename_preview": {"run": dict(preview_run), "rows": preview_rows} if preview_run else None,
             "pending_events": pending_events,
+            "transcoder_candidates": pending_transcoder_candidates(database_path),
             "incoming": incoming_summary(database_path),
         }
     finally:
@@ -618,6 +628,38 @@ def pending_filesystem_events(database_path: Path, limit: int = 50) -> list[dict
                 connection.execute("UPDATE filesystem_events SET status='resolved' WHERE event_key=?", (k,))
             connection.commit()
         return valid_rows
+    finally:
+        connection.close()
+
+
+def pending_transcoder_candidates(database_path: Path, limit: int = 250) -> list[dict]:
+    """Return persistent neutral replacement candidates shown as work in progress."""
+    connection = connect(database_path)
+    try:
+        return [dict(row) for row in connection.execute(
+            """SELECT candidate_path,source_path,detected_at,updated_at,status,detail
+               FROM transcoder_candidates WHERE status='waiting'
+               ORDER BY detected_at LIMIT ?""", (int(limit),)
+        )]
+    finally:
+        connection.close()
+
+
+def promote_transcoder_candidate(database_path: Path, candidate_path: str):
+    """Stop treating a candidate as a replacement and expose its created event for review."""
+    connection = connect(database_path)
+    try:
+        connection.execute(
+            """UPDATE transcoder_candidates SET status='independent',updated_at=?,
+                      detail='User chose to treat this as an independent new file'
+               WHERE candidate_path=?""",
+            (utc_now(), str(candidate_path)),
+        )
+        connection.execute(
+            "UPDATE filesystem_events SET status='pending' WHERE event_type='created' AND source_path=?",
+            (str(candidate_path),),
+        )
+        connection.commit()
     finally:
         connection.close()
 
