@@ -40,6 +40,12 @@ test("Command Centre presents unresolved changes as actions, not completed work"
   assert.doesNotMatch(javascript, /Show \d+ changes? to resolve/);
 });
 
+test("a stale watcher explains the problem inside the terminal alert", () => {
+  assert.match(javascript, /! WATCHER NOT RESPONDING/);
+  assert.match(javascript, /monitor\.stale_reason \|\| "The watcher stopped sending its expected heartbeat\."/);
+  assert.match(javascript, /Click RESTART WATCHER above/);
+});
+
 test("review controls expose only context-appropriate actions", () => {
   assert.match(javascript, /deletion && isVideo && event\.scene_id[\s\S]*REMOVE STASH SCENE/);
   assert.match(javascript, /!deletion && isVideo[\s\S]*scan_destination/);

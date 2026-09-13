@@ -1865,6 +1865,16 @@
                 onClick: () => resolveAllPendingEvents("dismiss")
               }, `✕ DISMISS ALL CHANGES (${unresolvedCount})`))),
 
+          isMonitorStale && React.createElement("div", { className: "lm-terminal-attention-item warn", key: "stale-monitor" },
+            React.createElement("div", { className: "lm-terminal-attention-title" },
+              React.createElement("strong", null, "! WATCHER NOT RESPONDING"),
+              React.createElement("span", { className: "lm-terminal-badge warn" }, "STALE")),
+            React.createElement("p", { className: "lm-terminal-attention-detail" },
+              React.createElement("b", null, "Reason: "),
+              monitor.stale_reason || "The watcher stopped sending its expected heartbeat."),
+            React.createElement("p", { className: "lm-terminal-attention-fix" },
+              "→ Fix: Click RESTART WATCHER above. This restarts monitoring without changing your library or saved settings.")),
+
           failedIncoming.map(item => React.createElement("div", { className: "lm-terminal-attention-item failed", key: item.path },
             React.createElement("div", { className: "lm-terminal-attention-title" },
               React.createElement("strong", null, `! VIDEO NOT ADDED: ${basename(item.path)}`),
