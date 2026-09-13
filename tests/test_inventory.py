@@ -5,7 +5,7 @@ import unittest
 import os
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import librarymanager_core
 
@@ -24,13 +24,50 @@ from librarymanager_core import _should_strip_metadata_from_title
 from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             contact_sheet_scope_name, get_configured_incoming_folders,
                             incoming_folder_status, incoming_folders_status,
-                            read_inventory_progress, require_bulk_dismissal,
-                            write_inventory_progress)
+                            read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
+                            start_filesystem_monitor, write_inventory_progress)
 from librarymanager_monitor import (CompletedDownloadWorker, relocate_companions_transactionally,
                                     tracked_move)
 
 
 class InventoryTests(unittest.TestCase):
+    def test_contact_sheet_refresh_failure_is_recorded_as_terminal_problem(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = root / "inventory.sqlite3"
+            video = root / "video.mp4"
+            video.write_bytes(b"video")
+            with patch("librarymanager.generate_video_contact_sheet",
+                       return_value={"status": "error", "error": "ffmpeg failed"}):
+                refresh_scene_contact_sheet(
+                    database, str(video), "42",
+                    {"generateContactSheets": True, "contactSheetScope": "all"}
+                )
+            rows = recent_activity(database, 10)
+            self.assertEqual(rows[0]["category"], "companion")
+            self.assertEqual(rows[0]["status"], "failed")
+            self.assertEqual(rows[0]["severity"], "error")
+            self.assertIn("ffmpeg failed", rows[0]["detail"])
+
+    def test_monitor_start_allows_slow_stash_initialization(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = root / "inventory.sqlite3"
+            process = MagicMock()
+            process.poll.return_value = None
+            stopped = {"state": "stopped", "pid": None}
+            running = {"state": "running", "pid": 4321, "is_stale": False}
+            stash = MagicMock()
+            stash.find_plugin_config.return_value = {}
+            with patch("librarymanager.fetch_library_roots", return_value=[str(root)]), \
+                    patch("librarymanager.filesystem_monitor_summary",
+                          side_effect=[stopped] + ([stopped] * 25) + [running]), \
+                    patch("librarymanager.subprocess.Popen", return_value=process), \
+                    patch("librarymanager.time.sleep"):
+                result = start_filesystem_monitor(stash, database, {})
+            self.assertEqual(result["state"], "running")
+            self.assertEqual(result["pid"], 4321)
+
     def test_custom_contact_sheet_script_requires_explicit_trust_and_executable_file(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

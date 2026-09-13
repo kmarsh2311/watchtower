@@ -681,9 +681,19 @@ class CompletedDownloadWorker(threading.Thread):
                         )
                         notify(self.notifications, f"Contact sheet created & paired: {Path(sheet_p).name} → Scene {scene['id']}")
                     else:
-                        self._save_state(sheet_p, "gone", detail="Contact sheet generation skipped")
+                        result_detail = csm_res.get("error") or csm_res.get("message") or "Contact sheet generation did not complete"
+                        self._save_state(sheet_p, "gone", detail=result_detail)
+                        if csm_res.get("status") == "error":
+                            record_activity(
+                                self.database_path, "companion", "contact sheet generation", "failed",
+                                severity="error", scene_id=scene["id"], old_path=path, detail=result_detail
+                            )
                 except Exception as exc:
                     logger.debug("Contact sheet generation failed for %s: %s", path, exc)
+                    record_activity(
+                        self.database_path, "companion", "contact sheet generation", "failed",
+                        severity="error", scene_id=scene["id"], old_path=path, detail=str(exc)
+                    )
                     try:
                         self._save_state(sheet_p, "gone", detail="Contact sheet generation failed")
                     except Exception as save_exc:

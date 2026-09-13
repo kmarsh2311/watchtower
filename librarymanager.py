@@ -523,7 +523,7 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
     }), encoding="utf-8")
     runtime_path.chmod(0o600)
     log_handle = open(log_path, "ab", buffering=0)
-    subprocess.Popen(
+    process = subprocess.Popen(
         [sys.executable, str(Path(__file__).with_name("librarymanager_monitor.py")),
          "--database", str(database_path), "--control", str(control_path),
          "--token", token, "--roots-json", json.dumps(roots), "--runtime", str(runtime_path)],
@@ -531,11 +531,18 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
         start_new_session=True, close_fds=True,
     )
     log_handle.close()
-    for _ in range(20):
+    # StashInterface initialization can take several seconds on a busy or newly
+    # upgraded Stash instance. Do not report a failed restart while the child
+    # is still starting successfully in the background.
+    for _ in range(100):
         time.sleep(0.1)
         status = filesystem_monitor_summary(database_path)
         if status.get("state") == "running":
             return {**status, "message": "Read-only filesystem monitor started"}
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"Filesystem monitor exited during startup (code {process.returncode}); inspect {log_path}"
+            )
     raise RuntimeError(f"Filesystem monitor did not start; inspect {log_path}")
 
 
@@ -676,6 +683,12 @@ def refresh_scene_contact_sheet(database_path: Path, video_path: str, scene_id: 
             )
             return csm_res
         else:
+            if csm_res.get("status") == "error":
+                failure_reason = csm_res.get("error") or "Contact sheet generation failed"
+                record_activity(
+                    database_path, "companion", "contact sheet update", "failed",
+                    severity="error", scene_id=str(scene_id), old_path=str(video_path), detail=failure_reason
+                )
             try:
                 con = connect(database_path)
                 con.execute("DELETE FROM incoming_files WHERE path=?", (str(sheet_p),))
@@ -692,6 +705,10 @@ def refresh_scene_contact_sheet(database_path: Path, video_path: str, scene_id: 
         except Exception:
             pass
         activity_logger().error("Contact sheet update failed for %s: %s", video_path, csm_err)
+        record_activity(
+            database_path, "companion", "contact sheet update", "failed",
+            severity="error", scene_id=str(scene_id), old_path=str(video_path), detail=str(csm_err)
+        )
     return None
 
 
@@ -727,6 +744,7 @@ def process_rename_queue(stash, database_path):
                 result = recover_local_rename_cache(stash, database_path, scene_id, result)
                 finish_queued_rename(database_path, scene_id, result.get("status", "unknown"), result.get("reason", ""))
                 audit(database_path, "rename", "automatic rename", result.get("status", "unknown"),
+                      severity="warning" if result.get("status") == "renamed_with_warning" else "info",
                       scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
                       new_path=result.get("proposed_path"), detail=result.get("reason", ""),
                       metadata={"base_stem": result.get("base_stem")})
@@ -920,7 +938,12 @@ def main():
                     except Exception:
                         pass
                 elif res.get("status") == "error":
-                    errors.append(f"{vid.name}: {res.get('error')}")
+                    error_detail = res.get("error") or "Contact sheet generation failed"
+                    errors.append(f"{vid.name}: {error_detail}")
+                    record_activity(
+                        database_path, "companion", "contact sheet generation", "failed",
+                        severity="error", old_path=str(vid), detail=error_detail
+                    )
             err_str = f" Errors: {', '.join(errors)}" if errors else ""
             scope_name = contact_sheet_scope_name(configured_folders)
             message = (
@@ -947,6 +970,10 @@ def main():
             current_progress = read_inventory_progress(database_path)
             write_inventory_progress(database_path, "failed", current_progress.get("processed", 0),
                                      current_progress.get("total", 0), str(inventory_error))
+            record_activity(
+                database_path, "inventory", "library inventory", "failed",
+                severity="error", detail=str(inventory_error)
+            )
             raise
         if mode == "build_inventory":
             message = json.dumps(summary, ensure_ascii=False)
@@ -1381,6 +1408,7 @@ def main():
             )
             result = recover_local_rename_cache(stash, database_path, scene_id, result)
             audit(database_path, "rename", "manual filename correction", result.get("status", "unknown"),
+                  severity="warning" if result.get("status") == "renamed_with_warning" else "info",
                   scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
                   new_path=result.get("proposed_path"), detail=result.get("reason", ""))
             if result.get("status") == "renamed" or result.get("action_performed"):
@@ -1408,6 +1436,7 @@ def main():
             )
             result = recover_local_rename_cache(stash, database_path, scene_id, result)
             audit(database_path, "rename", "test scene rename", result.get("status", "unknown"),
+                  severity="warning" if result.get("status") == "renamed_with_warning" else "info",
                   scene_id=scene_id, file_id=result.get("file_id"), old_path=result.get("current_path"),
                   new_path=result.get("proposed_path"), detail=result.get("reason", ""))
             if result.get("status") in ("renamed", "ready") or result.get("action_performed"):
