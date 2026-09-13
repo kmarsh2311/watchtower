@@ -191,7 +191,9 @@ CREATE TABLE IF NOT EXISTS filesystem_monitor_status (
     started_at TEXT,
     heartbeat_at TEXT,
     roots_json TEXT NOT NULL DEFAULT '[]',
-    unavailable_roots_json TEXT NOT NULL DEFAULT '[]'
+    unavailable_roots_json TEXT NOT NULL DEFAULT '[]',
+    auto_restart_attempted_at REAL,
+    auto_restart_failures INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO filesystem_monitor_status(id,state) VALUES (1,'stopped');
 CREATE TABLE IF NOT EXISTS incoming_files (
@@ -355,6 +357,10 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
                     "ALTER TABLE inventory_runs ADD COLUMN stash_scene_count INTEGER NOT NULL DEFAULT 0")
         _safe_alter(connection, "rename_queue", "processing_started_at",
                     "ALTER TABLE rename_queue ADD COLUMN processing_started_at REAL")
+        _safe_alter(connection, "filesystem_monitor_status", "auto_restart_attempted_at",
+                    "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_attempted_at REAL")
+        _safe_alter(connection, "filesystem_monitor_status", "auto_restart_failures",
+                    "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_failures INTEGER NOT NULL DEFAULT 0")
         connection.execute(
             """UPDATE inventory_runs SET stash_scene_count=(SELECT COUNT(DISTINCT scene_id) FROM files)
                WHERE status='complete' AND stash_scene_count=0"""

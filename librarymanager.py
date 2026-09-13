@@ -611,6 +611,57 @@ def stop_filesystem_monitor(database_path):
     return {**status, "message": "Stop requested; monitor is still shutting down"}
 
 
+def maybe_auto_restart_monitor(stash, database_path, server_connection=None, cooldown_seconds=300):
+    """Make one rate-limited recovery attempt when an enabled watcher PID is gone."""
+    config = stash.find_plugin_config("librarymanager") or {}
+    status = filesystem_monitor_summary(database_path)
+    if config.get("autoStartMonitor") is not True or not status.get("is_stale") or status.get("pid_alive"):
+        return status
+
+    now = time.time()
+    connection = connect(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT auto_restart_attempted_at FROM filesystem_monitor_status WHERE id=1"
+        ).fetchone()
+        last_attempt = float(row["auto_restart_attempted_at"] or 0) if row else 0
+        if last_attempt and now - last_attempt < cooldown_seconds:
+            connection.rollback()
+            return status
+        connection.execute(
+            "UPDATE filesystem_monitor_status SET auto_restart_attempted_at=? WHERE id=1", (now,)
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    try:
+        stop_filesystem_monitor(database_path)
+        recovered = start_filesystem_monitor(stash, database_path, server_connection or {})
+        connection = connect(database_path)
+        try:
+            connection.execute("UPDATE filesystem_monitor_status SET auto_restart_failures=0 WHERE id=1")
+            connection.commit()
+        finally:
+            connection.close()
+        audit(database_path, "monitor", "automatic restart", "running",
+              detail=f"Watcher recovered automatically as process {recovered.get('pid')}")
+        return recovered
+    except Exception as error:
+        connection = connect(database_path)
+        try:
+            connection.execute(
+                "UPDATE filesystem_monitor_status SET auto_restart_failures=auto_restart_failures+1 WHERE id=1"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        audit(database_path, "monitor", "automatic restart", "failed", severity="error",
+              detail=f"Automatic watcher recovery failed; retry is paused for {int(cooldown_seconds)} seconds: {error}")
+        return filesystem_monitor_summary(database_path)
+
+
 def refresh_scene_contact_sheet(database_path: Path, video_path: str, scene_id: str, config: dict):
     """Regenerate contact sheet with updated title/metadata if CSM generation is enabled."""
     if not video_path:
@@ -1134,6 +1185,7 @@ def main():
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "live_status":
         stash = StashInterface(plugin_input["server_connection"])
+        maybe_auto_restart_monitor(stash, database_path, plugin_input.get("server_connection") or {})
         # Auto-prune any failed incoming files that were deleted from disk
         connection = connect(database_path)
         try:

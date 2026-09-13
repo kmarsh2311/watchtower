@@ -25,13 +25,34 @@ from librarymanager_core import _should_strip_metadata_from_title
 from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             contact_sheet_scope_name, get_configured_incoming_folders,
                             incoming_folder_status, incoming_folders_status,
-                            read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
+                            maybe_auto_restart_monitor, read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
                             start_filesystem_monitor, write_inventory_progress)
 from librarymanager_monitor import (CompletedDownloadWorker, claim_monitor_ownership, relocate_companions_transactionally,
                                     tracked_move)
 
 
 class InventoryTests(unittest.TestCase):
+    def test_auto_restart_is_rate_limited_and_recorded(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            librarymanager_core.connect(database).close()
+            stash = MagicMock()
+            stash.find_plugin_config.return_value = {"autoStartMonitor": True}
+            stale = {"state": "stale", "is_stale": True, "pid_alive": False, "pid": 123}
+            recovered = {"state": "running", "is_stale": False, "pid_alive": True, "pid": 456}
+            with patch("librarymanager.filesystem_monitor_summary", return_value=stale), \
+                    patch("librarymanager.stop_filesystem_monitor") as stop_monitor, \
+                    patch("librarymanager.start_filesystem_monitor", return_value=recovered) as start_monitor:
+                first = maybe_auto_restart_monitor(stash, database, {})
+                second = maybe_auto_restart_monitor(stash, database, {})
+            self.assertEqual(first["pid"], 456)
+            self.assertEqual(second["pid"], 123)
+            stop_monitor.assert_called_once()
+            start_monitor.assert_called_once()
+            activity = recent_activity(database, 10)
+            self.assertEqual(activity[0]["action"], "automatic restart")
+            self.assertEqual(activity[0]["status"], "running")
+
     def test_permission_denied_pid_probe_still_means_process_is_alive(self):
         with patch("librarymanager_core.os.kill", side_effect=PermissionError):
             self.assertTrue(_is_pid_alive(12345))
