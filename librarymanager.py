@@ -300,6 +300,21 @@ def automatic_scene_allowed(config, scene_id):
     return not test_scene_id or test_scene_id == str(scene_id)
 
 
+SCENE_NAMING_HOOK_FIELDS = frozenset({"title", "studio_id", "performer_ids", "code", "date"})
+
+
+def scene_hook_has_naming_changes(changed):
+    """Only explicit naming-metadata edits may trigger an automatic filename change.
+
+    Filesystem reconciliation can cause Stash to emit Scene.Update.Post hooks with an
+    empty input payload. Treating those as metadata edits would undo a user's manual
+    external filename change immediately after Watchtower reconciles it.
+    """
+    if not isinstance(changed, dict) or not changed:
+        return False
+    return bool(SCENE_NAMING_HOOK_FIELDS.intersection(changed))
+
+
 def fetch_library_roots(stash):
     result = stash.call_GQL(ROOTS_QUERY)
     stashes = (((result or {}).get("configuration") or {}).get("general") or {}).get("stashes") or []
@@ -510,6 +525,7 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
     runtime_path.write_text(json.dumps({
         "server_connection": server_connection or {},
         "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
+        "transcoder_replacement_compatibility": config.get("transcoderReplacementCompatibility") is True,
         "mac_notifications": config.get("macNotifications") is True,
         "incoming_imports": incoming_multi["enabled"] and len(valid_incoming_paths) > 0,
         "incoming_folder": valid_incoming_paths[0] if valid_incoming_paths else "",
@@ -858,9 +874,14 @@ def main():
             except Exception as e:
                 activity_logger().error("Failed to query scenes for studio %s: %s", entity_id, e)
         else:
-            relevant = bool({"title", "studio_id", "performer_ids", "code", "date"} & set(changed)) if changed else True
+            relevant = scene_hook_has_naming_changes(changed)
             if not relevant:
-                print(json.dumps({"output": "Scene update has no relevant naming metadata changes; skipping."}))
+                detail = (
+                    "Scene update has no explicit naming metadata changes; skipping."
+                    if not changed
+                    else "Scene update has no relevant naming metadata changes; skipping."
+                )
+                print(json.dumps({"output": detail}))
                 return
             if entity_id:
                 target_scene_ids = [str(entity_id)]
