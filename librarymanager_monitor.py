@@ -1000,14 +1000,42 @@ def update_status(database_path, token, pid, state, roots, unavailable):
         try:
             connection.execute(
                 """UPDATE filesystem_monitor_status SET token=?,pid=?,state=?,started_at=COALESCE(started_at,?),
-                       heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1""",
-                (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable)),
+                       heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1 AND token=?""",
+                (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable), token),
             )
             connection.commit()
         finally:
             connection.close()
     except (sqlite3.OperationalError, sqlite3.DatabaseError) as err:
         logger.debug("update_status deferred (DB busy): %s", err)
+
+
+def claim_monitor_ownership(database_path, token, pid, roots, unavailable):
+    """Atomically ensure only one live monitor can own this database."""
+    connection = connect(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute(
+            "SELECT token,pid,state FROM filesystem_monitor_status WHERE id=1"
+        ).fetchone()
+        if current and current["token"] != token and current["state"] in ("starting", "running"):
+            existing_pid = int(current["pid"] or 0)
+            if existing_pid:
+                try:
+                    os.kill(existing_pid, 0)
+                    connection.rollback()
+                    return False
+                except OSError:
+                    pass
+        connection.execute(
+            """UPDATE filesystem_monitor_status SET token=?,pid=?,state='starting',started_at=?,
+                   heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1""",
+            (token, pid, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable)),
+        )
+        connection.commit()
+        return True
+    finally:
+        connection.close()
 
 
 def _reset_stale_failed_incoming(database_path: Path) -> None:
@@ -1048,6 +1076,9 @@ def main():
     roots = json.loads(args.roots_json)
     available = [root for root in roots if Path(root).is_dir()]
     unavailable = [root for root in roots if root not in available]
+    if not claim_monitor_ownership(database_path, args.token, os.getpid(), available, unavailable):
+        logger.warning("Another Watchtower monitor already owns this database; exiting duplicate startup")
+        return
     runtime_path = Path(args.runtime)
     runtime = {}
     if runtime_path.is_file():

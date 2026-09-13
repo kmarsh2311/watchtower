@@ -26,11 +26,17 @@ from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             incoming_folder_status, incoming_folders_status,
                             read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
                             start_filesystem_monitor, write_inventory_progress)
-from librarymanager_monitor import (CompletedDownloadWorker, relocate_companions_transactionally,
+from librarymanager_monitor import (CompletedDownloadWorker, claim_monitor_ownership, relocate_companions_transactionally,
                                     tracked_move)
 
 
 class InventoryTests(unittest.TestCase):
+    def test_monitor_database_has_single_live_owner(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            self.assertTrue(claim_monitor_ownership(database, "first-token", os.getpid(), [], []))
+            self.assertFalse(claim_monitor_ownership(database, "second-token", os.getpid(), [], []))
+
     def test_contact_sheet_refresh_failure_is_recorded_as_terminal_problem(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

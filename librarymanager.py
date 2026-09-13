@@ -482,10 +482,10 @@ configure_macos_startup = configure_system_startup
 
 def start_filesystem_monitor(stash, database_path, server_connection=None):
     current = filesystem_monitor_summary(database_path)
-    if current.get("state") == "running" and current.get("pid"):
+    if current.get("state") in ("running", "starting") and current.get("pid"):
         try:
             os.kill(int(current["pid"]), 0)
-            return {**current, "message": "Filesystem monitor is already running"}
+            return {**current, "message": "Filesystem monitor is already running or starting"}
         except OSError:
             pass
     roots = fetch_library_roots(stash)
