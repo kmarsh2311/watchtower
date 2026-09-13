@@ -87,3 +87,84 @@ def test_ambiguous_recent_deletes_do_not_auto_pair():
         event = MagicMock(is_directory=False, src_path=str(new))
         handler.on_created(event)
         worker.submit.assert_not_called()
+
+def test_created_output_then_deleted_original_is_submitted_when_opted_in():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        db = root / 'db.sqlite3'
+        old = root / 'movie.mp4'
+        new = root / 'movie encoded.mp4'
+        old.write_bytes(b'old source')
+        _insert(db, old)
+        new.write_bytes(b'new encoded output')
+        worker = MagicMock()
+        worker.transcoder_compatibility = True
+        handler = LibraryEventHandler(db, worker, False, incoming_worker=None)
+        handler.on_created(MagicMock(is_directory=False, src_path=str(new)))
+        worker.reset_mock()
+        old.unlink()
+        with patch('librarymanager_monitor.threading.Timer'):
+            handler.on_deleted(MagicMock(is_directory=False, src_path=str(old)))
+        worker.submit.assert_called_once_with(str(old), str(new))
+
+def test_created_output_then_deleted_original_is_not_submitted_when_disabled():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        db = root / 'db.sqlite3'
+        old = root / 'movie.mp4'
+        new = root / 'movie encoded.mp4'
+        old.write_bytes(b'old source')
+        _insert(db, old)
+        new.write_bytes(b'new encoded output')
+        worker = MagicMock()
+        worker.transcoder_compatibility = False
+        handler = LibraryEventHandler(db, worker, False, incoming_worker=None)
+        handler.on_created(MagicMock(is_directory=False, src_path=str(new)))
+        worker.reset_mock()
+        old.unlink()
+        with patch('librarymanager_monitor.threading.Timer'):
+            handler.on_deleted(MagicMock(is_directory=False, src_path=str(old)))
+        worker.submit.assert_not_called()
+
+def test_recent_modified_encoded_output_counts_as_replacement_candidate():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        db = root / 'db.sqlite3'
+        old = root / 'movie.mp4'
+        new = root / 'movie encoded.mp4'
+        old.write_bytes(b'old source')
+        _insert(db, old)
+        new.write_bytes(b'partial encode')
+        worker = MagicMock()
+        worker.transcoder_compatibility = True
+        handler = LibraryEventHandler(db, worker, False, incoming_worker=None)
+        handler.on_created(MagicMock(is_directory=False, src_path=str(new)))
+        handler._recent_video_candidates[str(new)] = time.monotonic() - 590
+        handler.on_modified(MagicMock(is_directory=False, src_path=str(new)))
+        worker.reset_mock()
+        old.unlink()
+        with patch('librarymanager_monitor.threading.Timer'):
+            handler.on_deleted(MagicMock(is_directory=False, src_path=str(old)))
+        worker.submit.assert_called_once_with(str(old), str(new))
+
+def test_created_first_ambiguous_replacements_are_not_auto_paired():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        db = root / 'db.sqlite3'
+        old = root / 'movie.mp4'
+        first = root / 'movie encoded.mp4'
+        second = root / 'movie-hevc.mkv'
+        old.write_bytes(b'old source')
+        _insert(db, old)
+        first.write_bytes(b'a')
+        second.write_bytes(b'b')
+        worker = MagicMock()
+        worker.transcoder_compatibility = True
+        handler = LibraryEventHandler(db, worker, False, incoming_worker=None)
+        handler.on_created(MagicMock(is_directory=False, src_path=str(first)))
+        handler.on_created(MagicMock(is_directory=False, src_path=str(second)))
+        worker.reset_mock()
+        old.unlink()
+        with patch('librarymanager_monitor.threading.Timer'):
+            handler.on_deleted(MagicMock(is_directory=False, src_path=str(old)))
+        worker.submit.assert_not_called()

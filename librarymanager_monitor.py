@@ -377,7 +377,11 @@ class MoveWorker(threading.Thread):
                     record_activity(self.database_path, "reconciliation", "targeted Stash scan", "updated",
                                     scene_id=row["scene_id"], file_id=row["file_id"], old_path=source,
                                     new_path=destination, detail=f"Stash scan job {job_id} confirmed the new path")
-                    resolve_filesystem_event(self.database_path, "moved", source, destination)
+                    if transcode_replacement:
+                        resolve_filesystem_event(self.database_path, "deleted", source)
+                        resolve_filesystem_event(self.database_path, "created", destination)
+                    else:
+                        resolve_filesystem_event(self.database_path, "moved", source, destination)
                     notify(self.notifications, f"Stash updated: {Path(destination).name}")
 
                     # Companion relocation is all-or-nothing: a partial failure restores
@@ -993,6 +997,8 @@ class LibraryEventHandler(FileSystemEventHandler):
         # deletion and a rapid delete-then-recreate (e.g. atomic download swap).
         self._recent_creates: dict[str, float] = {}
         self._recent_deleted_videos: dict[str, float] = {}
+        # Keep recently active encoded outputs long enough for the source to be deleted later.
+        self._recent_video_candidates: dict[str, float] = {}
         self._recent_creates_lock = threading.Lock()
 
     def _relevant(self, path, is_directory):
@@ -1022,13 +1028,17 @@ class LibraryEventHandler(FileSystemEventHandler):
                 if has_matching_video:
                     return
             with self._recent_creates_lock:
-                self._recent_creates[event.src_path] = time.monotonic()
-                # Prune entries older than 30 s to prevent unbounded growth
-                cutoff = time.monotonic() - 30.0
+                now = time.monotonic()
+                self._recent_creates[event.src_path] = now
+                if Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS:
+                    self._recent_video_candidates[event.src_path] = now
+                cutoff = now - 30.0
                 self._recent_creates = {k: v for k, v in self._recent_creates.items() if v > cutoff}
                 self._recent_deleted_videos = {k: v for k, v in self._recent_deleted_videos.items() if v > cutoff}
+                video_cutoff = now - 600.0
+                self._recent_video_candidates = {k: v for k, v in self._recent_video_candidates.items() if v > video_cutoff}
                 deleted_candidates = [old for old, seen in self._recent_deleted_videos.items()
-                                      if time.monotonic() - seen <= 30.0
+                                      if now - seen <= 30.0
                                       and likely_transcoder_replacement(old, event.src_path)]
             if (getattr(self.worker, "transcoder_compatibility", False) is True
                     and Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS
@@ -1045,10 +1055,24 @@ class LibraryEventHandler(FileSystemEventHandler):
                     self.incoming_worker.candidates.pop(event.src_path, None)
                 self.incoming_worker._save_state(event.src_path, "gone", detail="File removed from disk")
             if Path(event.src_path).suffix.lower() not in TEMPORARY_DOWNLOAD_EXTENSIONS:
+                replacement_candidate = None
                 if Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS:
                     with self._recent_creates_lock:
-                        self._recent_deleted_videos[event.src_path] = time.monotonic()
+                        now = time.monotonic()
+                        self._recent_deleted_videos[event.src_path] = now
+                        video_cutoff = now - 600.0
+                        self._recent_video_candidates = {k: v for k, v in self._recent_video_candidates.items() if v > video_cutoff}
+                        created_candidates = [new_path for new_path, seen in self._recent_video_candidates.items()
+                                              if new_path != event.src_path
+                                              and now - seen <= 600.0
+                                              and Path(new_path).is_file()
+                                              and likely_transcoder_replacement(event.src_path, new_path)]
+                    if (getattr(self.worker, "transcoder_compatibility", False) is True
+                            and len(created_candidates) == 1):
+                        replacement_candidate = created_candidates[0]
                 record_filesystem_event(self.database_path, "deleted", event.src_path, is_directory=event.is_directory, initial_status="pending")
+                if replacement_candidate:
+                    self.worker.submit(event.src_path, replacement_candidate)
                 if not event.is_directory and Path(event.src_path).suffix.lower() in WATCHED_EXTENSIONS:
                     threading.Timer(3, self._notify_if_still_missing, args=(event.src_path,)).start()
 
@@ -1068,6 +1092,13 @@ class LibraryEventHandler(FileSystemEventHandler):
         # Modification events are useful only for the incoming stability timer. They do not
         # identify a move/deletion and must not create an unexplained review warning.
         if not event.is_directory and self._relevant(event.src_path, False):
+            if (getattr(self.worker, "transcoder_compatibility", False) is True
+                    and Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS):
+                with self._recent_creates_lock:
+                    now = time.monotonic()
+                    self._recent_video_candidates[event.src_path] = now
+                    cutoff = now - 600.0
+                    self._recent_video_candidates = {k: v for k, v in self._recent_video_candidates.items() if v > cutoff}
             if self.incoming_worker:
                 self.incoming_worker.submit(event.src_path)
 
