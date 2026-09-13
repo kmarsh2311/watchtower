@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import librarymanager_core
+import librarymanager_monitor
 
 from librarymanager_core import (build_merge_preview, build_resolution_plan, inventory,
                                  opensubtitles_hash, preview_safe_filenames, preview_scene_filename,
@@ -28,10 +29,39 @@ from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             maybe_auto_restart_monitor, read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
                             start_filesystem_monitor, write_inventory_progress)
 from librarymanager_monitor import (CompletedDownloadWorker, claim_monitor_ownership, relocate_companions_transactionally,
-                                    tracked_move)
+                                    reload_monitor_if_code_changed, tracked_move)
 
 
 class InventoryTests(unittest.TestCase):
+    def test_detached_monitor_reloads_when_installed_code_changes(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = root / "inventory.sqlite3"
+            script = root / "librarymanager_monitor.py"
+            runtime_path = root / "monitor-runtime.json"
+            script.write_text("old code", encoding="utf-8")
+            loaded_signature = librarymanager_monitor.monitor_code_signature(script)
+            script.write_text("new code", encoding="utf-8")
+            worker = MagicMock(enabled=True, transcoder_compatibility=True, notifications=False)
+            incoming = MagicMock(
+                enabled=True, incoming_folder=root / "incoming", incoming_folders=[root / "incoming"],
+                settle_seconds=60, fallback_seconds=60, generate_contact_sheets=False,
+                contact_sheet_grid="4x4", contact_sheet_banner=True,
+                contact_sheet_adjust_vertical=True, contact_sheet_script="",
+                allow_custom_contact_sheet_script=False,
+            )
+            runtime = {"server_connection": {"Host": "127.0.0.1"}}
+            with patch("librarymanager_monitor.os.execv", side_effect=RuntimeError("exec intercepted")) as execv:
+                with self.assertRaisesRegex(RuntimeError, "exec intercepted"):
+                    reload_monitor_if_code_changed(
+                        loaded_signature, runtime_path, runtime, worker, incoming, database, script
+                    )
+            execv.assert_called_once()
+            persisted = json.loads(runtime_path.read_text(encoding="utf-8"))
+            self.assertTrue(persisted["transcoder_replacement_compatibility"])
+            self.assertEqual(persisted["server_connection"]["Host"], "127.0.0.1")
+            self.assertEqual(recent_activity(database, 1)[0]["action"], "code update")
+
     def test_auto_restart_is_rate_limited_and_recorded(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"
@@ -691,6 +721,24 @@ class InventoryTests(unittest.TestCase):
             # Analysis must not silently acknowledge an unresolved event. The
             # user chooses a resolution explicitly in the Watchtower UI.
             self.assertEqual(filesystem_monitor_summary(database)["pending_events"], 1)
+
+    def test_reobserved_dismissed_filesystem_event_becomes_pending_again(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            path = str(Path(temporary_directory) / "video.mp4")
+            record_filesystem_event(database, "created", path)
+            resolve_filesystem_event(database, "created", path)
+            self.assertEqual(filesystem_monitor_summary(database)["pending_events"], 0)
+
+            record_filesystem_event(database, "created", path)
+
+            self.assertEqual(filesystem_monitor_summary(database)["pending_events"], 1)
+            with sqlite3.connect(database) as connection:
+                status, count = connection.execute(
+                    "SELECT status,event_count FROM filesystem_events"
+                ).fetchone()
+            self.assertEqual(status, "pending")
+            self.assertEqual(count, 2)
 
     def test_reused_live_pid_is_not_accepted_as_watchtower_monitor(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

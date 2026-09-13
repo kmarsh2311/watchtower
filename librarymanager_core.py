@@ -942,8 +942,10 @@ def record_filesystem_event(database_path: Path, event_type: str, source_path: s
             """INSERT INTO filesystem_events(event_key,event_type,source_path,destination_path,is_directory,
                    first_seen_at,last_seen_at,event_count,status) VALUES (?,?,?,?,?,?,?,1,?)
                ON CONFLICT(event_key) DO UPDATE SET last_seen_at=excluded.last_seen_at,
+                   first_seen_at=CASE WHEN filesystem_events.status='reviewed'
+                                      THEN excluded.first_seen_at ELSE filesystem_events.first_seen_at END,
                    event_count=filesystem_events.event_count+1,
-                   status=CASE WHEN filesystem_events.status='reviewed' THEN 'reviewed' ELSE 'pending' END""",
+                   status=excluded.status""",
             (event_key, event_type, source_path, destination_path, int(is_directory), now, now, initial_status),
         )
         connection.commit()

@@ -3,6 +3,7 @@
 
 import argparse
 import base64
+import hashlib
 import logging
 import json
 import os
@@ -30,6 +31,53 @@ from librarymanager_core import (
 
 
 logger = logging.getLogger("librarymanager.monitor")
+
+
+def monitor_code_signature(path=None):
+    """Return a content signature so a detached daemon can detect plugin updates."""
+    try:
+        return hashlib.sha256(Path(path or __file__).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def persist_monitor_runtime(runtime_path, runtime, worker, incoming_worker):
+    """Preserve live settings across an in-place daemon code reload."""
+    snapshot = dict(runtime)
+    snapshot.update({
+        "automatic_move_reconciliation": bool(worker.enabled),
+        "transcoder_replacement_compatibility": bool(worker.transcoder_compatibility),
+        "mac_notifications": bool(worker.notifications),
+        "incoming_imports": bool(incoming_worker.enabled),
+        "incoming_folder": str(incoming_worker.incoming_folder or ""),
+        "incoming_folders": [str(path) for path in incoming_worker.incoming_folders],
+        "incoming_settle_seconds": incoming_worker.settle_seconds,
+        "incoming_fallback_seconds": incoming_worker.fallback_seconds,
+        "generate_contact_sheets": bool(incoming_worker.generate_contact_sheets),
+        "contact_sheet_grid": incoming_worker.contact_sheet_grid,
+        "contact_sheet_banner": bool(incoming_worker.contact_sheet_banner),
+        "contact_sheet_adjust_vertical": bool(incoming_worker.contact_sheet_adjust_vertical),
+        "contact_sheet_script": incoming_worker.contact_sheet_script,
+        "allow_custom_contact_sheet_script": bool(incoming_worker.allow_custom_contact_sheet_script),
+    })
+    temporary = runtime_path.with_name(f"{runtime_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(snapshot), encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, runtime_path)
+
+
+def reload_monitor_if_code_changed(loaded_signature, runtime_path, runtime, worker,
+                                   incoming_worker, database_path, script_path=None):
+    """Replace the current process when an installed update changes monitor code."""
+    current_signature = monitor_code_signature(script_path)
+    if not loaded_signature or not current_signature or current_signature == loaded_signature:
+        return False
+    persist_monitor_runtime(runtime_path, runtime, worker, incoming_worker)
+    record_activity(database_path, "monitor", "code update", "restarting",
+                    detail="Watchtower code changed on disk; reloading the detached monitor")
+    logger.info("Watchtower code changed on disk; replacing monitor process in place")
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+    return True
 
 
 VIDEO_EXTENSIONS = {
@@ -1348,6 +1396,7 @@ def main():
         logger.warning("Another Watchtower monitor already owns this database; exiting duplicate startup")
         return
     runtime_path = Path(args.runtime)
+    loaded_code_signature = monitor_code_signature()
     runtime = {}
     if runtime_path.is_file():
         try:
@@ -1390,6 +1439,10 @@ def main():
     observer.start()
     try:
         while True:
+            reload_monitor_if_code_changed(
+                loaded_code_signature, runtime_path, runtime, worker,
+                incoming_worker, database_path
+            )
             if control_path.exists():
                 try:
                     request = json.loads(control_path.read_text(encoding="utf-8"))
