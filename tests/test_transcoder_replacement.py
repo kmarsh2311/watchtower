@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import librarymanager_monitor
-from librarymanager_core import connect, opensubtitles_hash, recent_activity
+from librarymanager_core import connect, opensubtitles_hash, recent_activity, resolve_filesystem_event
 from librarymanager_monitor import (LibraryEventHandler, MoveWorker,
                                     TRANSCODER_DECISION_WINDOW_SECONDS,
                                     likely_transcoder_replacement,
@@ -104,6 +104,25 @@ def test_delete_first_waits_for_decision_window_then_submits_one_candidate():
             destination.write_bytes(b'new')
             handler.on_created(MagicMock(is_directory=False, src_path=str(destination)))
             worker.submit.assert_not_called()
+            _decision_callback(timer)()
+        worker.submit.assert_called_once_with(str(source), str(destination))
+
+
+def test_dismissing_review_does_not_cancel_scheduled_transcoder_replacement():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        database = root / 'db.sqlite3'
+        source = root / 'movie.mp4'
+        destination = root / 'movie encoded.mp4'
+        source.write_bytes(b'old')
+        _insert(database, source)
+        destination.write_bytes(b'new')
+        worker = MagicMock(transcoder_compatibility=True)
+        handler = LibraryEventHandler(database, worker, False)
+        source.unlink()
+        with patch('librarymanager_monitor.threading.Timer') as timer:
+            handler.on_deleted(MagicMock(is_directory=False, src_path=str(source)))
+            resolve_filesystem_event(database, 'deleted', str(source))
             _decision_callback(timer)()
         worker.submit.assert_called_once_with(str(source), str(destination))
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.5 — 2026-09-13
+
+- Fail closed when a transcoder replacement destination belongs to another file or scene.
+- Consider every plausible same-folder replacement and refuse ambiguous candidates before scanning or reconnecting.
+- Revalidate replacement ownership and uniqueness before scanning, after scanning and inside the final inventory transaction.
+- Allow the detached filesystem monitor to reload itself when a plugin update replaces its code on disk.
+- Treat Dismiss as applying to one filesystem-event occurrence so a later identical event becomes actionable again.
+
 ## 1.0.4 — 2026-09-13
 
 - Prevent weak or ambiguous companion-file matches from moving artwork, subtitles or other sidecars to the wrong scene.
