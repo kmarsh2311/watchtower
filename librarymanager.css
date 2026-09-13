@@ -2105,6 +2105,12 @@ a.lm-activity-scene-pill:hover {
   text-align: center;
 }
 
+.lm-wizard-index-progress {
+  width: min(440px, 100%);
+  height: .75rem;
+  accent-color: #39ff64;
+}
+
 /* Onboarding Wizard Modal Overlay & Graceful Luminous Animations */
 @keyframes lmFadeInBackdrop {
   0% {

@@ -6,6 +6,32 @@ const javascript = readFileSync(new URL("../librarymanager.js", import.meta.url)
 const css = readFileSync(new URL("../librarymanager.css", import.meta.url), "utf8");
 const manifest = readFileSync(new URL("../librarymanager.yml", import.meta.url), "utf8");
 
+function loadNamedFunction(name) {
+  const marker = `  function ${name}`;
+  const start = javascript.indexOf(marker);
+  assert.notEqual(start, -1, `${name} is present`);
+  let brace = javascript.indexOf("{", start);
+  let depth = 0;
+  let quote = null;
+  let escaped = false;
+  for (let index = brace; index < javascript.length; index += 1) {
+    const character = javascript[index];
+    if (escaped) { escaped = false; continue; }
+    if (character === "\\") { escaped = true; continue; }
+    if (quote) { if (character === quote) quote = null; continue; }
+    if (character === '"' || character === "'" || character === "`") { quote = character; continue; }
+    if (character === "{") depth += 1;
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        const source = javascript.slice(start + 2, index + 1);
+        return Function(`${source}; return ${name};`)();
+      }
+    }
+  }
+  throw new Error(`Could not parse ${name}`);
+}
+
 test("Command Centre presents unresolved changes as actions, not completed work", () => {
   assert.match(javascript, /NEEDS ATTENTION/);
   assert.match(javascript, /Video deletion detected/);
@@ -69,10 +95,35 @@ test("onboarding accurately describes ingest and local inventory", () => {
 });
 
 test("onboarding locks navigation while indexing and requires the baseline before continuing", () => {
-  assert.match(javascript, /if \(isExiting \|\| indexing\) return/);
-  assert.match(javascript, /className: "lm-wizard-close-btn",[\s\S]*disabled: indexing/);
-  assert.match(javascript, /if \(!indexing && s\.num < step\) goToStep/);
-  assert.match(javascript, /disabled: indexing \|\| \(step === 4 && !inventoryComplete\)/);
-  assert.match(javascript, /Indexing your library… Please keep this setup window open/);
+  assert.match(javascript, /if \(isExiting \|\| !onboardingControls\.canClose\) return/);
+  assert.match(javascript, /className: "lm-wizard-close-btn",[\s\S]*disabled: !onboardingControls\.canClose/);
+  assert.match(javascript, /disabled: !onboardingControls\.canGoNext/);
+  assert.match(javascript, /Indexing your library…/);
   assert.match(javascript, /indexError \? "↻ Try Again"/);
+  assert.match(javascript, /operation\("inventory_progress"\)/);
+  assert.match(javascript, /formatInventoryProgress\(indexProgress\)/);
+  assert.match(javascript, /className: "lm-wizard-index-progress"/);
+});
+
+test("help describes login startup as cross-platform", () => {
+  assert.match(javascript, /Start Monitoring at Login \(startAtLogin\)/);
+  assert.match(javascript, /macOS, Windows, or Linux/);
+  assert.doesNotMatch(javascript, /Start with macOS \(startAtLogin\)/);
+});
+
+test("onboarding controls enforce indexing and baseline transitions", () => {
+  const controls = loadNamedFunction("onboardingControlState");
+  assert.deepEqual(controls(4, true, false), {
+    canClose: false, canGoBack: false, canUseCompletedSteps: false, canGoNext: false
+  });
+  assert.equal(controls(4, false, false).canGoNext, false);
+  assert.equal(controls(4, false, true).canGoNext, true);
+  assert.equal(controls(5, false, true).canGoBack, true);
+});
+
+test("inventory progress formatter reports preparation and bounded percentage", () => {
+  const format = loadNamedFunction("formatInventoryProgress");
+  assert.match(format({ status: "preparing", detail: "Reading scenes from Stash" }), /Reading scenes from Stash/);
+  assert.match(format({ status: "running", processed: 50, total: 200 }), /50 of 200 files checked \(25%\)/);
+  assert.match(format({ status: "running", processed: 250, total: 200 }), /\(100%\)/);
 });

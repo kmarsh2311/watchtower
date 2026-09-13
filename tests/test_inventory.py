@@ -18,7 +18,8 @@ from librarymanager_core import _proposed_stem, incoming_summary
 from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             contact_sheet_scope_name, get_configured_incoming_folders,
                             incoming_folder_status, incoming_folders_status,
-                            require_bulk_dismissal)
+                            read_inventory_progress, require_bulk_dismissal,
+                            write_inventory_progress)
 from librarymanager_monitor import CompletedDownloadWorker, tracked_move
 
 
@@ -36,16 +37,53 @@ class InventoryTests(unittest.TestCase):
             remaining = root / "remaining.mp4"
             remaining.write_bytes(b"video")
             scene = {"files": [{"path": str(deleted)}, {"path": str(remaining)}]}
-            with self.assertRaisesRegex(ValueError, "another video file"):
+            with self.assertRaisesRegex(ValueError, "another attached video file"):
                 assert_scene_removal_safe(scene, str(deleted))
 
-    def test_scene_removal_allows_only_missing_files(self):
+    def test_scene_removal_refuses_multi_file_scene_even_when_other_path_is_offline(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             deleted = root / "deleted.mp4"
             other_missing = root / "also-missing.mp4"
             scene = {"files": [{"path": str(deleted)}, {"path": str(other_missing)}]}
-            assert_scene_removal_safe(scene, str(deleted))
+            with self.assertRaisesRegex(ValueError, "multi-file scenes"):
+                assert_scene_removal_safe(scene, str(deleted))
+
+    def test_scene_removal_refuses_when_deleted_file_reappears(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            video = Path(temporary_directory) / "restored.mp4"
+            video.write_bytes(b"video")
+            with self.assertRaisesRegex(ValueError, "exists again"):
+                assert_scene_removal_safe({"files": [{"path": str(video)}]}, str(video))
+
+    def test_scene_removal_allows_one_confirmed_missing_attached_path(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            video = Path(temporary_directory) / "missing.mp4"
+            assert_scene_removal_safe({"files": [{"path": str(video)}]}, str(video))
+
+    def test_scene_removal_refuses_path_no_longer_attached(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with self.assertRaisesRegex(ValueError, "no longer attached"):
+                assert_scene_removal_safe({"files": [{"path": str(root / 'other.mp4')}]}, str(root / "deleted.mp4"))
+
+    def test_inventory_reports_bounded_progress(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            updates = []
+            scenes = [{"id": str(index), "files": [{"id": str(index), "path": str(Path(temporary_directory) / f"{index}.mp4")}],
+                       "performers": [], "tags": [], "galleries": [], "stash_ids": [], "groups": [], "urls": []}
+                      for index in range(1, 121)]
+            summary = inventory(database, scenes, progress_callback=lambda current, total: updates.append((current, total)))
+            self.assertEqual(summary["files"], 120)
+            self.assertEqual(updates, [(0, 120), (50, 120), (100, 120), (120, 120)])
+
+    def test_inventory_progress_file_round_trip(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            write_inventory_progress(database, "running", 50, 120, "Checking files on disk")
+            progress = read_inventory_progress(database)
+            self.assertEqual((progress["status"], progress["processed"], progress["total"]), ("running", 50, 120))
 
     def test_scene_removal_refuses_when_scene_files_cannot_be_verified(self):
         with self.assertRaisesRegex(ValueError, "could not verify"):

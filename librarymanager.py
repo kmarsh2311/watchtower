@@ -13,6 +13,7 @@ import shutil
 import sys
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from stashapi.stashapp import StashInterface
@@ -159,20 +160,61 @@ def contact_sheet_scope_name(configured_folders):
 
 
 def assert_scene_removal_safe(scene, deleted_path):
-    """Refuse to remove a scene while another one of its video files still exists."""
+    """Refuse removal unless one missing path is the scene's only attached file."""
     scene_files = scene.get("files") if isinstance(scene, dict) else None
-    if scene_files is None:
+    if not scene_files:
         raise ValueError("Watchtower could not verify this scene's current files, so it was not removed")
     normalized_deleted_path = os.path.normcase(os.path.realpath(deleted_path))
+    if Path(deleted_path).exists():
+        raise ValueError("The video file exists again, so Watchtower will not remove its Stash scene")
+    normalized_scene_paths = []
     for scene_file in scene_files:
         scene_path = str((scene_file or {}).get("path") or "")
         if not scene_path:
-            continue
-        normalized_scene_path = os.path.normcase(os.path.realpath(scene_path))
-        if normalized_scene_path != normalized_deleted_path and Path(scene_path).is_file():
-            raise ValueError(
-                "This scene still has another video file on disk, so Watchtower will not remove the scene"
-            )
+            raise ValueError("Watchtower could not verify this scene's current files, so it was not removed")
+        normalized_scene_paths.append(os.path.normcase(os.path.realpath(scene_path)))
+    if normalized_deleted_path not in normalized_scene_paths:
+        raise ValueError("The deleted path is no longer attached to this scene, so Watchtower made no change")
+    if len(normalized_scene_paths) != 1:
+        raise ValueError(
+            "This scene has another attached video file, so Watchtower will not remove the scene. "
+            "Review multi-file scenes directly in Stash"
+        )
+
+
+def inventory_progress_path(database_path):
+    return Path(database_path).with_name(f"{Path(database_path).name}.inventory-progress.json")
+
+
+def write_inventory_progress(database_path, status, processed=0, total=0, detail=""):
+    """Atomically publish inventory progress for the onboarding UI."""
+    progress_path = inventory_progress_path(database_path)
+    temporary_path = progress_path.with_name(f"{progress_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    payload = {
+        "status": str(status),
+        "processed": max(0, int(processed or 0)),
+        "total": max(0, int(total or 0)),
+        "detail": str(detail or ""),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        temporary_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary_path.replace(progress_path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return payload
+
+
+def read_inventory_progress(database_path):
+    progress_path = inventory_progress_path(database_path)
+    if not progress_path.is_file():
+        return {"status": "idle", "processed": 0, "total": 0, "detail": ""}
+    try:
+        payload = json.loads(progress_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {"status": "idle", "processed": 0, "total": 0, "detail": ""}
+    except (OSError, ValueError):
+        return {"status": "unknown", "processed": 0, "total": 0,
+                "detail": "Progress is temporarily unavailable"}
 
 
 def require_bulk_dismissal(resolution):
@@ -866,10 +908,27 @@ def main():
                 f"Generated {generated_count} contact sheet(s) in {scope_name}. "
                 f"{skipped_count} already had artwork.{err_str}"
             )
+    elif mode == "inventory_progress":
+        message = json.dumps(read_inventory_progress(database_path), ensure_ascii=False)
     elif mode in ("inventory", "build_inventory"):
         stash = StashInterface(plugin_input["server_connection"])
-        scenes = fetch_scenes(stash)
-        summary = inventory(database_path, scenes)
+        write_inventory_progress(database_path, "preparing", detail="Reading scenes from Stash")
+        try:
+            scenes = fetch_scenes(stash)
+            summary = inventory(
+                database_path,
+                scenes,
+                progress_callback=lambda processed, total: write_inventory_progress(
+                    database_path, "running", processed, total, "Checking files on disk"
+                ),
+            )
+            write_inventory_progress(database_path, "complete", summary["files"], summary["files"],
+                                     "Baseline inventory complete")
+        except Exception as inventory_error:
+            current_progress = read_inventory_progress(database_path)
+            write_inventory_progress(database_path, "failed", current_progress.get("processed", 0),
+                                     current_progress.get("total", 0), str(inventory_error))
+            raise
         if mode == "build_inventory":
             message = json.dumps(summary, ensure_ascii=False)
         else:

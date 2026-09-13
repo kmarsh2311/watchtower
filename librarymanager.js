@@ -73,6 +73,23 @@
   const PRODUCT_NAME = "Watchtower";
   const PATH = "/library-manager";
 
+  function onboardingControlState(step, indexing, inventoryComplete) {
+    return {
+      canClose: !indexing,
+      canGoBack: step > 0 && !indexing,
+      canUseCompletedSteps: !indexing,
+      canGoNext: !indexing && (step !== 4 || inventoryComplete)
+    };
+  }
+
+  function formatInventoryProgress(progress) {
+    const processed = Math.max(0, Number(progress?.processed || 0));
+    const total = Math.max(0, Number(progress?.total || 0));
+    if (!total) return `Indexing your library… ${progress?.detail || "Reading scenes from Stash"}. Please keep this setup window open.`;
+    const percentage = Math.min(100, Math.round((processed / total) * 100));
+    return `Indexing your library… ${processed.toLocaleString()} of ${total.toLocaleString()} files checked (${percentage}%).`;
+  }
+
   async function gql(query, variables) {
     const base = document.querySelector("base")?.getAttribute("href") || "/";
     const response = await fetch(`${base}graphql`, {
@@ -528,6 +545,7 @@
     const [indexing, setIndexing] = React.useState(false);
     const [indexResult, setIndexResult] = React.useState(null);
     const [indexError, setIndexError] = React.useState("");
+    const [indexProgress, setIndexProgress] = React.useState(null);
 
     if (!show) return null;
 
@@ -541,6 +559,7 @@
     });
     const inventoryComplete = inventory?.status === "complete" && Boolean(inventory?.completed_at);
     const setupReady = availableRoots.length > 0 && inventoryComplete;
+    const onboardingControls = onboardingControlState(step, indexing, inventoryComplete);
 
     // Incoming multi-folder handling in wizard
     const rawFolders = Array.isArray(config.incomingFolders)
@@ -556,7 +575,7 @@
     };
 
     const handleCloseGracefully = (targetTab = null) => {
-      if (isExiting || indexing) return;
+      if (isExiting || !onboardingControls.canClose) return;
       setIsExiting(true);
       window.setTimeout(() => {
         onHide();
@@ -593,13 +612,33 @@
     const handleRunIndex = async () => {
       setIndexing(true);
       setIndexError("");
+      setIndexResult(null);
+      setIndexProgress({ status: "preparing", processed: 0, total: 0, detail: "Reading scenes from Stash" });
+      let progressRequestActive = false;
+      let progressPolling = true;
+      const progressTimer = window.setInterval(async () => {
+        if (!progressPolling || progressRequestActive) return;
+        progressRequestActive = true;
+        try {
+          const progress = await operation("inventory_progress");
+          if (progressPolling && progress && typeof progress === "object") setIndexProgress(progress);
+        } catch {
+          // The primary indexing operation remains authoritative if polling is unavailable.
+        } finally {
+          progressRequestActive = false;
+        }
+      }, 750);
       try {
         const res = await operation("build_inventory");
         setIndexResult(res);
+        setIndexProgress({ status: "complete", processed: res.files || 0, total: res.files || 0, detail: "Baseline inventory complete" });
         await refresh();
       } catch (err) {
         setIndexError(err.message || "Failed to build inventory");
+        setIndexProgress(previous => ({ ...(previous || {}), status: "failed", detail: err.message || "Failed to build inventory" }));
       } finally {
+        progressPolling = false;
+        window.clearInterval(progressTimer);
         setIndexing(false);
       }
     };
@@ -696,7 +735,7 @@
           React.createElement("button", {
             type: "button",
             className: "lm-wizard-close-btn",
-            disabled: indexing,
+            disabled: !onboardingControls.canClose,
             "aria-disabled": indexing ? "true" : undefined,
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); handleCloseGracefully(); },
             title: indexing ? "Please wait while Watchtower indexes your library" : "Close Setup Wizard"
@@ -709,8 +748,8 @@
             return React.createElement("div", {
               key: s.num,
               className: `lm-wizard-step-item ${isCurrent ? "current" : ""} ${isDone ? "done" : ""}`,
-              onClick: () => { if (!indexing && s.num < step) goToStep(s.num); },
-              style: { cursor: !indexing && s.num < step ? "pointer" : "default" }
+              onClick: () => { if (onboardingControls.canUseCompletedSteps && s.num < step) goToStep(s.num); },
+              style: { cursor: onboardingControls.canUseCompletedSteps && s.num < step ? "pointer" : "default" }
             },
               React.createElement("div", { className: "lm-wizard-step-circle" }, isDone ? "✓" : s.num),
               React.createElement("span", { className: "lm-wizard-step-label" }, s.label)
@@ -914,7 +953,13 @@
                   role: "status",
                   "aria-live": "polite",
                   style: { color: "#39ff64", fontSize: "0.88rem", marginTop: "4px" }
-                }, "Indexing your library… Please keep this setup window open. This may take a few minutes.")
+                }, formatInventoryProgress(indexProgress)),
+                indexing && indexProgress?.total > 0 && React.createElement("progress", {
+                  className: "lm-wizard-index-progress",
+                  max: Number(indexProgress.total),
+                  value: Number(indexProgress.processed || 0),
+                  "aria-label": "Library indexing progress"
+                })
               ),
               indexResult && React.createElement("div", { className: "lm-wizard-index-result", style: { marginTop: "16px", maxWidth: "480px" } },
                 React.createElement("span", { style: { color: "#39ff64", fontWeight: "700" } }, "✓ Indexing Complete: "),
@@ -1038,13 +1083,13 @@
           step > 0 && step < 7 && React.createElement("button", {
             type: "button",
             className: "btn btn-secondary",
-            disabled: indexing,
+            disabled: !onboardingControls.canGoBack,
             onClick: (e) => { e.preventDefault(); e.stopPropagation(); goToStep(step - 1); }
           }, step === 1 ? "⬅ Back to Welcome" : "⬅ Back"),
           step > 0 && step < 7 && React.createElement("button", {
             type: "button",
             className: "btn btn-primary",
-            disabled: indexing || (step === 4 && !inventoryComplete),
+            disabled: !onboardingControls.canGoNext,
             title: step === 4 && !inventoryComplete
               ? (indexing ? "Watchtower is indexing your library" : "Build the initial inventory before continuing")
               : undefined,
@@ -2872,7 +2917,7 @@
               React.createElement("li", null, React.createElement("strong", null, "Monitor State: "), "Displays whether the daemon is Running or Stopped, along with process PID and heartbeat timestamp."),
               React.createElement("li", null, React.createElement("strong", null, "Start / Stop / Reload Buttons: "), "Manually control the daemon process or reload configuration changes."),
               React.createElement("li", null, React.createElement("strong", null, "Auto Start Monitor (autoStartMonitor): "), "Automatically launches the monitor process whenever the Stash web interface loads."),
-              React.createElement("li", null, React.createElement("strong", null, "Start with macOS (startAtLogin): "), "Configures a macOS LaunchAgent to start the daemon at system login."),
+              React.createElement("li", null, React.createElement("strong", null, "Start Monitoring at Login (startAtLogin): "), "Configures the appropriate login startup entry on macOS, Windows, or Linux."),
               React.createElement("li", null, React.createElement("strong", null, "Library Roots: "), "Displays all discovered Stash library roots and verifies whether each mount/drive is currently available or offline.")
             ),
             React.createElement("h3", { key: "h3_2" }, "Reconcile Verified External Moves (automaticMoveReconciliation)"),
@@ -3343,7 +3388,7 @@
   }
 
   window.StashLibraryManager = Object.freeze({
-    version: "1.0.1",
+    version: "1.0.2",
     openFilenameCorrection(sceneId) {
       const normalized = String(sceneId || "").trim();
       if (!/^\d+$/.test(normalized)) throw new Error("Library Manager requires a valid Scene ID");

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2 — 2026-09-13
+
+- Recheck deleted paths immediately before removing a stale Stash scene.
+- Refuse automatic removal for multi-file scenes, including files on offline storage.
+- Show live file counts and percentage while onboarding builds its baseline inventory.
+- Correct the remaining macOS-only startup wording in the help guide.
+- Add executable onboarding-state, progress-formatting, and inventory-progress tests.
+
 ## 1.0.1 — 2026-09-13
 
 - Make guided setup require an online Stash library root and a completed baseline inventory.

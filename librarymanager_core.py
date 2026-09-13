@@ -655,7 +655,7 @@ def flatten_scene_files(scenes):
             }
 
 
-def inventory(database_path: Path, scenes) -> dict:
+def inventory(database_path: Path, scenes, progress_callback=None) -> dict:
     now = utc_now()
     connection = connect(database_path)
     try:
@@ -663,10 +663,13 @@ def inventory(database_path: Path, scenes) -> dict:
             "INSERT INTO inventory_runs(started_at) VALUES (?)", (now,)
         ).lastrowid
         records = list(flatten_scene_files(scenes))
+        total_records = len(records)
+        if progress_callback:
+            progress_callback(0, total_records)
         summary = {"scenes": len({record["scene_id"] for record in records}), "files": 0,
                    "present": 0, "missing": 0, "changed_paths": 0, "restored": 0}
 
-        for record in records:
+        for record_number, record in enumerate(records, start=1):
             previous = connection.execute(
                 "SELECT path, exists_on_disk, missing_since FROM files WHERE file_id = ?",
                 (record["file_id"],),
@@ -707,6 +710,8 @@ def inventory(database_path: Path, scenes) -> dict:
                        last_seen_at=excluded.last_seen_at,missing_since=excluded.missing_since""",
                 {**record, "exists_on_disk": int(exists), "first_seen_at": now, "last_seen_at": now, "missing_since": missing_since},
             )
+            if progress_callback and (record_number == total_records or record_number % 50 == 0):
+                progress_callback(record_number, total_records)
 
         connection.execute("DELETE FROM filename_state WHERE file_id IN (SELECT file_id FROM files WHERE last_seen_at != ?)", (now,))
         connection.execute("DELETE FROM filename_previews WHERE file_id IN (SELECT file_id FROM files WHERE last_seen_at != ?)", (now,))
