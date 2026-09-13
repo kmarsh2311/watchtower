@@ -52,67 +52,100 @@ def _sidecar_match_key(name: str) -> str:
 
 
 def match_companion_to_video(candidate: Path, video: Path):
+    """Match colocated companions without fuzzy cross-name guesses."""
     c_suffix = candidate.suffix.lower()
+    if c_suffix not in COMPANION_EXTENSIONS:
+        return False, None
+
     c_name = candidate.name.lower()
     v_name = video.name.lower()
     c_stem = candidate.stem.lower()
     v_stem = video.stem.lower()
 
+    # Explicit compound form: video.mp4.jpg / video.mp4.srt
     if c_name == v_name + c_suffix:
         return True, ""
+
+    # Standard same-stem form: video.jpg / video.srt for video.mp4
     if c_stem == v_stem:
         return True, ""
-    if _sidecar_match_key(c_stem) == _sidecar_match_key(v_stem):
-        return True, ""
-    if c_stem.startswith(v_stem) and len(c_stem) > len(v_stem):
-        remainder = candidate.stem[len(video.stem):]
-        if remainder.startswith(".") or remainder.startswith("-") or remainder.startswith("_"):
-            return True, remainder
 
+    # Accent/bracket tolerant exact equivalence only.
     k_cand = _sidecar_match_key(c_stem)
     k_vid = _sidecar_match_key(v_stem)
-    if k_vid and k_cand.startswith(k_vid) and len(k_cand) - len(k_vid) <= 6:
+    if k_cand and k_cand == k_vid:
         return True, ""
+
+    # Short language/part suffixes such as Scene.en.srt or Scene-ptBR.srt.
+    if candidate.stem.casefold().startswith(video.stem.casefold()) and len(candidate.stem) > len(video.stem):
+        remainder = candidate.stem[len(video.stem):]
+        if remainder.startswith((".", "-", "_")) and len(remainder) <= 8:
+            return True, remainder
 
     return False, None
 
 
-def find_scene_for_companion(con, companion_name: str):
-    c_p = Path(companion_name)
-    c_stem = c_p.stem
-    c_key = _sidecar_match_key(c_stem)
+def _compound_video_name(companion_name: str):
+    base = Path(companion_name).stem
+    if Path(base).suffix.lower() in VIDEO_EXTENSIONS:
+        return base
+    return None
 
-    if c_stem.lower().endswith(tuple(VIDEO_EXTENSIONS)):
-        cur = con.execute("SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1 AND basename = ?", (c_stem,))
-        row = cur.fetchone()
-        if row:
-            return row, ""
 
-    cur = con.execute("SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1 AND basename LIKE ?", (c_stem + ".%",))
-    for row in cur.fetchall():
-        v_p = Path(row["basename"])
-        if v_p.stem.lower() == c_stem.lower():
-            return row, ""
+def find_scene_for_companion(con, companion_path_or_name):
+    """Resolve companions conservatively: local exact matches or unique compound names only."""
+    c_path = Path(companion_path_or_name)
+    c_name = c_path.name
+    c_stem = c_path.stem
+    c_dir = str(c_path.parent.resolve()) if len(c_path.parts) > 1 else None
 
-    parts = c_stem.rsplit(".", 1)
-    if len(parts) == 2 and len(parts[1]) in (2, 3, 6):
-        base_stem = parts[0]
-        remainder = "." + parts[1]
-        cur = con.execute("SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1 AND basename LIKE ?", (base_stem + ".%",))
-        for row in cur.fetchall():
-            v_p = Path(row["basename"])
-            if v_p.stem.lower() == base_stem.lower():
-                return row, remainder
+    if c_path.suffix.lower() not in COMPANION_EXTENSIONS:
+        return None, ""
 
-    for row in con.execute("SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1"):
-        v_stem = Path(row["basename"]).stem
-        v_key = _sidecar_match_key(v_stem)
-        if v_key == c_key:
-            return row, ""
-        if c_key.startswith(v_key) and len(c_key) - len(v_key) <= 6:
-            return row, ""
+    # Strong cross-directory form only: Movie.m4v.jpg -> Movie.m4v.
+    compound_name = _compound_video_name(c_name)
+    if compound_name:
+        rows = con.execute(
+            "SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1 AND basename = ?",
+            (compound_name,),
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0], ""
+        if len(rows) > 1 and c_dir:
+            local = [r for r in rows if str(Path(r["path"]).parent.resolve()) == c_dir]
+            if len(local) == 1:
+                return local[0], ""
+        return None, ""
 
-    return None, None
+    # Weak stem matching is allowed only inside the exact same directory.
+    if not c_dir:
+        return None, ""
+
+    rows = con.execute(
+        "SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1"
+    ).fetchall()
+    local_rows = [r for r in rows if str(Path(r["path"]).parent.resolve()) == c_dir]
+    matches = []
+    for row in local_rows:
+        video = Path(row["basename"])
+        if video.stem.casefold() == c_stem.casefold():
+            matches.append((row, ""))
+            continue
+        c_key = _sidecar_match_key(c_stem)
+        v_key = _sidecar_match_key(video.stem)
+        if c_key and c_key == v_key:
+            matches.append((row, ""))
+            continue
+        if c_stem.casefold().startswith(video.stem.casefold()) and len(c_stem) > len(video.stem):
+            remainder = c_stem[len(video.stem):]
+            if remainder.startswith((".", "-", "_")) and len(remainder) <= 8:
+                matches.append((row, remainder))
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.warning("[REVIEW / SKIP] Companion %s has %d same-directory video matches", c_name, len(matches))
+    return None, ""
 
 
 def relocate_companions_transactionally(database_path: Path, source_path: str, destination_path: str):
@@ -731,6 +764,9 @@ class CompletedDownloadWorker(threading.Thread):
             cand = Path(c_path)
             if cand.suffix.lower() not in COMPANION_EXTENSIONS or not cand.is_file():
                 continue
+            # Never pair pending companions across incoming directories.
+            if cand.parent.resolve() != video_p.parent.resolve():
+                continue
             matched, remainder = match_companion_to_video(cand, video_p)
             if matched:
                 if cand.name.lower().startswith(actual_path.name.lower()):
@@ -742,6 +778,12 @@ class CompletedDownloadWorker(threading.Thread):
                 target_path = actual_path.parent / target_name
 
                 if target_path != cand:
+                    if target_path.exists():
+                        self._save_state(c_path, "waiting", detail=f"Companion destination already exists: {target_path}")
+                        record_activity(self.database_path, "companion", "companion collision", "review",
+                                        severity="warning", old_path=str(cand), new_path=str(target_path),
+                                        detail="Companion not moved because destination already exists")
+                        continue
                     try:
                         expect_filesystem_move(self.database_path, str(cand), str(target_path))
                         cand.rename(target_path)
@@ -782,7 +824,7 @@ class CompletedDownloadWorker(threading.Thread):
 
         connection = connect(self.database_path)
         try:
-            row, remainder = find_scene_for_companion(connection, cand_path.name)
+            row, remainder = find_scene_for_companion(connection, cand_path)
         finally:
             connection.close()
 
@@ -798,6 +840,13 @@ class CompletedDownloadWorker(threading.Thread):
                 target_path = actual_video.parent / target_name
 
                 if target_path != cand_path:
+                    if target_path.exists():
+                        self._save_state(path, "waiting", detail=f"Companion destination already exists: {target_path}")
+                        record_activity(self.database_path, "companion", "companion collision", "review",
+                                        severity="warning", scene_id=row["scene_id"], old_path=str(cand_path),
+                                        new_path=str(target_path),
+                                        detail="Companion not moved because destination already exists")
+                        return
                     try:
                         expect_filesystem_move(self.database_path, str(cand_path), str(target_path))
                         cand_path.rename(target_path)
