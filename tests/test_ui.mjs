@@ -72,6 +72,12 @@ test("manifest wording reflects current cross-platform and multi-folder behaviou
   assert.doesNotMatch(manifest, /Allow One Test Rename/);
 });
 
+test("an edited incoming-folder path is described as pending validation", () => {
+  assert.match(javascript, /Finish editing to validate/);
+  assert.match(javascript, /Folder validation pending/);
+  assert.match(javascript, /Finish editing the folder path and Watchtower will check/);
+});
+
 test("custom contact-sheet executables require an explicit trust switch", () => {
   assert.match(manifest, /allowCustomContactSheetScript:/);
   assert.match(manifest, /same access as Stash/);

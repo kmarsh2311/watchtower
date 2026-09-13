@@ -2485,6 +2485,11 @@
       const incomingFoldersList = rawFolders.length > 0 ? rawFolders : [""];
       const multiStatus = data?.incoming_folders || { folders: [], valid_count: 0, total_count: 0, all_valid: false };
       const statusFolders = multiStatus.folders || [];
+      const folderValidationPending = incomingFoldersList.some((folderPath, idx) => {
+        const isConfigured = Boolean((folderPath || "").trim());
+        const folderStatus = statusFolders[idx] || {};
+        return isConfigured && folderStatus.reason === "Choose an incoming folder first";
+      });
 
       const handleUpdateFolder = (index, val) => {
         const next = [...incomingFoldersList];
@@ -2554,6 +2559,9 @@
                 const folderStatus = statusFolders[idx] || {};
                 const isConfigured = Boolean((folderPath || "").trim());
                 const isValid = Boolean(folderStatus.valid);
+                const statusReason = isConfigured && folderStatus.reason === "Choose an incoming folder first"
+                  ? "Finish editing to validate"
+                  : (folderStatus.reason || "Outside Library");
                 return React.createElement("div", { key: idx, className: "lm-incoming-row" },
                   React.createElement("span", { className: "lm-incoming-row-num" }, `#${idx + 1}`),
                   React.createElement("input", {
@@ -2569,7 +2577,7 @@
                   }),
                   isConfigured ? React.createElement("span", {
                     className: `lm-incoming-status-pill ${isValid ? "ok" : "warn"}`
-                  }, isValid ? "✓ Inside Library" : (folderStatus.reason || "Outside Library")) : null,
+                  }, isValid ? "✓ Inside Library" : statusReason) : null,
                   React.createElement("button", {
                     type: "button",
                     className: "lm-incoming-row-remove",
@@ -2581,8 +2589,14 @@
               })
             ),
             React.createElement("div", { className: `lm-incoming-state ${multiStatus.valid_count > 0 ? "ready" : "warning"}`, style: { marginTop: "16px" } },
-              React.createElement("strong", null, multiStatus.valid_count > 0 ? `${multiStatus.valid_count} incoming folder${multiStatus.valid_count === 1 ? "" : "s"} ready to monitor` : "Incoming folders need attention"),
-              React.createElement("span", null, multiStatus.valid_count > 0 ? "Watchtower is tracking completed video files across all valid folders." : "Please configure at least one incoming folder located inside a Stash library root."),
+              React.createElement("strong", null, multiStatus.valid_count > 0
+                ? `${multiStatus.valid_count} incoming folder${multiStatus.valid_count === 1 ? "" : "s"} ready to monitor`
+                : (folderValidationPending ? "Folder validation pending" : "Incoming folders need attention")),
+              React.createElement("span", null, multiStatus.valid_count > 0
+                ? "Watchtower is tracking completed video files across all valid folders."
+                : (folderValidationPending
+                  ? "Finish editing the folder path and Watchtower will check that it is available and inside a Stash library root."
+                  : "Please configure at least one incoming folder located inside a Stash library root.")),
               React.createElement("small", null, `${incoming.downloading ? `${incoming.downloading} downloading, ` : ""}${incoming.waiting || 0} waiting, ${incoming.scanning || 0} being added, ${incoming.imported || 0} added, ${incoming.failed || 0} failed.`)),
             React.createElement("p", { className: "lm-help", style: { marginTop: "10px" } },
               "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."))))
