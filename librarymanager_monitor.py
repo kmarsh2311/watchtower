@@ -250,6 +250,46 @@ def notify(enabled, message):
         pass
 
 
+TRANSCODER_SUFFIXES = ("encoded", "transcoded", "h265", "hevc", "x265")
+
+
+def _normalise_transcoder_stem(stem):
+    value = str(stem or "").strip().casefold()
+    for suffix in TRANSCODER_SUFFIXES:
+        for separator in (" ", "-", "_"):
+            token = separator + suffix
+            if value.endswith(token):
+                return value[:-len(token)].rstrip(" -_")
+    return value
+
+
+def likely_transcoder_replacement(source, destination):
+    """Return True only for a conservative same-directory transcode-style replacement."""
+    src = Path(source)
+    dst = Path(destination)
+    try:
+        if src.parent.resolve() != dst.parent.resolve():
+            return False
+    except (OSError, ValueError):
+        return False
+    if src.suffix.lower() not in VIDEO_EXTENSIONS or dst.suffix.lower() not in VIDEO_EXTENSIONS:
+        return False
+    src_stem = src.stem.strip().casefold()
+    dst_stem = dst.stem.strip().casefold()
+    if not src_stem or not dst_stem:
+        return False
+    return src_stem == dst_stem or _normalise_transcoder_stem(dst_stem) == src_stem
+
+
+def inventoried_source(database_path, source):
+    connection = connect(database_path)
+    try:
+        row = connection.execute("SELECT * FROM files WHERE path=?", (source,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        connection.close()
+
+
 def tracked_move(database_path, source, destination):
     """Verify a move from the exact inventoried path without changing any record."""
     target = Path(destination)
@@ -271,10 +311,11 @@ def tracked_move(database_path, source, destination):
 
 
 class MoveWorker(threading.Thread):
-    def __init__(self, database_path, stash, enabled, notifications):
+    def __init__(self, database_path, stash, enabled, notifications, transcoder_compatibility=False):
         super().__init__(daemon=True)
         self.database_path, self.stash = database_path, stash
         self.enabled, self.notifications = enabled, notifications
+        self.transcoder_compatibility = bool(transcoder_compatibility)
         self.items = queue.Queue()
         self.stopping = False
 
@@ -300,12 +341,20 @@ class MoveWorker(threading.Thread):
                 break
             try:
                 row, reason = tracked_move(self.database_path, source, destination)
+                transcode_replacement = False
+                if not row and self.transcoder_compatibility and likely_transcoder_replacement(source, destination):
+                    row = inventoried_source(self.database_path, source)
+                    if row:
+                        transcode_replacement = True
+                        reason = "Likely same-folder transcoder replacement accepted by explicit compatibility setting"
                 if not row:
                     record_activity(self.database_path, "filesystem", "external move", "review",
                                     severity="warning", old_path=source, new_path=destination, detail=reason)
                     notify(self.notifications, f"File move needs review: {Path(destination).name}")
                     continue
-                record_activity(self.database_path, "filesystem", "external move", "verified",
+                record_activity(self.database_path, "filesystem",
+                                "transcoder replacement" if transcode_replacement else "external move",
+                                "accepted" if transcode_replacement else "verified",
                                 scene_id=row["scene_id"], file_id=row["file_id"], old_path=source,
                                 new_path=destination, detail=reason)
                 notify(self.notifications, f"File moved: {Path(source).name} → {Path(destination).parent.name}")
@@ -943,6 +992,7 @@ class LibraryEventHandler(FileSystemEventHandler):
         # "still missing?" check can tell the difference between a genuine
         # deletion and a rapid delete-then-recreate (e.g. atomic download swap).
         self._recent_creates: dict[str, float] = {}
+        self._recent_deleted_videos: dict[str, float] = {}
         self._recent_creates_lock = threading.Lock()
 
     def _relevant(self, path, is_directory):
@@ -976,6 +1026,14 @@ class LibraryEventHandler(FileSystemEventHandler):
                 # Prune entries older than 30 s to prevent unbounded growth
                 cutoff = time.monotonic() - 30.0
                 self._recent_creates = {k: v for k, v in self._recent_creates.items() if v > cutoff}
+                self._recent_deleted_videos = {k: v for k, v in self._recent_deleted_videos.items() if v > cutoff}
+                deleted_candidates = [old for old, seen in self._recent_deleted_videos.items()
+                                      if time.monotonic() - seen <= 30.0
+                                      and likely_transcoder_replacement(old, event.src_path)]
+            if (getattr(self.worker, "transcoder_compatibility", False) is True
+                    and Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS
+                    and len(deleted_candidates) == 1):
+                self.worker.submit(deleted_candidates[0], event.src_path)
             record_filesystem_event(self.database_path, "created", event.src_path, is_directory=event.is_directory, initial_status="pending")
 
     def on_deleted(self, event):
@@ -987,6 +1045,9 @@ class LibraryEventHandler(FileSystemEventHandler):
                     self.incoming_worker.candidates.pop(event.src_path, None)
                 self.incoming_worker._save_state(event.src_path, "gone", detail="File removed from disk")
             if Path(event.src_path).suffix.lower() not in TEMPORARY_DOWNLOAD_EXTENSIONS:
+                if Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS:
+                    with self._recent_creates_lock:
+                        self._recent_deleted_videos[event.src_path] = time.monotonic()
                 record_filesystem_event(self.database_path, "deleted", event.src_path, is_directory=event.is_directory, initial_status="pending")
                 if not event.is_directory and Path(event.src_path).suffix.lower() in WATCHED_EXTENSIONS:
                     threading.Timer(3, self._notify_if_still_missing, args=(event.src_path,)).start()
@@ -1141,7 +1202,8 @@ def main():
             logger.debug("Failed to read runtime config from %s: %s", runtime_path, exc)
     stash = StashInterface(runtime["server_connection"])
     worker = MoveWorker(database_path, stash, runtime.get("automatic_move_reconciliation") is True,
-                        runtime.get("mac_notifications") is True)
+                        runtime.get("mac_notifications") is True,
+                        runtime.get("transcoder_replacement_compatibility") is True)
     incoming_worker = CompletedDownloadWorker(
         database_path, stash, runtime.get("incoming_folder"), runtime.get("incoming_imports") is True,
         runtime.get("incoming_settle_seconds", 300), runtime.get("mac_notifications") is True,
@@ -1185,6 +1247,7 @@ def main():
                         try:
                             new_cfg = request.get("config") or {}
                             worker.enabled = bool(new_cfg.get("automatic_move_reconciliation", worker.enabled))
+                            worker.transcoder_compatibility = bool(new_cfg.get("transcoder_replacement_compatibility", worker.transcoder_compatibility))
                             worker.notifications = bool(new_cfg.get("mac_notifications", worker.notifications))
                             _new_folders = new_cfg.get("incoming_folders")
                             _new_folder_str = new_cfg.get("incoming_folder")

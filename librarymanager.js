@@ -1243,6 +1243,7 @@
           autoStartMonitor: true,
           startAtLogin: false,
           automaticMoveReconciliation: false,
+          transcoderReplacementCompatibility: false,
           automaticIncomingScan: false,
           incomingFolder: "",
           incomingSettleMinutes: 5,
@@ -2467,6 +2468,8 @@
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "automaticMoveReconciliation", label: "Reconcile Verified External Moves",
             help: "When a file is moved outside of Stash and verified by size/hash, ask Stash to scan the new path and reconnect it." }),
+          React.createElement(Switch, { setting: "transcoderReplacementCompatibility", label: "Transcoder Replacement Compatibility",
+            help: "Optional compatibility for FileFlows, HandBrake, Tdarr and similar tools. Allows a strongly related same-folder replacement such as movie.mp4 → movie encoded.mp4 to reconnect even though its video fingerprint changed. Ambiguous matches are skipped." }),
           data?.startup?.supported && React.createElement(Switch, {
             setting: "startAtLogin",
             label: `Start Monitoring with ${data.startup.platform_label || "OS"}`,

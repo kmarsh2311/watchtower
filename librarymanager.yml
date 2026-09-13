@@ -93,6 +93,10 @@ settings:
     displayName: Reconcile Verified External Moves
     description: After an exact watched move passes size/hash checks, ask Stash to scan the destination and verify its path update.
     type: BOOLEAN
+  transcoderReplacementCompatibility:
+    displayName: Transcoder Replacement Compatibility
+    description: Opt in to reconnect likely same-folder transcoder replacements (for example movie.mp4 to movie encoded.mp4) even though their size/hash changed. Ambiguous replacements are never accepted.
+    type: BOOLEAN
   automaticIncomingScan:
     displayName: Automatically Add Completed Videos
     description: Watch your chosen incoming folders and ask Stash to add each new video after it has completely finished downloading.

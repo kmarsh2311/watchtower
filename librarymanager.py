@@ -525,6 +525,7 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
     runtime_path.write_text(json.dumps({
         "server_connection": server_connection or {},
         "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
+        "transcoder_replacement_compatibility": config.get("transcoderReplacementCompatibility") is True,
         "mac_notifications": config.get("macNotifications") is True,
         "incoming_imports": incoming_multi["enabled"] and len(valid_incoming_paths) > 0,
         "incoming_folder": valid_incoming_paths[0] if valid_incoming_paths else "",
