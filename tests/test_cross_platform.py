@@ -17,6 +17,17 @@ import librarymanager_core
 
 class CrossPlatformSimulationTests(unittest.TestCase):
 
+    def test_monitor_pid_identity_requires_script_and_token(self):
+        good = MagicMock(returncode=0, stdout="python librarymanager_monitor.py --token secret-token")
+        wrong = MagicMock(returncode=0, stdout="python unrelated.py --token secret-token")
+        with patch.object(Path, "is_file", return_value=False), patch.object(sys, "platform", "darwin"), \
+                patch("librarymanager_core.subprocess.run", return_value=good):
+            self.assertTrue(librarymanager_core._pid_matches_monitor(123, "secret-token"))
+        with patch.object(Path, "is_file", return_value=False), patch.object(sys, "platform", "darwin"), \
+                patch("librarymanager_core.subprocess.run", return_value=wrong):
+            self.assertFalse(librarymanager_core._pid_matches_monitor(123, "secret-token"))
+
+
     def test_windows_startup_configuration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)

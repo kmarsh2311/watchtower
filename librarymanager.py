@@ -519,6 +519,7 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
         "contact_sheet_banner": config.get("contactSheetBanner") is not False,
         "contact_sheet_adjust_vertical": config.get("contactSheetAdjustVertical") is not False,
         "contact_sheet_script": config.get("contactSheetScript") or "",
+        "allow_custom_contact_sheet_script": config.get("allowCustomContactSheetScript") is True,
     }), encoding="utf-8")
     runtime_path.chmod(0o600)
     log_handle = open(log_path, "ab", buffering=0)
@@ -564,6 +565,7 @@ def reload_monitor_runtime(stash, database_path):
                 "contact_sheet_banner": config.get("contactSheetBanner") is not False,
                 "contact_sheet_adjust_vertical": config.get("contactSheetAdjustVertical") is not False,
                 "contact_sheet_script": config.get("contactSheetScript") or "",
+                "allow_custom_contact_sheet_script": config.get("allowCustomContactSheetScript") is True,
             }
         }), encoding="utf-8")
         # Poll until the daemon consumes the control file (it deletes it after processing).
@@ -639,6 +641,7 @@ def refresh_scene_contact_sheet(database_path: Path, video_path: str, scene_id: 
             include_banner=config.get("contactSheetBanner") is not False,
             adjust_vertical=config.get("contactSheetAdjustVertical") is not False,
             custom_script=config.get("contactSheetScript") or "",
+            allow_custom_script=config.get("allowCustomContactSheetScript") is True,
             overwrite=True
         )
         if csm_res.get("status") == "generated":
@@ -841,6 +844,7 @@ def main():
             banner = config.get("contactSheetBanner") is not False
             adjust_vert = config.get("contactSheetAdjustVertical") is not False
             custom_script = config.get("contactSheetScript") or ""
+            allow_custom_script = config.get("allowCustomContactSheetScript") is True
             video_extensions = {".mp4", ".m4v", ".mov", ".mkv", ".avi", ".webm", ".wmv"}
             candidates = []
             for inc_dir in valid_paths:
@@ -891,7 +895,8 @@ def main():
                     grid=grid,
                     include_banner=banner,
                     adjust_vertical=adjust_vert,
-                    custom_script=custom_script
+                    custom_script=custom_script,
+                    allow_custom_script=allow_custom_script
                 )
                 try:
                     con = connect(database_path)

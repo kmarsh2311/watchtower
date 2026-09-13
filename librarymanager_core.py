@@ -12,6 +12,7 @@ import tempfile
 import subprocess
 import shutil
 import glob
+import sys
 import time
 import threading
 from contextlib import contextmanager
@@ -961,6 +962,34 @@ def resolve_filesystem_event(database_path: Path, event_type: str, source_path: 
 def _is_pid_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
+
+
+def _pid_matches_monitor(pid: int | None, token: str | None):
+    """Return True/False when process identity can be checked, otherwise None."""
+    if not pid or not token:
+        return False
+    try:
+        proc_cmdline = Path(f"/proc/{int(pid)}/cmdline")
+        if proc_cmdline.is_file():
+            command = proc_cmdline.read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+        elif sys.platform == "win32":
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 f"(Get-CimInstance Win32_Process -Filter 'ProcessId = {int(pid)}').CommandLine"],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+            if result.returncode:
+                return None
+            command = result.stdout
+        else:
+            result = subprocess.run(["ps", "-ww", "-p", str(int(pid)), "-o", "command="],
+                                    capture_output=True, text=True, timeout=3, check=False)
+            if result.returncode:
+                return None
+            command = result.stdout
+        return "librarymanager_monitor.py" in command and str(token) in command
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
     try:
         os.kill(int(pid), 0)
         return True
@@ -974,7 +1003,8 @@ def filesystem_monitor_summary(database_path: Path) -> dict:
         status = connection.execute("SELECT * FROM filesystem_monitor_status WHERE id=1").fetchone()
         if not status:
             return {"state": "stopped", "raw_state": "stopped", "is_stale": False, "heartbeat_age_seconds": None,
-                    "pid": None, "pid_alive": False, "started_at": None, "token": None, "heartbeat_at": None,
+                    "pid": None, "pid_alive": False, "pid_matches_monitor": False,
+                    "started_at": None, "token": None, "heartbeat_at": None,
                     "roots": [], "unavailable_roots": [], "pending_events": 0, "event_types": {}}
         counts = {row["event_type"]: row["count"] for row in connection.execute(
             "SELECT event_type,COUNT(*) AS count FROM filesystem_events WHERE status='pending' GROUP BY event_type"
@@ -993,6 +1023,7 @@ def filesystem_monitor_summary(database_path: Path) -> dict:
 
         pid = status["pid"]
         pid_alive = _is_pid_alive(pid) if pid else False
+        pid_matches_monitor = _pid_matches_monitor(pid, status["token"]) if pid_alive else False
         raw_state = status["state"] or "stopped"
         effective_state = raw_state
         is_stale = False
@@ -1003,6 +1034,10 @@ def filesystem_monitor_summary(database_path: Path) -> dict:
                 is_stale = True
                 effective_state = "stale"
                 stale_reason = f"Process (PID {pid}) terminated unexpectedly"
+            elif pid_matches_monitor is False:
+                is_stale = True
+                effective_state = "stale"
+                stale_reason = f"Process (PID {pid}) is not this Watchtower monitor"
             elif heartbeat_age is not None and heartbeat_age > 30.0:
                 is_stale = True
                 effective_state = "stale"
@@ -1020,6 +1055,7 @@ def filesystem_monitor_summary(database_path: Path) -> dict:
             "heartbeat_age_seconds": round(heartbeat_age, 1) if heartbeat_age is not None else None,
             "pid": pid,
             "pid_alive": pid_alive,
+            "pid_matches_monitor": pid_matches_monitor,
             "started_at": status["started_at"],
             "token": status["token"],
             "heartbeat_at": heartbeat_at,
@@ -2134,6 +2170,7 @@ def generate_video_contact_sheet(
     include_banner=True,
     adjust_vertical=True,
     custom_script=None,
+    allow_custom_script=False,
     overwrite=False,
     logger=None
 ):
@@ -2146,16 +2183,25 @@ def generate_video_contact_sheet(
     if dest_path.exists() and not overwrite:
         return {"status": "skipped", "message": "Contact sheet already exists", "path": str(dest_path)}
 
-    # If custom script is specified
-    if custom_script and Path(custom_script).is_file():
-        cmd = [str(custom_script), str(video_file)]
+    # Custom scripts are trusted local executable code and require an explicit switch.
+    if custom_script and allow_custom_script:
+        script_path = Path(custom_script).expanduser().resolve()
+        if not script_path.is_file():
+            return {"status": "error", "error": f"Custom script is not a regular file: {script_path}"}
+        if os.name != "nt" and not os.access(script_path, os.X_OK):
+            return {"status": "error", "error": f"Custom script is not executable: {script_path}"}
+        cmd = [str(script_path), str(video_file)]
         if shutil.which("taskpolicy") or os.path.exists("/usr/sbin/taskpolicy"):
             cmd = ["/usr/sbin/taskpolicy", "-b"] + cmd
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if completed.returncode:
+                return {"status": "error", "error":
+                        f"Custom script exited with code {completed.returncode}: {(completed.stderr or '').strip()}"}
             if dest_path.exists() or Path(f"{video_file.stem}.jpg").exists():
                 actual = dest_path if dest_path.exists() else Path(f"{video_file.stem}.jpg")
                 return {"status": "generated", "path": str(actual), "custom_script": True}
+            return {"status": "error", "error": "Custom script completed but did not create the expected contact sheet"}
         except Exception as e:
             return {"status": "error", "error": f"Custom script error: {e}"}
 

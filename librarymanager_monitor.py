@@ -360,6 +360,7 @@ class CompletedDownloadWorker(threading.Thread):
         self.contact_sheet_banner = True
         self.contact_sheet_adjust_vertical = True
         self.contact_sheet_script = ""
+        self.allow_custom_contact_sheet_script = False
         self.track_temporary_downloads = False
         if self.enabled:
             self._restore_candidates()
@@ -653,7 +654,8 @@ class CompletedDownloadWorker(threading.Thread):
                         grid=self.contact_sheet_grid,
                         include_banner=self.contact_sheet_banner,
                         adjust_vertical=self.contact_sheet_adjust_vertical,
-                        custom_script=self.contact_sheet_script
+                        custom_script=self.contact_sheet_script,
+                        allow_custom_script=self.allow_custom_contact_sheet_script
                     )
                     if csm_res.get("status") == "generated":
                         sheet_p = csm_res.get("path") or sheet_p
@@ -1059,6 +1061,7 @@ def main():
     incoming_worker.contact_sheet_banner = runtime.get("contact_sheet_banner") is not False
     incoming_worker.contact_sheet_adjust_vertical = runtime.get("contact_sheet_adjust_vertical") is not False
     incoming_worker.contact_sheet_script = runtime.get("contact_sheet_script") or ""
+    incoming_worker.allow_custom_contact_sheet_script = runtime.get("allow_custom_contact_sheet_script") is True
     observer = Observer()
     handler = LibraryEventHandler(database_path, worker, runtime.get("mac_notifications") is True, incoming_worker)
     for root in available:
@@ -1107,6 +1110,9 @@ def main():
                             incoming_worker.contact_sheet_banner = new_cfg.get("contact_sheet_banner", incoming_worker.contact_sheet_banner)
                             incoming_worker.contact_sheet_adjust_vertical = new_cfg.get("contact_sheet_adjust_vertical", incoming_worker.contact_sheet_adjust_vertical)
                             incoming_worker.contact_sheet_script = new_cfg.get("contact_sheet_script", incoming_worker.contact_sheet_script)
+                            incoming_worker.allow_custom_contact_sheet_script = bool(new_cfg.get(
+                                "allow_custom_contact_sheet_script", incoming_worker.allow_custom_contact_sheet_script
+                            ))
                         except Exception as reload_err:
                             logger.debug("Failed to apply reload configuration: %s", reload_err)
                         finally:

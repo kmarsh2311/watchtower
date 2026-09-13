@@ -72,6 +72,13 @@ test("manifest wording reflects current cross-platform and multi-folder behaviou
   assert.doesNotMatch(manifest, /Allow One Test Rename/);
 });
 
+test("custom contact-sheet executables require an explicit trust switch", () => {
+  assert.match(manifest, /allowCustomContactSheetScript:/);
+  assert.match(manifest, /same access as Stash/);
+  assert.match(javascript, /setting: "allowCustomContactSheetScript"/);
+  assert.match(javascript, /disabled: config\.allowCustomContactSheetScript !== true/);
+});
+
 test("onboarding cannot be permanently dismissed or completed before required setup", () => {
   assert.doesNotMatch(javascript, /onboardingBannerDismissed/);
   assert.match(javascript, /Required before Watchtower can operate/);

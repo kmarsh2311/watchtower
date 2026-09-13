@@ -1252,6 +1252,7 @@
           contactSheetBanner: true,
           contactSheetAdjustVertical: true,
           contactSheetScript: "",
+          allowCustomContactSheetScript: false,
           macNotifications: true,
           notifySuccessfulRenames: true
         };
@@ -2618,12 +2619,17 @@
           React.createElement(Switch, { setting: "contactSheetAdjustVertical", defaultValue: true,
             label: "Auto-adjust for Vertical Videos",
             help: "Automatically optimizes the grid layout for 9:16 vertical videos to fit standard widescreen monitors." }),
+          React.createElement(Switch, { setting: "allowCustomContactSheetScript", defaultValue: false,
+            label: "Allow a Trusted Custom Script",
+            help: "Runs the configured executable with the same access as Stash. Enable only for a local script you trust." }),
           React.createElement("label", { className: "lm-field", style: { marginTop: "12px" } },
             React.createElement("strong", null, "Custom Contact Sheet Script"),
-            React.createElement("small", null, "Optional path to an external custom contact sheet script. Leave blank to use the high-speed built-in generator."),
+            React.createElement("small", null, config.allowCustomContactSheetScript === true
+              ? "Trusted-code access is enabled. Enter the path to a regular executable file."
+              : "Disabled. Watchtower will use its built-in generator and will not execute this path."),
             React.createElement("input", {
               value: config.contactSheetScript || "",
-              
+              disabled: config.allowCustomContactSheetScript !== true,
               onChange: e => setConfig({ ...config, contactSheetScript: e.target.value }),
               onBlur: e => updateSetting("contactSheetScript", e.target.value.trim()),
               placeholder: "Leave blank to use built-in generator"
@@ -2960,7 +2966,8 @@
               React.createElement("li", null, React.createElement("strong", null, "Contact Sheet Layout (contactSheetGrid): "), "Grid layout: 5x4 (20 frames widescreen), 4x4 (16 frames), or 3x3 (9 frames)."),
               React.createElement("li", null, React.createElement("strong", null, "Include Header Banner (contactSheetBanner): "), "Renders a top banner showing video resolution, duration, file size, codec, and clean filename."),
               React.createElement("li", null, React.createElement("strong", null, "Auto-adjust for Vertical Videos (contactSheetAdjustVertical): "), "Automatically switches to horizontal multi-column grids for 9:16 vertical smartphone videos so sheets fit standard widescreen displays."),
-              React.createElement("li", null, React.createElement("strong", null, "Custom Script (contactSheetScript): "), "Optional path to an external contact sheet generator script.")
+              React.createElement("li", null, React.createElement("strong", null, "Allow Trusted Custom Script (allowCustomContactSheetScript): "), "Explicit permission to run a configured local executable with the same filesystem access as Stash. Leave off unless you trust the script."),
+              React.createElement("li", null, React.createElement("strong", null, "Custom Script (contactSheetScript): "), "Optional path to a regular executable file. It is ignored unless trusted-script access is enabled.")
             ),
             React.createElement("h3", { key: "h3_2" }, "Task: Generate Missing Contact Sheets for Incoming Folder"),
             React.createElement("p", { key: "p2" }, "Clicking this task scans your configured incoming folder and generates contact sheet artwork only for videos that currently lack companion images.")

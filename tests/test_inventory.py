@@ -11,6 +11,7 @@ import librarymanager_core
 
 from librarymanager_core import (build_merge_preview, build_resolution_plan, inventory,
                                  opensubtitles_hash, preview_safe_filenames, preview_scene_filename,
+                                 generate_video_contact_sheet,
                                  apply_manual_filename, apply_scene_filename, claim_due_rename, enqueue_rename,
                                  finish_queued_rename, reconcile_missing_files, refresh_scene_inventory,
                                  record_filesystem_event, filesystem_monitor_summary,
@@ -30,6 +31,22 @@ from librarymanager_monitor import (CompletedDownloadWorker, relocate_companions
 
 
 class InventoryTests(unittest.TestCase):
+    def test_custom_contact_sheet_script_requires_explicit_trust_and_executable_file(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            video = root / "video.mp4"
+            video.write_bytes(b"video")
+            missing_script = root / "missing-script"
+            disabled = generate_video_contact_sheet(video, custom_script=missing_script, allow_custom_script=False)
+            enabled = generate_video_contact_sheet(video, custom_script=missing_script, allow_custom_script=True)
+            self.assertNotIn("Custom script is not a regular file", disabled.get("error", ""))
+            self.assertIn("Custom script is not a regular file", enabled["error"])
+
+            script = root / "generator.sh"
+            script.write_text("#!/bin/sh\nexit 0\n")
+            script.chmod(0o600)
+            not_executable = generate_video_contact_sheet(video, custom_script=script, allow_custom_script=True)
+            self.assertIn("not executable", not_executable["error"])
     def test_every_database_connection_enables_foreign_keys(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"
@@ -601,6 +618,23 @@ class InventoryTests(unittest.TestCase):
             # Analysis must not silently acknowledge an unresolved event. The
             # user chooses a resolution explicitly in the Watchtower UI.
             self.assertEqual(filesystem_monitor_summary(database)["pending_events"], 1)
+
+    def test_reused_live_pid_is_not_accepted_as_watchtower_monitor(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            with librarymanager_core.connect(database) as connection:
+                connection.execute(
+                    """UPDATE filesystem_monitor_status SET token=?,pid=?,state='running',started_at=?,heartbeat_at=?
+                       WHERE id=1""",
+                    ("expected-token", 4321, librarymanager_core.utc_now(), librarymanager_core.utc_now()),
+                )
+                connection.commit()
+            with patch.object(librarymanager_core, "_is_pid_alive", return_value=True), \
+                    patch.object(librarymanager_core, "_pid_matches_monitor", return_value=False):
+                summary = filesystem_monitor_summary(database)
+            self.assertEqual(summary["state"], "stale")
+            self.assertFalse(summary["pid_matches_monitor"])
+            self.assertIn("not this Watchtower monitor", summary["stale_reason"])
 
     def test_successfully_handled_move_clears_attention_count(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

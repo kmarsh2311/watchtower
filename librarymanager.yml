@@ -127,8 +127,12 @@ settings:
     type: BOOLEAN
   contactSheetScript:
     displayName: Custom Contact Sheet Script
-    description: Optional path to an external custom contact sheet script. Leave blank to use the built-in generator.
+    description: Optional path to a trusted local executable. It runs with the same access as Stash. Leave blank to use the built-in generator.
     type: STRING
+  allowCustomContactSheetScript:
+    displayName: Allow Trusted Custom Script
+    description: Explicitly permit the configured custom contact-sheet executable to run. Enable only for code you trust.
+    type: BOOLEAN
 exec:
   - python
   - "{pluginDir}/librarymanager.py"
