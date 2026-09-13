@@ -3395,7 +3395,7 @@
   }
 
   window.StashLibraryManager = Object.freeze({
-    version: "1.0.2",
+    version: "1.0.3",
     openFilenameCorrection(sceneId) {
       const normalized = String(sceneId || "").trim();
       if (!/^\d+$/.test(normalized)) throw new Error("Library Manager requires a valid Scene ID");
