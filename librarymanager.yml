@@ -45,6 +45,14 @@ settings:
     displayName: Include Performers in Filename
     description: Include tagged performer names when generating filenames.
     type: BOOLEAN
+  includeSceneDate:
+    displayName: Include Scene Date in Filename
+    description: Include the Stash scene date in filenames using the fixed, sortable YYYY-MM-DD format.
+    type: BOOLEAN
+  filenameDatePosition:
+    displayName: Scene Date Position
+    description: Place the optional YYYY-MM-DD scene date at the beginning or end of the filename.
+    type: STRING
   maxPerformersInFilename:
     displayName: Maximum Performers in Filename
     description: Limit the number of performers included in filenames (e.g. first 2). Set to 0 for all.

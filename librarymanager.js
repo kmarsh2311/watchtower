@@ -192,6 +192,7 @@
   ];
   const sectionSeparators = [["dash", "Dash"], ["comma", "Comma"], ["space", "Space"], ["underscore", "Underscore"]];
   const performerSeparators = [["comma", "Comma"], ["space", "Space"], ["dash", "Dash"], ["ampersand", "And sign (&)"]];
+  const datePositions = [["beginning", "Beginning (Recommended)"], ["end", "End"]];
   const performerCountLimits = [
     [0, "All tagged performers"],
     [1, "First 1 performer only"],
@@ -311,6 +312,8 @@
       config.masterTitleSource,
       config.includeStudio,
       config.includePerformers,
+      config.includeSceneDate,
+      config.filenameDatePosition,
       config.cleanPerformerOnlyTitles,
       config.stripStudioFromTitle,
       config.stripPerformersFromTitle,
@@ -515,7 +518,7 @@
     } catch (_) {}
   }
 
-  function OnboardingWizardModal({ show, onHide, data, config, updateSetting, updateSettings, operation, refresh, onNavigateTab }) {
+  function OnboardingWizardModal({ show, onHide, data, config, updateSetting, requestAutomaticRenaming, updateSettings, operation, refresh, onNavigateTab }) {
     React.useEffect(() => {
       if (show) {
         const chimeTimer = window.setTimeout(() => {
@@ -999,7 +1002,7 @@
                   onClick: (e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    updateSetting("automaticRenaming", !(config.automaticRenaming === true));
+                    requestAutomaticRenaming(!(config.automaticRenaming === true));
                   }
                 }, config.automaticRenaming === true ? "✓ Active" : "Disabled (Off)")
               )
@@ -1114,6 +1117,36 @@
         ? api.ReactDOM.createPortal(modalElement, document.body)
         : modalElement;
   }
+  function AutomaticRenamingWarning({ show, onCancel, onConfirm }) {
+    if (!show) return null;
+    const warning = React.createElement("div", {
+      className: "lm-confirm-backdrop",
+      role: "presentation",
+      onMouseDown: event => { if (event.target === event.currentTarget) onCancel(); }
+    },
+      React.createElement("div", {
+        className: "lm-confirm-dialog",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "lm-automatic-renaming-warning-title"
+      },
+        React.createElement("div", { className: "lm-confirm-header" },
+          React.createElement("h3", { id: "lm-automatic-renaming-warning-title" }, "Beta Feature 🧪")),
+        React.createElement("div", { className: "lm-confirm-body" },
+          React.createElement("p", null,
+            "Automatic Renaming is still in beta and changes filenames on disk. Missing metadata, long names, uncommon symbols or unusual metadata combinations may produce unexpected filenames."),
+          React.createElement("p", null,
+            "After enabling it, please monitor Watchtower’s activity and confirm that video and companion files are renamed as expected."),
+          React.createElement("p", null,
+            "Watchtower protects against common duplication, collision and formatting issues, but cannot anticipate every filename and filesystem combination.")),
+        React.createElement("div", { className: "lm-confirm-actions" },
+          React.createElement(Button, { variant: "secondary", onClick: onCancel }, "Cancel"),
+          React.createElement(Button, { variant: "primary", onClick: onConfirm }, "I understand"))));
+    return (ReactDOM && typeof ReactDOM.createPortal === "function")
+      ? ReactDOM.createPortal(warning, document.body)
+      : warning;
+  }
+
   function Dashboard() {
     const [tab, setTab] = React.useState("overview");
     const [data, setData] = React.useState(null);
@@ -1125,6 +1158,7 @@
     const [error, setError] = React.useState("");
     const [search, setSearch] = React.useState("");
     const [showFilenamePreview, setShowFilenamePreview] = React.useState(false);
+    const [showAutomaticRenamingWarning, setShowAutomaticRenamingWarning] = React.useState(false);
     const [reports, setReports] = React.useState(null);
     const [correction, setCorrection] = React.useState({ sceneId: "", filename: "", preview: null });
     const [testRenameResult, setTestRenameResult] = React.useState(null);
@@ -1229,6 +1263,8 @@
           masterTitleSource: "stash_title",
           includeStudio: true,
           includePerformers: true,
+          includeSceneDate: false,
+          filenameDatePosition: "beginning",
           cleanPerformerOnlyTitles: true,
           stripStudioFromTitle: true,
           stripPerformersFromTitle: true,
@@ -1473,6 +1509,20 @@
 
     const updateSetting = (key, value) => updateSettings({ [key]: value }, false);
 
+    function requestAutomaticRenaming(enabled) {
+      if (enabled !== true) {
+        updateSetting("automaticRenaming", false);
+        return;
+      }
+      if (config.automaticRenaming === true) return;
+      setShowAutomaticRenamingWarning(true);
+    }
+
+    async function confirmAutomaticRenaming() {
+      setShowAutomaticRenamingWarning(false);
+      await updateSetting("automaticRenaming", true);
+    }
+
     async function setAutomaticManagement(enabled) {
       if (enabled && config.testSceneId && !window.confirm(
         `Finish testing and manage future edits for all scenes? This removes the current Scene ${config.testSceneId} testing limit.`)) return;
@@ -1494,7 +1544,9 @@
           type: "checkbox",
           checked: isChecked,
           style: { cursor: "pointer" },
-          onChange: e => updateSetting(setting, e.target.checked)
+          onChange: e => setting === "automaticRenaming"
+            ? requestAutomaticRenaming(e.target.checked)
+            : updateSetting(setting, e.target.checked)
         }),
         React.createElement("div", { className: "lm-switch-text" },
           React.createElement("strong", null, label),
@@ -1523,9 +1575,13 @@
       studio: config.includeStudio !== false ? "Example Studio" : "",
       performers: config.includePerformers !== false ? limitedPerformers.join(filenamePerformerCharacters[config.filenamePerformerSeparator] || ", ") : ""
     };
-    const exampleFilename = (config.filenameOrder || "title,studio,performers").split(",")
+    const exampleMainParts = (config.filenameOrder || "title,studio,performers").split(",")
       .map(part => exampleParts[part]).filter(Boolean)
-      .join(filenameSectionCharacters[config.filenameSectionSeparator] || " - ") + ".mp4";
+    const exampleDate = "2026-09-14";
+    if (config.includeSceneDate === true) {
+      config.filenameDatePosition === "end" ? exampleMainParts.push(exampleDate) : exampleMainParts.unshift(exampleDate);
+    }
+    const exampleFilename = exampleMainParts.join(filenameSectionCharacters[config.filenameSectionSeparator] || " - ") + ".mp4";
     const activity = (data?.activity || []).filter(row => {
       const term = search.trim().toLowerCase();
       return !term || [row.recorded_at, row.category, row.action, row.status, row.scene_id, row.file_id,
@@ -2298,7 +2354,7 @@
                 React.createElement("p", null, row.reason)))) :
             React.createElement("p", { className: "lm-empty" }, "Every filename already matches the current safe format.")))));
     else if (tab === "manage") content = React.createElement(React.Fragment, null,
-      panel("Automatic Renaming", "Optional. Automatically renames a scene's file when you edit its title, studio or performers in Stash.",
+      panel("Automatic Renaming", "Optional. Automatically renames a scene's file when you edit naming metadata in Stash.",
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "automaticRenaming", label: "Automatic Renaming",
             help: "Rename edited scenes using the stable filename base. Turning this off leaves filenames untouched while filesystem monitoring continues running." }),
@@ -2350,7 +2406,24 @@
                 help: "Clean leftover conjunctions (and, &, with, feat., vs.) and trailing symbols left behind when metadata is stripped." }),
               React.createElement(Switch, { setting: "collapseMultipleDashes", defaultValue: true,
                 label: "Collapse Multiple Separators & Spaces",
-                help: "Automatically merge duplicate dashes, spaces, and punctuation generated during title cleanup into single clean separators." }))),
+                help: "Automatically merge duplicate dashes, spaces, and punctuation generated during title cleanup into single clean separators." }),
+              React.createElement("div", { className: "lm-date-setting" },
+                React.createElement(Switch, { setting: "includeSceneDate",
+                  label: "Include Scene Date in Filename",
+                  help: "Include the scene date from Stash using the fixed YYYY-MM-DD format. Missing dates are omitted." }),
+                config.includeSceneDate === true && React.createElement("div", {
+                  className: "lm-date-position-options",
+                  role: "radiogroup",
+                  "aria-label": "Scene date position"
+                }, datePositions.map(([value, label]) => React.createElement("label", { key: value },
+                  React.createElement("input", {
+                    type: "radio",
+                    name: "librarymanager-date-position",
+                    value,
+                    checked: (config.filenameDatePosition || "beginning") === value,
+                    onChange: () => updateSetting("filenameDatePosition", value)
+                  }),
+                  label.replace(" (Recommended)", ""))))))),
           React.createElement("div", { className: "lm-filename-example" },
             React.createElement("small", null, "Example filename"),
             React.createElement("strong", null, exampleFilename),
@@ -2923,6 +2996,8 @@
             React.createElement("ul", { key: "ul2" },
               React.createElement("li", null, React.createElement("strong", null, "Include Studio in Filename (includeStudio): "), "Appends or prepends the scene's studio name based on your chosen information order."),
               React.createElement("li", null, React.createElement("strong", null, "Include Performers in Filename (includePerformers): "), "Appends or prepends tagged performer names according to your chosen ordering and performer separator."),
+              React.createElement("li", null, React.createElement("strong", null, "Include Scene Date in Filename (includeSceneDate): "), "Adds the scene date from Stash in the fixed YYYY-MM-DD format. Missing dates are omitted."),
+              React.createElement("li", null, React.createElement("strong", null, "Scene Date Position (filenameDatePosition): "), "Places the optional scene date at the beginning or end of the configured filename."),
               React.createElement("li", null, React.createElement("strong", null, "Maximum Performers in Filename (maxPerformersInFilename): "), "Limits the number of performer names included in the filename (e.g. first 2). Set to 0 to include all tagged performers.")
             ),
 
@@ -3195,10 +3270,16 @@
         data,
         config,
         updateSetting,
+        requestAutomaticRenaming,
         updateSettings,
         operation,
         refresh,
         onNavigateTab: (targetTab) => setTab(targetTab)
+      }),
+      React.createElement(AutomaticRenamingWarning, {
+        show: showAutomaticRenamingWarning,
+        onCancel: () => setShowAutomaticRenamingWarning(false),
+        onConfirm: confirmAutomaticRenaming
       }),
       React.createElement("div", { className: "lm-layout" },
         React.createElement("nav", { className: "lm-tabs" },

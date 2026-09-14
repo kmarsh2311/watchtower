@@ -99,6 +99,46 @@ test("custom contact-sheet executables require an explicit trust switch", () => 
   assert.match(javascript, /disabled: config\.allowCustomContactSheetScript !== true/);
 });
 
+test("automatic renaming requires beta acknowledgement only when enabling", () => {
+  assert.match(javascript, /function requestAutomaticRenaming\(enabled\)/);
+  assert.match(javascript, /if \(enabled !== true\) \{[\s\S]*updateSetting\("automaticRenaming", false\)/);
+  assert.match(javascript, /if \(config\.automaticRenaming === true\) return;/);
+  assert.match(javascript, /setShowAutomaticRenamingWarning\(true\)/);
+  assert.match(javascript, /function AutomaticRenamingWarning\(\{ show, onCancel, onConfirm \}\)/);
+  assert.match(javascript, /ReactDOM\.createPortal\(warning, document\.body\)/);
+  assert.match(css, /\.lm-confirm-backdrop\{[^}]*z-index:1000001/);
+  assert.match(javascript, /requestAutomaticRenaming\(!\(config\.automaticRenaming === true\)\)/);
+  assert.match(javascript, /setting === "automaticRenaming"[\s\S]*requestAutomaticRenaming\(e\.target\.checked\)/);
+  assert.match(javascript, /Beta Feature 🧪/);
+  assert.match(javascript, /Automatic Renaming is still in beta and changes filenames on disk\./);
+  assert.match(javascript, /Missing metadata, long names, uncommon symbols or unusual metadata combinations may produce unexpected filenames\./);
+  assert.match(javascript, /confirm that video and companion files are renamed as expected\./);
+  assert.match(javascript, /cannot anticipate every filename and filesystem combination\./);
+  assert.match(javascript, /onConfirm: confirmAutomaticRenaming/);
+  assert.match(javascript, /onClick: onConfirm \}, "I understand"/);
+  assert.match(javascript, /async function confirmAutomaticRenaming\(\) \{[\s\S]*updateSetting\("automaticRenaming", true\)/);
+});
+
+test("scene date naming is optional, ISO-only, and positioned at either edge", () => {
+  assert.match(manifest, /includeSceneDate:[\s\S]*fixed, sortable YYYY-MM-DD format/);
+  assert.match(manifest, /filenameDatePosition:[\s\S]*beginning or end/);
+  assert.match(javascript, /setting: "includeSceneDate"/);
+  assert.match(javascript, /const datePositions = \[\["beginning", "Beginning \(Recommended\)"\], \["end", "End"\]\]/);
+  assert.match(javascript, /className: "lm-date-position-options"/);
+  assert.match(javascript, /role: "radiogroup"/);
+  assert.match(javascript, /name: "librarymanager-date-position"/);
+  assert.match(javascript, /type: "radio"/);
+  assert.match(javascript, /config\.includeSceneDate === true && React\.createElement/);
+  assert.doesNotMatch(javascript, /label: "Scene Date Position"/);
+  assert.match(css, /\.lm-date-position-options\{[^}]*display:flex/);
+  assert.match(css, /\.lm-date-setting\{[^}]*border-bottom:/);
+  assert.match(css, /\.lm-date-setting>\.lm-switch-row\{border-bottom:0\}/);
+  assert.ok(javascript.indexOf('setting: "collapseMultipleDashes"') < javascript.indexOf('className: "lm-date-setting"'),
+    "scene date setting follows all primary title-cleaning controls");
+  assert.match(javascript, /config\.filenameDatePosition === "end" \? exampleMainParts\.push\(exampleDate\) : exampleMainParts\.unshift\(exampleDate\)/);
+  assert.doesNotMatch(javascript, /Date Format/);
+});
+
 test("onboarding cannot be permanently dismissed or completed before required setup", () => {
   assert.doesNotMatch(javascript, /onboardingBannerDismissed/);
   assert.match(javascript, /Required before Watchtower can operate/);

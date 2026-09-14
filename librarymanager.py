@@ -794,9 +794,9 @@ def process_rename_queue(stash, database_path):
                     continue
                 break
             try:
-                before = scene_naming_signature(database_path, scene_id)
+                before = scene_naming_signature(database_path, scene_id, config.get("includeSceneDate") is True)
                 refresh_scene(stash, database_path, scene_id)
-                after = scene_naming_signature(database_path, scene_id)
+                after = scene_naming_signature(database_path, scene_id, config.get("includeSceneDate") is True)
                 if before == after:
                     preview = preview_scene_filename(database_path, scene_id, config)
                     if preview.get("status") == "unchanged":

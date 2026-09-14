@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS filename_state (
     last_generated_stem TEXT,
     manual_studio TEXT,
     manual_performers_json TEXT NOT NULL DEFAULT '[]',
+    managed_date TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -358,6 +359,8 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
                     "ALTER TABLE filename_state ADD COLUMN manual_studio TEXT")
         _safe_alter(connection, "filename_state", "manual_performers_json",
                     "ALTER TABLE filename_state ADD COLUMN manual_performers_json TEXT NOT NULL DEFAULT '[]'")
+        _safe_alter(connection, "filename_state", "managed_date",
+                    "ALTER TABLE filename_state ADD COLUMN managed_date TEXT")
         _safe_alter(connection, "incoming_files", "attempts",
                     "ALTER TABLE incoming_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
         _safe_alter(connection, "incoming_files", "settle_seconds",
@@ -818,15 +821,30 @@ def refresh_scene_inventory(database_path: Path, scene: dict) -> int:
         connection.close()
 
 
-def scene_naming_signature(database_path: Path, scene_id: str):
+def _row_scene_date(row) -> str:
+    """Return a validated ISO Stash scene date from an inventoried file row."""
+    try:
+        metadata = json.loads(row["scene_metadata_json"] or "{}")
+        value = str(metadata.get("date") or "").strip()
+        if value and datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") == value:
+            return value
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return ""
+
+
+def scene_naming_signature(database_path: Path, scene_id: str, include_date: bool = False):
     """Return only metadata that is allowed to influence a filename."""
     connection = connect(database_path)
     try:
         row = connection.execute(
-            "SELECT title,studio,performers_json FROM files WHERE scene_id=? ORDER BY file_id LIMIT 1",
+            "SELECT title,studio,performers_json,scene_metadata_json FROM files WHERE scene_id=? ORDER BY file_id LIMIT 1",
             (str(scene_id),),
         ).fetchone()
-        return None if not row else (row["title"] or "", row["studio"] or "", row["performers_json"] or "[]")
+        if not row:
+            return None
+        signature = (row["title"] or "", row["studio"] or "", row["performers_json"] or "[]")
+        return signature + (_row_scene_date(row),) if include_date else signature
     finally:
         connection.close()
 
@@ -1524,7 +1542,7 @@ def _metadata_name_pattern(name: str, include_connectors: bool = False) -> str |
         return None
     core = r"(?<!\w)" + r"[\W_]*".join(re.escape(part) for part in parts) + r"(?!\w)"
     if include_connectors:
-        connectors = r"(?:(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in)|[&,+])"
+        connectors = r"(?:\b(?:and|feat\.?|featuring|with|w/|vs\.?|versus|presents|in)\b|[&,+])"
         return rf"(?:{connectors}\s+)?{core}(?:\s+{connectors})?"
     return core
 
@@ -1697,11 +1715,12 @@ def _sync_filename_state(connection, state, row, current: Path, performers: list
                 source_title = None
             base = _strip_managed_metadata(base, studios_to_strip, performers_to_strip, opts)
 
+    managed_date = str(state["managed_date"] or "").strip() or _row_scene_date(row)
     connection.execute(
         """UPDATE filename_state SET base_stem=?,base_source=?,source_title=?,manual_studio=?,
-           manual_performers_json=?,updated_at=? WHERE file_id=?""",
+           manual_performers_json=?,managed_date=?,updated_at=? WHERE file_id=?""",
         (base, source, source_title, current_studio, json.dumps(performers, ensure_ascii=False),
-         now, row["file_id"]),
+         managed_date or None, now, row["file_id"]),
     )
     return connection.execute("SELECT * FROM filename_state WHERE file_id=?", (row["file_id"],)).fetchone()
 
@@ -1741,9 +1760,9 @@ def _create_filename_state(connection, row, current: Path, performers: list[str]
 
     connection.execute(
         """INSERT INTO filename_state(file_id,base_stem,base_source,source_title,last_generated_stem,
-           manual_studio,manual_performers_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+           manual_studio,manual_performers_json,managed_date,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
         (row["file_id"], clean_base, source, title or None, None, studio,
-         json.dumps(performers, ensure_ascii=False), now, now),
+         json.dumps(performers, ensure_ascii=False), _row_scene_date(row) or None, now, now),
     )
     return connection.execute("SELECT * FROM filename_state WHERE file_id=?", (row["file_id"],)).fetchone()
 
@@ -1790,9 +1809,48 @@ def filename_format_options(config: dict | None = None) -> dict:
     performer_separators = {"comma": ", ", "space": " ", "dash": " - ", "ampersand": " & "}
     return {
         "order": order,
+        "date_position": "end" if str(config.get("filenameDatePosition") or "beginning").lower() == "end" else "beginning",
         "section_separator": section_separators.get(str(config.get("filenameSectionSeparator") or "dash"), " - "),
         "performer_separator": performer_separators.get(str(config.get("filenamePerformerSeparator") or "comma"), ", "),
     }
+
+
+def _validated_scene_date(scene_date: str | None) -> str:
+    try:
+        value = str(scene_date or "").strip()
+        return value if value and datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") == value else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def _matching_scene_date_variants(scene_date: str) -> list[str]:
+    """Return supported textual forms of a known Stash date for exact deduplication only."""
+    try:
+        parsed = datetime.strptime(str(scene_date or ""), "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return []
+    values = [parsed.strftime(pattern) for pattern in ("%Y-%m-%d", "%d-%m-%Y", "%m-%d-%Y", "%Y-%d-%m")]
+    variants = []
+    for value in values:
+        for separator in ("-", ".", "_"):
+            candidate = value.replace("-", separator)
+            if candidate not in variants:
+                variants.append(candidate)
+    return variants
+
+
+def _strip_matching_scene_date(text: str, scene_date: str) -> str:
+    """Remove the known scene date at a clear title boundary without guessing at other dates."""
+    cleaned = str(text or "").strip()
+    variants = _matching_scene_date_variants(scene_date)
+    if not cleaned or not variants:
+        return cleaned
+    alternatives = "|".join(re.escape(value) for value in sorted(variants, key=len, reverse=True))
+    prefix = re.compile(rf"^(?:{alternatives})(?:\s*[-–—_,.:]+\s*|\s+|$)", re.IGNORECASE)
+    suffix = re.compile(rf"(?:^|\s+|\s*[-–—_,.:]+\s*)(?:{alternatives})$", re.IGNORECASE)
+    cleaned = prefix.sub("", cleaned, count=1)
+    cleaned = suffix.sub("", cleaned, count=1)
+    return cleaned.strip(" -–—_,.:")
 
 
 
@@ -1834,12 +1892,19 @@ def _is_only_metadata_or_connectors(text: str, studio: str | None, performers: l
     return len(cleaned.strip()) == 0
 
 
-def _proposed_stem(base: str, studio: str | None, performers: list[str], options: dict | None = None) -> str:
+def _proposed_stem(base: str, studio: str | None, performers: list[str], options: dict | None = None,
+                   scene_date: str | None = None, previous_scene_date: str | None = None) -> str:
     """Build one canonical filename from the stored base + current Stash metadata."""
     formatting = filename_format_options(options)
     opts = options or {}
     
     title_val = str(base or "").strip()
+    date_val = _validated_scene_date(scene_date) if opts.get("includeSceneDate") is True else ""
+    if date_val:
+        previous_date = _validated_scene_date(previous_scene_date)
+        if previous_date and previous_date != date_val:
+            title_val = _strip_matching_scene_date(title_val, previous_date)
+        title_val = _strip_matching_scene_date(title_val, date_val)
     
     include_studio = opts.get("includeStudio") is not False
     studio_val = str(studio or "").strip() if include_studio else ""
@@ -1868,6 +1933,8 @@ def _proposed_stem(base: str, studio: str | None, performers: list[str], options
         "performers": perf_val,
     }
     parts = [values[field] for field in formatting["order"] if values[field]]
+    if date_val:
+        parts.append(date_val) if formatting["date_position"] == "end" else parts.insert(0, date_val)
     proposed = formatting["section_separator"].join(parts)
     return _sanitize_filename_stem(proposed, opts)
 
@@ -1891,7 +1958,8 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
                 state = _sync_filename_state(connection, state, row, current, performers, filename_options)
 
             base = str(state["base_stem"] or "").strip()
-            proposed_stem = _proposed_stem(base, row["studio"], performers, filename_options)
+            proposed_stem = _proposed_stem(base, row["studio"], performers, filename_options,
+                                            _row_scene_date(row), state["managed_date"])
             # If all metadata and the clean base are empty, preserve the current stem rather than
             # proposing an invalid/empty filename.
             if not proposed_stem:
@@ -1956,7 +2024,8 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
             state = _sync_filename_state(connection, state, row, current, performers, filename_options)
         connection.commit()
 
-        proposed_stem = _proposed_stem(state["base_stem"], row["studio"], performers, filename_options)
+        proposed_stem = _proposed_stem(state["base_stem"], row["studio"], performers, filename_options,
+                                        _row_scene_date(row), state["managed_date"])
         if not proposed_stem:
             proposed_stem = current.stem
         proposed = current.with_name(proposed_stem + current.suffix)
@@ -1982,7 +2051,8 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
                 sidecars.append({"source": str(candidate), "target": str(target)})
         return {"scene_id": str(scene_id), "file_id": row["file_id"], "current_path": str(current),
                 "proposed_path": str(proposed), "base_stem": state["base_stem"], "status": status,
-                "reason": reason, "associated_files": sidecars, "action_performed": False}
+                "reason": reason, "associated_files": sidecars, "scene_date": _row_scene_date(row),
+                "action_performed": False}
     finally:
         connection.close()
 
@@ -2011,8 +2081,8 @@ def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename
             try:
                 connection = connect(database_path)
                 connection.execute(
-                    "UPDATE filename_state SET last_generated_stem=?,updated_at=? WHERE file_id=?",
-                    (proposed.stem, utc_now(), preview["file_id"]),
+                    "UPDATE filename_state SET last_generated_stem=?,managed_date=?,updated_at=? WHERE file_id=?",
+                    (proposed.stem, preview.get("scene_date") or None, utc_now(), preview["file_id"]),
                 )
                 connection.execute(
                     "UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=? WHERE file_id=?",
