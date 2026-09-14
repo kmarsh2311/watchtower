@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.7 — 2026-09-14
+
+- Warn users and require confirmation when enabling the beta Automatic Renaming feature.
+- Add an optional Stash scene date to generated filenames, using the fixed sortable `YYYY-MM-DD` format.
+- Allow the optional scene date at the beginning or end while keeping it disabled by default.
+- Prevent duplicate dates by conservatively recognising an exact matching Stash date at title boundaries.
+- Preserve previous managed dates so scene-date edits cannot produce both old and new dates in a filename.
+- Correct connective-word boundary matching used when removing duplicated studio and performer metadata.
+- Add focused date, collision, companion-file, compatibility and UI regression coverage.
+
 ## 1.0.6 — 2026-09-13
 
 - Track plausible encoded replacements as neutral, persistent work in progress while the original remains available.
