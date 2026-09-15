@@ -2287,6 +2287,116 @@ def format_csm_duration(seconds):
     return f"{m:02d}:{s:02d}"
 
 
+def ffmpeg_supports_drawtext(ffmpeg_bin):
+    try:
+        result = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-h", "filter=drawtext"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    output = f"{result.stdout}\n{result.stderr}"
+    return result.returncode == 0 and "Filter drawtext" in output
+
+
+def generate_ffmpeg_contact_sheet_fallback(
+    ffmpeg_bin, video_file, dest_path, tmp_dir, timestamps, cols, rows,
+    scale_w, include_banner, width, height, file_size_str, formatted_duration,
+    taskpolicy_prefix,
+):
+    """Render a contact sheet without ImageMagick using bundled font assets."""
+    font_source = Path(__file__).with_name("assets") / "Roboto-Regular.ttf"
+    if not font_source.is_file():
+        return {"status": "error", "error": "Bundled contact-sheet font is missing"}
+    if not ffmpeg_supports_drawtext(ffmpeg_bin):
+        return {
+            "status": "error",
+            "error": "ImageMagick is unavailable and this FFmpeg build does not support the drawtext filter",
+        }
+
+    font_file = tmp_dir / "watchtower-font.ttf"
+    shutil.copy2(font_source, font_file)
+    errors = []
+    frames = []
+    for i, ts in enumerate(timestamps):
+        label_file = tmp_dir / f"timestamp_{i:03d}.txt"
+        label_file.write_text(format_csm_duration(ts), encoding="utf-8")
+        frame_path = tmp_dir / f"frame_{i:03d}.png"
+        command = taskpolicy_prefix + [
+            ffmpeg_bin, "-y", "-ss", f"{ts:.2f}", "-i", str(video_file),
+            "-an", "-sn", "-vf",
+            (
+                f"scale={scale_w}:-1,setsar=1,"
+                f"drawtext=fontfile={font_file.name}:textfile={label_file.name}:"
+                "fontsize=14:fontcolor=white:box=1:boxcolor=black@0.6:"
+                "boxborderw=2:x=w-tw-12:y=h-th-12"
+            ),
+            "-frames:v", "1", "-compression_level", "3", str(frame_path),
+        ]
+        result = subprocess.run(
+            command, cwd=tmp_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        if result.returncode == 0 and frame_path.is_file():
+            frames.append(frame_path)
+        else:
+            errors.append(
+                f"frame {i} @{ts:.1f}s: ffmpeg rc={result.returncode} "
+                + result.stderr.decode(errors="replace").strip()[-100:]
+            )
+
+    if len(frames) < max(2, len(timestamps) // 2):
+        detail = "; ".join(errors[:3]) if errors else "unknown"
+        return {
+            "status": "error",
+            "error": f"Failed to extract enough frames ({len(frames)}/{len(timestamps)}): {detail}",
+        }
+
+    montage_path = tmp_dir / "montage.png"
+    montage_command = taskpolicy_prefix + [
+        ffmpeg_bin, "-y", "-framerate", "1", "-i", str(tmp_dir / "frame_%03d.png"),
+        "-vf", f"tile={cols}x{rows}:padding=8:margin=4:color=0xF5F6F8",
+        "-frames:v", "1", "-compression_level", "3", str(montage_path),
+    ]
+    montage_result = subprocess.run(
+        montage_command, cwd=tmp_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    if montage_result.returncode != 0 or not montage_path.is_file():
+        detail = montage_result.stderr.decode(errors="replace").strip()[-200:]
+        return {"status": "error", "error": f"FFmpeg montage creation failed: {detail or 'unknown error'}"}
+
+    final_filter = "format=yuvj420p"
+    if include_banner:
+        title_file = tmp_dir / "title.txt"
+        info_file = tmp_dir / "info.txt"
+        title_file.write_text(video_file.name, encoding="utf-8")
+        info_file.write_text(
+            f"Resolution: {width}x{height}  |  Size: {file_size_str}  |  Duration: {formatted_duration}",
+            encoding="utf-8",
+        )
+        final_filter = (
+            "pad=iw:ih+95:0:90:color=0xF5F6F8,"
+            f"drawtext=fontfile={font_file.name}:textfile={title_file.name}:"
+            "fontsize=18:fontcolor=0x2D3748:x=40:y=16,"
+            f"drawtext=fontfile={font_file.name}:textfile={info_file.name}:"
+            "fontsize=18:fontcolor=0x2D3748:x=40:y=50,format=yuvj420p"
+        )
+
+    final_path = tmp_dir / "contact-sheet.jpg"
+    final_command = taskpolicy_prefix + [
+        ffmpeg_bin, "-y", "-i", str(montage_path), "-vf", final_filter,
+        "-frames:v", "1", "-q:v", "3", str(final_path),
+    ]
+    final_result = subprocess.run(
+        final_command, cwd=tmp_dir, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+    )
+    if final_result.returncode != 0 or not final_path.is_file():
+        detail = final_result.stderr.decode(errors="replace").strip()[-200:]
+        return {"status": "error", "error": f"FFmpeg banner creation failed: {detail or 'unknown error'}"}
+
+    shutil.copy2(final_path, dest_path)
+    return {"status": "generated", "frames": len(frames), "renderer": "ffmpeg"}
+
+
 def generate_video_contact_sheet(
     video_path,
     output_path=None,
@@ -2329,13 +2439,20 @@ def generate_video_contact_sheet(
         except Exception as e:
             return {"status": "error", "error": f"Custom script error: {e}"}
 
-    # Locate ffmpeg, ffprobe, magick across macOS, Linux, and Windows
+    # Locate ffmpeg, ffprobe and optional ImageMagick across supported systems.
     ffmpeg_bin = shutil.which("ffmpeg") or ("/opt/homebrew/bin/ffmpeg" if os.path.exists("/opt/homebrew/bin/ffmpeg") else "/usr/bin/ffmpeg" if os.path.exists("/usr/bin/ffmpeg") else "ffmpeg")
     ffprobe_bin = shutil.which("ffprobe") or ("/opt/homebrew/bin/ffprobe" if os.path.exists("/opt/homebrew/bin/ffprobe") else "/usr/bin/ffprobe" if os.path.exists("/usr/bin/ffprobe") else "ffprobe")
     magick_bin = shutil.which("magick") or ("/opt/homebrew/bin/magick" if os.path.exists("/opt/homebrew/bin/magick") else "/usr/bin/magick" if os.path.exists("/usr/bin/magick") else "magick")
 
-    if not (shutil.which(ffmpeg_bin) or os.path.exists(ffmpeg_bin)) or not (shutil.which(ffprobe_bin) or os.path.exists(ffprobe_bin)) or not (shutil.which(magick_bin) or os.path.exists(magick_bin)):
-        return {"status": "error", "error": "ffmpeg, ffprobe or magick not found on system"}
+    ffmpeg_available = bool(shutil.which(ffmpeg_bin) or os.path.exists(ffmpeg_bin))
+    ffprobe_available = bool(shutil.which(ffprobe_bin) or os.path.exists(ffprobe_bin))
+    magick_available = bool(shutil.which(magick_bin) or os.path.exists(magick_bin))
+    missing_required = [
+        name for name, available in (("ffmpeg", ffmpeg_available), ("ffprobe", ffprobe_available))
+        if not available
+    ]
+    if missing_required:
+        return {"status": "error", "error": f"Required tool not found: {', '.join(missing_required)}"}
 
     # Probe metadata
     probe_cmd = [
@@ -2410,6 +2527,26 @@ def generate_video_contact_sheet(
 
     with tempfile.TemporaryDirectory(prefix="watchtower_csm_") as tmp_dir_str:
         tmp_dir = Path(tmp_dir_str)
+
+        if not magick_available:
+            fallback = generate_ffmpeg_contact_sheet_fallback(
+                ffmpeg_bin, video_file, dest_path, tmp_dir, timestamps, cols, rows,
+                scale_w, include_banner, width, height, file_size_str, formatted_duration,
+                taskpolicy_prefix,
+            )
+            if fallback.get("status") != "generated":
+                return fallback
+            elapsed = time.time() - t_start
+            return {
+                "status": "generated",
+                "path": str(dest_path),
+                "grid": f"{cols}x{rows}",
+                "frames": fallback["frames"],
+                "duration": formatted_duration,
+                "resolution": f"{width}x{height}",
+                "elapsed_seconds": round(elapsed, 2),
+                "renderer": "ffmpeg",
+            }
 
         _csm_errors: list[str] = []
         for i, ts in enumerate(timestamps):
@@ -2524,5 +2661,6 @@ def generate_video_contact_sheet(
         "frames": len(frames),
         "duration": formatted_duration,
         "resolution": f"{width}x{height}",
-        "elapsed_seconds": round(elapsed, 2)
+        "elapsed_seconds": round(elapsed, 2),
+        "renderer": "imagemagick",
     }

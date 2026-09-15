@@ -5,6 +5,7 @@
 - Bundle `watchdog` 6.0.0 with Watchtower so filesystem monitoring works in clean Stash Docker containers without a separate `pip install`.
 - Keep the dependency private to the plugin so container and host Python installations are not modified.
 - Add an isolated filesystem-event test that verifies the bundled package without access to system site-packages.
+- Generate contact sheets with FFmpeg when ImageMagick is unavailable, using a bundled Roboto font and lossless intermediate images.
 
 ## 1.0.7 — 2026-09-14
 

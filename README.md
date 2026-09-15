@@ -114,6 +114,7 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 4. Click **Reload Plugins**. The **📚** icon will appear in your Stash top navigation bar.
 
 Watchtower includes its filesystem-monitoring dependency inside the plugin. Docker and NAS users do not need to install Python packages in their Stash container.
+Contact sheets use ImageMagick when it is available and automatically fall back to FFmpeg with a bundled font when it is not.
 
 ### Method 2: Manual Install
 1. Download [`librarymanager.zip`](https://kmarsh2311.github.io/my-stash-plugins/librarymanager.zip).

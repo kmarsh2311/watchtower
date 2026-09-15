@@ -150,6 +150,37 @@ class InventoryTests(unittest.TestCase):
             script.chmod(0o600)
             not_executable = generate_video_contact_sheet(video, custom_script=script, allow_custom_script=True)
             self.assertIn("not executable", not_executable["error"])
+
+    def test_contact_sheet_uses_ffmpeg_fallback_when_imagemagick_is_missing(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            video = root / "video.mp4"
+            video.write_bytes(b"video")
+            probe = MagicMock(
+                returncode=0,
+                stdout=json.dumps({
+                    "streams": [{"width": 1920, "height": 1080, "duration": "120"}],
+                    "format": {"duration": "120", "size": "5"},
+                }),
+            )
+
+            def available_tool(name):
+                return str(name) if Path(str(name)).name in {"ffmpeg", "ffprobe"} else None
+
+            with patch("librarymanager_core.shutil.which", side_effect=available_tool), \
+                    patch("librarymanager_core.os.path.exists", return_value=False), \
+                    patch("librarymanager_core.subprocess.run", return_value=probe), \
+                    patch("librarymanager_core.generate_ffmpeg_contact_sheet_fallback",
+                          return_value={"status": "generated", "frames": 20, "renderer": "ffmpeg"}) as fallback:
+                result = generate_video_contact_sheet(
+                    video, output_path=root / "contact-sheet.jpg", grid="5x4", overwrite=True
+                )
+
+            self.assertEqual(result["status"], "generated", result)
+            self.assertEqual(result["renderer"], "ffmpeg")
+            self.assertEqual(result["frames"], 20)
+            fallback.assert_called_once()
+
     def test_every_database_connection_enables_foreign_keys(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"
