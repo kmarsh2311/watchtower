@@ -5,7 +5,7 @@
 # 🗼 Watchtower for Stash
 ### The 24/7 Real-Time Filesystem Watcher, Automated Ingest Pipeline & Media Inventory Guardian for Stash
 
-[![Version](https://img.shields.io/badge/version-1.0.7-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases)
+[![Version](https://img.shields.io/badge/version-1.0.8-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases)
 [![Stash](https://img.shields.io/badge/Stash-v0.26+-ff0055?style=for-the-badge)](https://github.com/stashapp/stash)
 [![Python](https://img.shields.io/badge/Python-3.10+-39ff64?style=for-the-badge)](https://python.org)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
@@ -112,6 +112,8 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
    ```
 3. Find **Watchtower** in the list and click **Install**.
 4. Click **Reload Plugins**. The **📚** icon will appear in your Stash top navigation bar.
+
+Watchtower includes its filesystem-monitoring dependency inside the plugin. Docker and NAS users do not need to install Python packages in their Stash container.
 
 ### Method 2: Manual Install
 1. Download [`librarymanager.zip`](https://kmarsh2311.github.io/my-stash-plugins/librarymanager.zip).

@@ -1,2 +1,3 @@
 stashapp-tools
-watchdog
+# Bundled with the plugin so Stash installations do not need to run pip.
+watchdog==6.0.0

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.8 — 2026-09-15
+
+- Bundle `watchdog` 6.0.0 with Watchtower so filesystem monitoring works in clean Stash Docker containers without a separate `pip install`.
+- Keep the dependency private to the plugin so container and host Python installations are not modified.
+- Add an isolated filesystem-event test that verifies the bundled package without access to system site-packages.
+
 ## 1.0.7 — 2026-09-14
 
 - Warn users and require confirmation when enabling the beta Automatic Renaming feature.
