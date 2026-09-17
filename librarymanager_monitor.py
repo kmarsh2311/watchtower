@@ -247,6 +247,23 @@ COMPANION_EXTENSIONS = {
 WATCHED_EXTENSIONS = VIDEO_EXTENSIONS | COMPANION_EXTENSIONS | TEMPORARY_DOWNLOAD_EXTENSIONS
 
 
+def is_temporary_download(path) -> bool:
+    if not path:
+        return False
+    p = Path(path)
+    name = p.name.lower()
+    suffix = p.suffix.lower()
+    if suffix in TEMPORARY_DOWNLOAD_EXTENSIONS:
+        return True
+    if name.startswith(".com.google.chrome.") or name.startswith("com.google.chrome."):
+        return True
+    if name.startswith("unconfirmed ") and (name.endswith(".crdownload") or ".crdownload" in name):
+        return True
+    if name.endswith(".crdownload"):
+        return True
+    return False
+
+
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 GENERIC_ARTWORK_STEMS = {"cover", "poster", "fanart", "folder", "thumb"}
 
@@ -278,7 +295,7 @@ def find_eligible_videos_in_folder(folder: Path, database_path: Path = None, can
         if folder.is_dir():
             for item in folder.iterdir():
                 if item.is_file() and item.suffix.lower() in VIDEO_EXTENSIONS:
-                    if item.suffix.lower() not in TEMPORARY_DOWNLOAD_EXTENSIONS:
+                    if not is_temporary_download(item):
                         try:
                             eligible.add(item.resolve())
                         except OSError:
@@ -939,7 +956,7 @@ class MoveWorker(threading.Thread):
 class CompletedDownloadWorker(threading.Thread):
     """Wait for new incoming videos to settle, then request one targeted Stash scan."""
     def __init__(self, database_path, stash, incoming_folder, enabled, settle_seconds, notifications,
-                 fallback_seconds=60, max_attempts=3, incoming_folders=None):
+                 fallback_seconds=60, max_attempts=3, incoming_folders=None, track_temporary_downloads=False):
         super().__init__(daemon=True)
         self.database_path, self.stash = database_path, stash
         raw_folders = incoming_folders if incoming_folders is not None else ([incoming_folder] if incoming_folder else [])
@@ -972,7 +989,7 @@ class CompletedDownloadWorker(threading.Thread):
         self.contact_sheet_adjust_vertical = True
         self.contact_sheet_script = ""
         self.allow_custom_contact_sheet_script = False
-        self.track_temporary_downloads = False
+        self.track_temporary_downloads = track_temporary_downloads
         self._scanning_folders = set()
         self._scanning_lock = threading.Lock()
         self._scan_pool = concurrent.futures.ThreadPoolExecutor(
@@ -1002,11 +1019,11 @@ class CompletedDownloadWorker(threading.Thread):
         if not self.enabled or not path:
             return False
         candidate = Path(path)
-        suffix = candidate.suffix.lower()
-        if suffix in TEMPORARY_DOWNLOAD_EXTENSIONS:
+        if is_temporary_download(candidate):
             if not getattr(self, "track_temporary_downloads", False):
                 return False
             return self._is_inside_incoming(candidate)
+        suffix = candidate.suffix.lower()
         if suffix not in (VIDEO_EXTENSIONS | COMPANION_EXTENSIONS):
             return False
         return self._is_inside_incoming(candidate)
@@ -1024,7 +1041,9 @@ class CompletedDownloadWorker(threading.Thread):
                     continue
                 for path in folder.rglob("*"):
                     try:
-                        if path.is_file() and path.suffix.lower() in valid:
+                        if not path.is_file():
+                            continue
+                        if path.suffix.lower() in valid or (getattr(self, "track_temporary_downloads", False) and is_temporary_download(path)):
                             found.add(str(path.resolve()))
                     except OSError as err:
                         if is_network_disconnect_error(err, path):
@@ -1070,7 +1089,7 @@ class CompletedDownloadWorker(threading.Thread):
         connection = connect(self.database_path)
         try:
             rows = connection.execute(
-                "SELECT path,size,modified_ns,stable_since,attempts,status,detail FROM incoming_files WHERE status IN ('waiting','scanning','downloading')"
+                "SELECT path,size,modified_ns,stable_since,attempts,status,detail,first_seen_at FROM incoming_files WHERE status IN ('waiting','scanning','downloading')"
             ).fetchall()
         finally:
             connection.close()
@@ -1080,9 +1099,8 @@ class CompletedDownloadWorker(threading.Thread):
                 continue
             stat = Path(path).stat()
             unchanged = row["size"] == stat.st_size and row["modified_ns"] == stat.st_mtime_ns
-            suffix = Path(path).suffix.lower()
-            is_temporary = suffix in TEMPORARY_DOWNLOAD_EXTENSIONS
-            is_companion = (not is_temporary) and (suffix in COMPANION_EXTENSIONS)
+            is_temporary = is_temporary_download(path)
+            is_companion = (not is_temporary) and (Path(path).suffix.lower() in COMPANION_EXTENSIONS)
             with self.lock:
                 self.candidates[path] = {
                     "size": stat.st_size,
@@ -1093,14 +1111,16 @@ class CompletedDownloadWorker(threading.Thread):
                     "is_temporary": is_temporary,
                     "last_saved_status": row["status"],
                     "last_saved_detail": row["detail"],
+                    "first_seen_at": row["first_seen_at"],
                     "check_after": 0.0,
                 }
 
-    def _save_state(self, path, status, *, stat=None, stable_since=None, job_id=None, detail=None, attempts=None):
+    def _save_state(self, path, status, *, stat=None, stable_since=None, job_id=None, detail=None, attempts=None, first_seen_at=None):
         connection = connect(self.database_path)
         try:
-            existing = connection.execute("SELECT attempts FROM incoming_files WHERE path=?", (path,)).fetchone()
+            existing = connection.execute("SELECT attempts, first_seen_at FROM incoming_files WHERE path=?", (path,)).fetchone()
             attempt_count = int(existing["attempts"] if existing else 0) if attempts is None else int(attempts)
+            initial_seen = (existing["first_seen_at"] if existing and existing["first_seen_at"] else None) or first_seen_at or utc_now()
             connection.execute(
                 """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,size,modified_ns,stable_since,settle_seconds,status,attempts,scan_job_id,detail)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
@@ -1110,7 +1130,7 @@ class CompletedDownloadWorker(threading.Thread):
                      stable_since=COALESCE(excluded.stable_since,incoming_files.stable_since),
                      settle_seconds=excluded.settle_seconds,status=excluded.status,
                      attempts=excluded.attempts,scan_job_id=excluded.scan_job_id,detail=excluded.detail""",
-                (path, utc_now(), utc_now(), stat.st_size if stat else None,
+                (path, initial_seen, utc_now(), stat.st_size if stat else None,
                  stat.st_mtime_ns if stat else None, stable_since, self.settle_seconds, status, attempt_count,
                  str(job_id) if job_id is not None else None, detail),
             )
@@ -1133,11 +1153,11 @@ class CompletedDownloadWorker(threading.Thread):
         with self.lock:
             current = self.candidates.get(normalized)
         stable_since = time.time()
+        first_seen = current.get("first_seen_at") if current else utc_now()
         if current and current["size"] == stat.st_size and current["modified_ns"] == stat.st_mtime_ns:
             stable_since = current["stable_since"]
-        suffix = Path(normalized).suffix.lower()
-        is_temporary = suffix in TEMPORARY_DOWNLOAD_EXTENSIONS
-        is_companion = (not is_temporary) and (suffix in COMPANION_EXTENSIONS)
+        is_temporary = is_temporary_download(normalized)
+        is_companion = (not is_temporary) and (Path(normalized).suffix.lower() in COMPANION_EXTENSIONS)
         if is_temporary:
             status = "downloading"
             detail = "Incoming download in progress"
@@ -1156,6 +1176,7 @@ class CompletedDownloadWorker(threading.Thread):
             "is_temporary": is_temporary,
             "last_saved_status": status,
             "last_saved_detail": detail,
+            "first_seen_at": first_seen,
             "check_after": 0.0,
         }
         with self.lock:
@@ -1173,7 +1194,7 @@ class CompletedDownloadWorker(threading.Thread):
                         except OSError:
                             pass
         self._save_state(normalized, status, stat=stat, stable_since=stable_since,
-                         attempts=candidate["attempts"], detail=detail)
+                         attempts=candidate["attempts"], detail=detail, first_seen_at=first_seen)
         self.wake.set()
         return True
 
@@ -1202,15 +1223,19 @@ class CompletedDownloadWorker(threading.Thread):
         """Carry an unimported download's wait/scan state to its new path."""
         source = str(Path(source).resolve())
         destination = str(Path(destination).resolve())
-        if not self.enabled or Path(destination).suffix.lower() not in VIDEO_EXTENSIONS:
+        is_dest_video = Path(destination).suffix.lower() in VIDEO_EXTENSIONS
+        is_dest_temp = is_temporary_download(destination)
+        if not self.enabled or (not is_dest_video and not is_dest_temp):
             return False
         with self.lock:
+            if self.relocations.get(source) == destination and destination in self.candidates:
+                return True
             candidate = self.candidates.pop(source, None)
         if candidate is None:
             connection = connect(self.database_path)
             try:
                 row = connection.execute(
-                    "SELECT size,modified_ns,stable_since,attempts,status FROM incoming_files WHERE path=?", (source,)
+                    "SELECT size,modified_ns,stable_since,attempts,status,first_seen_at FROM incoming_files WHERE path=?", (source,)
                 ).fetchone()
             finally:
                 connection.close()
@@ -1218,24 +1243,41 @@ class CompletedDownloadWorker(threading.Thread):
                 return False
             candidate = {"size": row["size"], "modified_ns": row["modified_ns"],
                          "stable_since": float(row["stable_since"] or time.time()),
-                         "attempts": int(row["attempts"] or 0)}
+                         "attempts": int(row["attempts"] or 0),
+                         "is_temporary": row["status"] == "downloading",
+                         "first_seen_at": row["first_seen_at"]}
         try:
             stat = Path(destination).stat()
         except OSError:
             return False
-        if candidate.get("is_temporary"):
-            candidate["is_temporary"] = False
-            candidate["stable_since"] = time.time()
-        if candidate["size"] != stat.st_size or candidate["modified_ns"] != stat.st_mtime_ns:
-            candidate.update(size=stat.st_size, modified_ns=stat.st_mtime_ns, stable_since=time.time())
-        with self.lock:
-            self.relocations[source] = destination
-            self.candidates[destination] = candidate
-        self._save_state(source, "moved", detail=f"Download completed and renamed to {destination}")
-        self._save_state(destination, "waiting", stat=stat, stable_since=candidate["stable_since"],
-                         attempts=candidate["attempts"], detail=f"Waiting for video to remain unchanged for {self.settle_seconds // 60} minute(s)")
-        self.wake.set()
-        return True
+        if is_dest_temp:
+            candidate["is_temporary"] = True
+            if candidate.get("size") != stat.st_size or candidate.get("modified_ns") != stat.st_mtime_ns:
+                candidate.update(size=stat.st_size, modified_ns=stat.st_mtime_ns, stable_since=time.time())
+            with self.lock:
+                self.relocations[source] = destination
+                self.candidates[destination] = candidate
+            self._save_state(source, "moved", detail=f"Download state transferred to {destination}")
+            self._save_state(destination, "downloading", stat=stat, stable_since=candidate["stable_since"],
+                             attempts=candidate.get("attempts", 0), detail="Incoming download in progress",
+                             first_seen_at=candidate.get("first_seen_at"))
+            self.wake.set()
+            return True
+        else:
+            if candidate.get("is_temporary"):
+                candidate["is_temporary"] = False
+                candidate["stable_since"] = time.time()
+            if candidate.get("size") != stat.st_size or candidate.get("modified_ns") != stat.st_mtime_ns:
+                candidate.update(size=stat.st_size, modified_ns=stat.st_mtime_ns, stable_since=time.time())
+            with self.lock:
+                self.relocations[source] = destination
+                self.candidates[destination] = candidate
+            self._save_state(source, "moved", detail=f"Download completed and renamed to {destination}")
+            self._save_state(destination, "waiting", stat=stat, stable_since=candidate["stable_since"],
+                             attempts=candidate.get("attempts", 0), detail=f"Waiting for video to remain unchanged for {self.settle_seconds // 60} minute(s)",
+                             first_seen_at=candidate.get("first_seen_at"))
+            self.wake.set()
+            return True
 
     def relocate_tree(self, source, destination):
         """Transfer active children when an entire download directory is moved."""
@@ -1691,7 +1733,7 @@ class CompletedDownloadWorker(threading.Thread):
                             continue
                         for path in folder.rglob("*"):
                             try:
-                                if path.is_file() and path.suffix.lower() in valid:
+                                if path.is_file() and (path.suffix.lower() in valid or (getattr(self, "track_temporary_downloads", False) and is_temporary_download(path))):
                                     resolved = str(path.resolve())
                                     with self.lock:
                                         pending = resolved in self.candidates
@@ -1799,7 +1841,11 @@ class LibraryEventHandler(FileSystemEventHandler):
             timer.start()
 
     def _relevant(self, path, is_directory):
-        return is_directory or Path(path).suffix.lower() in WATCHED_EXTENSIONS
+        if is_directory:
+            return True
+        if is_temporary_download(path):
+            return True
+        return Path(path).suffix.lower() in WATCHED_EXTENSIONS
 
     def on_created(self, event):
         if event.is_directory and self.incoming_worker:
@@ -1810,7 +1856,11 @@ class LibraryEventHandler(FileSystemEventHandler):
         resolve_filesystem_event(self.database_path, "deleted", event.src_path)
         if consume_expected_create(self.database_path, event.src_path):
             return
+        is_temp = is_temporary_download(event.src_path)
         incoming_candidate = bool(not event.is_directory and self.incoming_worker and self.incoming_worker.submit(event.src_path))
+        if is_temp:
+            # Browser and downloader temporary files must never generate unverified pending filesystem events
+            return
         if self._relevant(event.src_path, event.is_directory) and not incoming_candidate:
             if self.incoming_worker and self.incoming_worker._is_inside_incoming(event.src_path):
                 return
@@ -1855,7 +1905,7 @@ class LibraryEventHandler(FileSystemEventHandler):
                 with self.incoming_worker.lock:
                     self.incoming_worker.candidates.pop(event.src_path, None)
                 self.incoming_worker._save_state(event.src_path, "gone", detail="File removed from disk")
-            if Path(event.src_path).suffix.lower() not in TEMPORARY_DOWNLOAD_EXTENSIONS:
+            if not is_temporary_download(event.src_path):
                 if Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS:
                     with self._recent_creates_lock:
                         now = time.monotonic()
@@ -2045,12 +2095,23 @@ class LibraryEventHandler(FileSystemEventHandler):
                                 severity="warning", old_path=event.src_path, new_path=event.dest_path,
                                 detail="Video was renamed to a temporary .delete path during deletion; confirm the Stash scene no longer points to it")
                 return
-            incoming_candidate = bool(self.incoming_worker and self.incoming_worker.submit(event.dest_path))
-            if incoming_candidate and Path(event.src_path).suffix.lower() not in VIDEO_EXTENSIONS:
+
+            src_is_temp = is_temporary_download(event.src_path)
+            dest_is_temp = is_temporary_download(event.dest_path)
+            dest_is_video = Path(event.dest_path).suffix.lower() in VIDEO_EXTENSIONS
+            dest_is_companion = Path(event.dest_path).suffix.lower() in COMPANION_EXTENSIONS
+
+            # Transitions between temporary download stages must never be treated as problem moves or companion moves
+            if src_is_temp and dest_is_temp:
                 return
+
+            incoming_candidate = bool(self.incoming_worker and self.incoming_worker.submit(event.dest_path))
+            if incoming_candidate and not (Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS and not src_is_temp):
+                return
+
             candidate_source = None
             if (getattr(self.worker, "transcoder_compatibility", False) is True
-                    and Path(event.dest_path).suffix.lower() in VIDEO_EXTENSIONS):
+                    and dest_is_video):
                 remove_transcoder_candidate(self.database_path, event.src_path)
                 candidate_source = register_transcoder_candidate(self.database_path, event.dest_path)
             if candidate_source:
@@ -2059,13 +2120,20 @@ class LibraryEventHandler(FileSystemEventHandler):
                     is_directory=False, initial_status="waiting"
                 )
                 return
-            record_filesystem_event(self.database_path, "moved", event.src_path, event.dest_path, event.is_directory, initial_status="pending")
-            if not event.is_directory and Path(event.dest_path).suffix.lower() in VIDEO_EXTENSIONS:
-                self.worker.submit(event.src_path, event.dest_path)
-            elif not event.is_directory:
-                record_activity(self.database_path, "companion", "external companion move", "recorded",
-                                old_path=event.src_path, new_path=event.dest_path,
-                                detail="Companion move recorded; Stash does not maintain a separate path for this file")
+
+            # A temporary download completing outside incoming folders is a newly created video, not an inventory move
+            if src_is_temp and dest_is_video:
+                record_filesystem_event(self.database_path, "created", event.dest_path, is_directory=False, initial_status="pending")
+                return
+
+            if dest_is_video or dest_is_companion:
+                record_filesystem_event(self.database_path, "moved", event.src_path, event.dest_path, event.is_directory, initial_status="pending")
+                if dest_is_video:
+                    self.worker.submit(event.src_path, event.dest_path)
+                elif dest_is_companion:
+                    record_activity(self.database_path, "companion", "external companion move", "recorded",
+                                    old_path=event.src_path, new_path=event.dest_path,
+                                    detail="Companion move recorded; Stash does not maintain a separate path for this file")
 
 
 def update_status(database_path, token, pid, state, roots, unavailable):
