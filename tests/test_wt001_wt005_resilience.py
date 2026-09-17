@@ -390,3 +390,64 @@ def test_wt001_emergency_handler_survives_oserror_on_is_file_and_preserves_candi
     with worker.lock:
         assert resolved_path in worker.candidates, "Candidate was lost when Path.is_file() raised OSError!"
         assert worker.candidates[resolved_path]["check_after"] > time.monotonic()
+
+
+def test_wt001_temporary_db_errors_and_retries_do_not_send_failure_notifications(tmp_path):
+    """
+    WT-001: Failure notifications ('Could not add completed video') must only be sent
+    on genuine final failures, NEVER on temporary database errors or recoverable scan retries.
+    """
+    db_path = tmp_path / "watchtower.sqlite3"
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    _make_db(db_path)
+
+    video = incoming / "notify_test.mp4"
+    video.write_bytes(b"notify test content")
+
+    notifications_sent = []
+
+    def mock_notify(enabled, message):
+        notifications_sent.append(message)
+
+    with patch("librarymanager_monitor.notify", side_effect=mock_notify):
+        stash = MagicMock()
+        stash.call_GQL.return_value = {"findScenes": {"scenes": []}}
+        # max_attempts = 2 with notifications enabled
+        worker = CompletedDownloadWorker(db_path, stash, str(incoming), True, 60, True, max_attempts=2)
+        assert worker.submit(str(video)) is True
+
+        resolved = str(video.resolve())
+        with worker.lock:
+            worker.candidates[resolved]["stable_since"] = time.time() - 100
+
+        # 1. Temporary SQLite error: must NOT produce a failure notification
+        real_save = worker._save_state
+
+        def failing_save(path, status, **kwargs):
+            if status == "scanning":
+                raise sqlite3.OperationalError("database is locked")
+            return real_save(path, status, **kwargs)
+
+        worker._save_state = failing_save
+        worker.evaluate_once()
+
+        assert len(notifications_sent) == 0, f"Notification was sent on temporary DB error: {notifications_sent}"
+
+        # 2. Recoverable scan failure (attempt 1 of 2): must NOT produce a failure notification
+        worker._save_state = real_save
+        worker.stash.metadata_scan.side_effect = RuntimeError("Stash timeout")
+        with worker.lock:
+            worker.candidates[resolved]["check_after"] = 0.0
+
+        worker.evaluate_once()
+        assert len(notifications_sent) == 0, f"Notification was sent on recoverable scan retry (attempt 1/2): {notifications_sent}"
+
+        # 3. Final failure (attempt 2 of 2): MUST produce exactly one failure notification
+        with worker.lock:
+            worker.candidates[resolved]["check_after"] = 0.0
+            worker.candidates[resolved]["stable_since"] = time.time() - 100
+
+        worker.evaluate_once()
+        assert len(notifications_sent) == 1, "Final failure must send exactly one failure notification"
+        assert f"Could not add completed video: {video.name}" in notifications_sent[0]
