@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.10 — 2026-09-17
+
+- Non-blocking incoming scans: fallback checks, startup recovery, and network reconnect recovery never execute synchronous recursive `rglob()` on worker or caller threads.
+- Bounded per-folder single-flight scan isolation: strictly at most one active scan thread per configured incoming folder, preventing thread growth or queue unboundedness.
+- Independent folder failure isolation: if one network mount or incoming folder hangs during directory traversal, healthy incoming folders continue scanning independently.
+- Non-blocking directory ingest (`submit_tree`): zero filesystem I/O before dispatch, ensuring directory create/move events never freeze the watchdog event loop on hung NAS mounts.
+- Bounded directory scan locking: nested directory events are keyed to their owning configured incoming folder, sharing the single-flight scan lock.
+- Process shutdown safety: all incoming scan threads run as daemon threads, ensuring unkillable kernel filesystem hangs never prevent clean daemon or Stash shutdown.
+
 ## 1.0.9 — 2026-09-17
 
 - Add robust network-share disconnect and hang resilience for NAS/SMB/NFS mounts with non-blocking availability probing and thread pool isolation.
