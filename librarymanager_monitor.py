@@ -77,6 +77,10 @@ class RootAvailabilityTracker:
                         "last_probed_at": 0.0,
                     }
 
+    def get_unavailable_roots(self) -> list[str]:
+        with self.lock:
+            return [r for r, s in self._states.items() if s.get("status") != "available"]
+
     def poll(self):
         """Non-blocking call by the main monitor loop.
         Returns (available_roots, unavailable_roots, recovered_roots, lost_roots).
@@ -155,6 +159,7 @@ import hashlib
 import logging
 import json
 import os
+import posixpath
 import sys
 import signal
 import sqlite3
@@ -174,6 +179,7 @@ import unicodedata
 from librarymanager_core import (
     generate_video_contact_sheet, connect, consume_expected_create, consume_expected_move,
     expect_filesystem_create, expect_filesystem_move, fingerprint_value,
+    is_file_on_unavailable_root,
                                  opensubtitles_hash, record_activity, record_filesystem_event,
                                  resolve_filesystem_event, refresh_scene_inventory, utc_now)
 
@@ -363,13 +369,20 @@ def _compound_video_name(companion_name: str):
 
 def find_scene_for_companion(con, companion_path_or_name):
     """Resolve companions conservatively: local exact matches or unique compound names only."""
-    c_path = Path(companion_path_or_name)
+    c_raw = str(companion_path_or_name)
+    c_path = Path(c_raw.replace("\\", "/"))
     c_name = c_path.name
     c_stem = c_path.stem
-    c_dir = str(c_path.parent.resolve()) if len(c_path.parts) > 1 else None
+    c_dir = str(c_path.parent) if len(c_path.parts) > 1 and str(c_path.parent) not in (".", "") else None
 
     if c_path.suffix.lower() not in COMPANION_EXTENSIONS:
         return None, ""
+
+    def _normalize_dir_key(p: str) -> str:
+        return os.path.normcase(posixpath.normpath(str(p).replace("\\", "/")))
+
+    def _dir_of(p: str) -> str:
+        return posixpath.dirname(str(p).replace("\\", "/"))
 
     # Strong cross-directory form only: Movie.m4v.jpg -> Movie.m4v.
     compound_name = _compound_video_name(c_name)
@@ -381,7 +394,8 @@ def find_scene_for_companion(con, companion_path_or_name):
         if len(rows) == 1:
             return rows[0], ""
         if len(rows) > 1 and c_dir:
-            local = [r for r in rows if str(Path(r["path"]).parent.resolve()) == c_dir]
+            target_key = _normalize_dir_key(c_dir)
+            local = [r for r in rows if _normalize_dir_key(_dir_of(r["path"])) == target_key]
             if len(local) == 1:
                 return local[0], ""
         return None, ""
@@ -390,17 +404,35 @@ def find_scene_for_companion(con, companion_path_or_name):
     if not c_dir:
         return None, ""
 
-    rows = con.execute(
-        "SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1"
-    ).fetchall()
-    local_rows = [r for r in rows if str(Path(r["path"]).parent.resolve()) == c_dir]
+    c_dir_norm = str(c_dir).rstrip("/\\")
+    p1 = c_dir_norm.replace("\\", "/") + "/"
+    u1 = p1[:-1] + "0"
+    p2 = c_dir_norm.replace("/", "\\") + "\\"
+    u2 = p2[:-1] + "]"
+
+    if p1 == p2:
+        rows = con.execute(
+            "SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1 AND path >= ? AND path < ?",
+            (p1, u1),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1 AND ((path >= ? AND path < ?) OR (path >= ? AND path < ?))",
+            (p1, u1, p2, u2),
+        ).fetchall()
+
+    target_dir_key = _normalize_dir_key(c_dir)
+    local_rows = [
+        r for r in rows
+        if _normalize_dir_key(_dir_of(r["path"])) == target_dir_key
+    ]
 
     # Generic artwork matching: only associate when exactly one video is in that folder
     if is_generic_artwork(c_path):
         eligible = find_eligible_videos_in_folder(c_path.parent)
-        all_vid_paths = {p.resolve() for p in eligible}
+        all_vid_paths = {_normalize_dir_key(p) for p in eligible}
         for r in local_rows:
-            all_vid_paths.add(Path(r["path"]).resolve())
+            all_vid_paths.add(_normalize_dir_key(r["path"]))
         if len(all_vid_paths) == 1 and len(local_rows) == 1:
             return local_rows[0], f".{c_stem.lower()}" if c_stem.lower() != "cover" else ""
         return None, ""
@@ -1003,6 +1035,8 @@ class CompletedDownloadWorker(threading.Thread):
         return found
 
     def _current_video_paths(self):
+        """Alias for _current_incoming_paths. Retained for test contracts and backwards compatibility.
+        Returns all monitored incoming paths (including companions) required for fallback rediscovery."""
         return self._current_incoming_paths()
 
     def _is_in_inventory(self, path):
@@ -1697,11 +1731,12 @@ class CompletedDownloadWorker(threading.Thread):
 
 
 class LibraryEventHandler(FileSystemEventHandler):
-    def __init__(self, database_path, worker, notifications, incoming_worker=None):
+    def __init__(self, database_path, worker, notifications, incoming_worker=None, availability_tracker=None):
         self.database_path = database_path
         self.worker = worker
         self.notifications = notifications
         self.incoming_worker = incoming_worker
+        self.availability_tracker = availability_tracker
         # Track when each path last had a 'created' event so the delayed
         # "still missing?" check can tell the difference between a genuine
         # deletion and a rapid delete-then-recreate (e.g. atomic download swap).
@@ -1711,6 +1746,11 @@ class LibraryEventHandler(FileSystemEventHandler):
         self._recent_video_candidates: dict[str, float] = {}
         self._transcoder_decision_timers: dict[str, threading.Timer] = {}
         self._recent_creates_lock = threading.Lock()
+        # Bounded centralized deletion scheduler
+        self._pending_deletions: dict[str, float] = {}
+        self._deletion_scheduler_lock = threading.Lock()
+        self._deletion_timer: threading.Timer | None = None
+        self._deletion_in_flight_roots: set[str] = set()
 
     def restore_transcoder_candidates(self):
         """Restore persistent candidate decisions after a watcher or Stash restart."""
@@ -1840,7 +1880,113 @@ class LibraryEventHandler(FileSystemEventHandler):
                     self._schedule_transcoder_decision(event.src_path)
                 if (not should_decide and not event.is_directory
                         and Path(event.src_path).suffix.lower() in WATCHED_EXTENSIONS):
-                    threading.Timer(3, self._notify_if_still_missing, args=(event.src_path,)).start()
+                    # Single-flight centralized scheduling replaces per-event Timer(3, self._notify_if_still_missing)
+                    self._schedule_deletion_check(event.src_path)
+
+    def _schedule_deletion_check(self, path: str):
+        with self._deletion_scheduler_lock:
+            self._pending_deletions[str(path)] = time.monotonic() + 3.0
+            if self._deletion_timer is None:
+                self._deletion_timer = threading.Timer(0.5, self._drain_pending_deletions)
+                self._deletion_timer.daemon = True
+                self._deletion_timer.start()
+
+    def _is_path_offline(self, path: str) -> bool:
+        unavail = []
+        if self.availability_tracker:
+            unavail = self.availability_tracker.get_unavailable_roots()
+        else:
+            try:
+                con = connect(self.database_path)
+                try:
+                    row = con.execute("SELECT unavailable_roots_json FROM filesystem_monitor_status WHERE id=1").fetchone()
+                    if row and row["unavailable_roots_json"]:
+                        unavail = json.loads(row["unavailable_roots_json"])
+                finally:
+                    con.close()
+            except Exception:
+                pass
+        if unavail and is_file_on_unavailable_root(path, unavail):
+            return True
+        return False
+
+    def _root_for_path(self, path: str) -> str:
+        norm_p = os.path.normcase(os.path.normpath(str(path))).replace("\\", "/")
+        all_roots = []
+        if self.availability_tracker:
+            all_roots = self.availability_tracker.roots
+        for r in sorted(all_roots, key=len, reverse=True):
+            norm_r = os.path.normcase(os.path.normpath(str(r))).replace("\\", "/")
+            if norm_p == norm_r or norm_p.startswith(norm_r.rstrip("/") + "/"):
+                return r
+        return os.path.dirname(norm_p)
+
+    def _drain_pending_deletions(self):
+        with self._deletion_scheduler_lock:
+            self._deletion_timer = None
+            now = time.monotonic()
+
+            # Only prune stale queued entries whose root is NOT actively in-flight
+            expired = [
+                p for p, t in self._pending_deletions.items()
+                if now - t > 120.0 and self._root_for_path(p) not in self._deletion_in_flight_roots
+            ]
+            for p in expired:
+                self._pending_deletions.pop(p, None)
+
+            ready_paths = [p for p, t in self._pending_deletions.items() if now >= t]
+            work_by_root: dict[str, list[str]] = {}
+            for path in ready_paths:
+                if self._is_path_offline(path):
+                    self._pending_deletions.pop(path, None)
+                    continue
+                root_key = self._root_for_path(path)
+                if root_key in self._deletion_in_flight_roots:
+                    continue
+                self._pending_deletions.pop(path, None)
+                work_by_root.setdefault(root_key, []).append(path)
+
+            for root_key, paths in work_by_root.items():
+                self._deletion_in_flight_roots.add(root_key)
+                t = threading.Thread(
+                    target=self._verify_deletions_for_root,
+                    args=(root_key, paths),
+                    name=f"del_verify_{Path(root_key).name if root_key else 'default'}",
+                    daemon=True,
+                )
+                t.start()
+
+            if self._pending_deletions:
+                earliest = min(self._pending_deletions.values())
+                delay = max(0.1, min(1.0, earliest - now))
+                self._deletion_timer = threading.Timer(delay, self._drain_pending_deletions)
+                self._deletion_timer.daemon = True
+                self._deletion_timer.start()
+
+    def _verify_deletions_for_root(self, root_key: str, paths: list[str]):
+        try:
+            for path in paths:
+                with self._recent_creates_lock:
+                    created_at = self._recent_creates.get(path, 0)
+                if time.monotonic() - created_at < 5.0:
+                    continue
+                if self._is_path_offline(path):
+                    continue
+                try:
+                    exists = Path(path).exists()
+                except OSError as err:
+                    if is_network_disconnect_error(err, path):
+                        continue
+                    exists = False
+                if not exists:
+                    if self._is_path_offline(path) or is_network_disconnect_error(OSError(errno.ENOENT, "No such file"), path):
+                        continue
+                    record_activity(self.database_path, "filesystem", "external deletion", "review", severity="warning",
+                                    old_path=path, detail="File remained absent after the notification delay")
+                    notify(self.notifications, f"File deleted or moved without a paired event: {Path(path).name}")
+        finally:
+            with self._deletion_scheduler_lock:
+                self._deletion_in_flight_roots.discard(root_key)
 
     def _notify_if_still_missing(self, path):
         # Suppress the warning if the file was recreated within 5 s of this check
@@ -1849,6 +1995,8 @@ class LibraryEventHandler(FileSystemEventHandler):
             created_at = self._recent_creates.get(path, 0)
         if time.monotonic() - created_at < 5.0:
             return
+        if self._is_path_offline(path):
+            return
         try:
             exists = Path(path).exists()
         except OSError as err:
@@ -1856,7 +2004,7 @@ class LibraryEventHandler(FileSystemEventHandler):
                 return
             exists = False
         if not exists:
-            if is_network_disconnect_error(OSError(errno.ENOENT, "No such file"), path):
+            if self._is_path_offline(path) or is_network_disconnect_error(OSError(errno.ENOENT, "No such file"), path):
                 return
             record_activity(self.database_path, "filesystem", "external deletion", "review", severity="warning",
                             old_path=path, detail="File remained absent after the notification delay")
@@ -2058,6 +2206,7 @@ def main():
     if worker.transcoder_compatibility:
         handler.restore_transcoder_candidates()
     tracker = RootAvailabilityTracker(roots, probe_timeout=5.0)
+    handler.availability_tracker = tracker
     for r in unavailable:
         if r in tracker._states:
             tracker._states[r]["status"] = "unavailable"
@@ -2110,7 +2259,15 @@ def main():
                             new_cfg = request.get("config") or {}
                             worker.enabled = bool(new_cfg.get("automatic_move_reconciliation", worker.enabled))
                             worker.transcoder_compatibility = bool(new_cfg.get("transcoder_replacement_compatibility", worker.transcoder_compatibility))
-                            worker.notifications = bool(new_cfg.get("mac_notifications", worker.notifications))
+                            if "mac_notifications" in new_cfg:
+                                new_notif = bool(new_cfg["mac_notifications"])
+                                worker.notifications = new_notif
+                                if incoming_worker:
+                                    incoming_worker.notifications = new_notif
+                                if handler:
+                                    handler.notifications = new_notif
+                            else:
+                                worker.notifications = bool(new_cfg.get("mac_notifications", worker.notifications))
                             _new_folders = new_cfg.get("incoming_folders")
                             _new_folder_str = new_cfg.get("incoming_folder")
                             if _new_folders is not None:

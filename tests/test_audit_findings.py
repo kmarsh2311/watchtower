@@ -507,19 +507,15 @@ class TestFinding1NoRglobTimeout:
 class TestFinding2UnboundedTimerThreads:
 
     def test_no_limit_on_deletion_timer_count(self):
-        """CODE-CONFIRMED: on_deleted spawns Timer threads without any count limit."""
+        """VERIFIED FIX: on_deleted delegates to centralized bounded single-flight scheduler."""
         import inspect
         src = inspect.getsource(LibraryEventHandler.on_deleted)
-        assert "threading.Timer" in src
-        has_limit = any(tok in src for tok in [
-            "Semaphore", "BoundedSemaphore", "ThreadPoolExecutor",
-            "len(self._notification_timers", "maxsize"
-        ])
-        assert not has_limit, "Limit already exists — finding 2 FALSE POSITIVE"
+        assert "_schedule_deletion_check" in src
 
     def test_deletion_events_create_new_threads(self, tmp_path):
         """
-        CONFIRMED: 10 file-deletion events for .nfo files each spawn a timer thread.
+        VERIFIED FIX: 10 batch deletion events do NOT spawn 10 independent timer threads.
+        Thread count remains bounded (<= 2 helper threads, not 10).
         """
         from watchdog.events import FileDeletedEvent
 
@@ -539,10 +535,7 @@ class TestFinding2UnboundedTimerThreads:
 
         time.sleep(0.05)
         new_threads = threading.active_count() - active_before
-
-        assert new_threads >= 1, (
-            f"Expected timer threads to start, got only {new_threads} new threads"
-        )
+        assert new_threads <= 2, f"Expected bounded thread count, got {new_threads}" 
 
 
 # ==========================================================================
@@ -575,9 +568,8 @@ class TestFinding6DBReadInLoop:
 class TestFinding9HotReloadMissesNotifications:
     def test_incoming_worker_notifications_not_updated_in_reload_block(self):
         """
-        CODE-CONFIRMED: hot-reload updates worker.notifications but NOT
-        incoming_worker.notifications. Toggling notifications in the UI has
-        no effect on incoming import notifications until monitor restart.
+        VERIFIED FIX: hot-reload updates worker.notifications,
+        incoming_worker.notifications, AND handler.notifications.
         """
         import inspect
         import librarymanager_monitor as mod
@@ -588,8 +580,11 @@ class TestFinding9HotReloadMissesNotifications:
         assert "worker.notifications" in reload_block, (
             "worker.notifications must be updated"
         )
-        assert "incoming_worker.notifications" not in reload_block, (
-            "FALSE POSITIVE: incoming_worker.notifications IS updated — finding 9 wrong"
+        assert "incoming_worker.notifications" in reload_block, (
+            "VERIFIED FIX: incoming_worker.notifications IS updated on reload"
+        )
+        assert "handler.notifications" in reload_block, (
+            "VERIFIED FIX: handler.notifications IS updated on reload"
         )
 
 
