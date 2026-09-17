@@ -721,6 +721,25 @@ def flatten_scene_files(scenes):
             }
 
 
+def is_file_on_unavailable_root(path_str: str, unavailable_roots=None) -> bool:
+    """Check if a file's root or mount point is currently offline or unreachable.
+    Uses normalized path prefix resolution against the configured unavailable roots.
+    """
+    if not unavailable_roots or not path_str:
+        return False
+    try:
+        norm_path = os.path.normcase(str(path_str)).replace(chr(92), "/")
+        for unavail in unavailable_roots:
+            if not unavail:
+                continue
+            norm_unavail = os.path.normcase(str(unavail)).replace(chr(92), "/")
+            if norm_path == norm_unavail or norm_path.startswith(norm_unavail.rstrip("/") + "/"):
+                return True
+    except (ValueError, OSError):
+        pass
+    return False
+
+
 def inventory(database_path: Path, scenes, progress_callback=None) -> dict:
     now = utc_now()
     connection = connect(database_path)
@@ -735,15 +754,38 @@ def inventory(database_path: Path, scenes, progress_callback=None) -> dict:
         summary = {"scenes": len({record["scene_id"] for record in records}), "files": 0,
                    "present": 0, "missing": 0, "changed_paths": 0, "restored": 0}
 
+        unavailable_roots = []
+        try:
+            status_row = connection.execute(
+                "SELECT unavailable_roots_json FROM filesystem_monitor_status WHERE id=1"
+            ).fetchone()
+            if status_row and status_row["unavailable_roots_json"]:
+                unavailable_roots = json.loads(status_row["unavailable_roots_json"])
+        except Exception:
+            pass
+
         for record_number, record in enumerate(records, start=1):
             previous = connection.execute(
                 "SELECT path, exists_on_disk, missing_since FROM files WHERE file_id = ?",
                 (record["file_id"],),
             ).fetchone()
-            exists = os.path.isfile(record["path"])
+            try:
+                exists = os.path.isfile(record["path"])
+            except OSError:
+                exists = False
+
+            is_offline = False
+            if not exists:
+                is_offline = is_file_on_unavailable_root(record["path"], unavailable_roots)
+
+            if is_offline and previous:
+                exists = bool(previous["exists_on_disk"])
+                missing_since = previous["missing_since"]
+            else:
+                missing_since = None if exists else (previous["missing_since"] if previous else now)
+
             summary["files"] += 1
             summary["present" if exists else "missing"] += 1
-            missing_since = None if exists else (previous["missing_since"] if previous else now)
 
             if previous and previous["path"] != record["path"]:
                 summary["changed_paths"] += 1
@@ -751,17 +793,18 @@ def inventory(database_path: Path, scenes, progress_callback=None) -> dict:
                     "INSERT INTO inventory_events(run_id,file_id,event_type,old_path,new_path,recorded_at) VALUES (?,?,?,?,?,?)",
                     (run_id, record["file_id"], "stash_path_changed", previous["path"], record["path"], now),
                 )
-            if previous and not previous["exists_on_disk"] and exists:
-                summary["restored"] += 1
-                connection.execute(
-                    "INSERT INTO inventory_events(run_id,file_id,event_type,old_path,new_path,recorded_at) VALUES (?,?,?,?,?,?)",
-                    (run_id, record["file_id"], "file_restored", previous["path"], record["path"], now),
-                )
-            if (not previous or previous["exists_on_disk"]) and not exists:
-                connection.execute(
-                    "INSERT INTO inventory_events(run_id,file_id,event_type,old_path,new_path,recorded_at) VALUES (?,?,?,?,?,?)",
-                    (run_id, record["file_id"], "file_missing", record["path"], None, now),
-                )
+            if not is_offline:
+                if previous and not previous["exists_on_disk"] and exists:
+                    summary["restored"] += 1
+                    connection.execute(
+                        "INSERT INTO inventory_events(run_id,file_id,event_type,old_path,new_path,recorded_at) VALUES (?,?,?,?,?,?)",
+                        (run_id, record["file_id"], "file_restored", previous["path"], record["path"], now),
+                    )
+                if (not previous or previous["exists_on_disk"]) and not exists:
+                    connection.execute(
+                        "INSERT INTO inventory_events(run_id,file_id,event_type,old_path,new_path,recorded_at) VALUES (?,?,?,?,?,?)",
+                        (run_id, record["file_id"], "file_missing", record["path"], None, now),
+                    )
 
             connection.execute(
                 """INSERT INTO files(file_id,scene_id,path,basename,title,studio,performers_json,size,duration,
@@ -805,10 +848,33 @@ def refresh_scene_inventory(database_path: Path, scene: dict) -> int:
     records = list(flatten_scene_files([scene]))
     connection = connect(database_path)
     try:
+        unavailable_roots = []
+        try:
+            status_row = connection.execute(
+                "SELECT unavailable_roots_json FROM filesystem_monitor_status WHERE id=1"
+            ).fetchone()
+            if status_row and status_row["unavailable_roots_json"]:
+                unavailable_roots = json.loads(status_row["unavailable_roots_json"])
+        except Exception:
+            pass
+
         for record in records:
-            exists = os.path.isfile(record["path"])
-            previous = connection.execute("SELECT first_seen_at,missing_since FROM files WHERE file_id=?",
+            try:
+                exists = os.path.isfile(record["path"])
+            except OSError:
+                exists = False
+            previous = connection.execute("SELECT first_seen_at,missing_since,exists_on_disk FROM files WHERE file_id=?",
                                           (record["file_id"],)).fetchone()
+            is_offline = False
+            if not exists:
+                is_offline = is_file_on_unavailable_root(record["path"], unavailable_roots)
+
+            if is_offline and previous:
+                exists = bool(previous["exists_on_disk"])
+                missing_since = previous["missing_since"]
+            else:
+                missing_since = None if exists else (previous["missing_since"] if previous else now)
+
             connection.execute(
                 """INSERT INTO files(file_id,scene_id,path,basename,title,studio,performers_json,size,duration,
                        fingerprints_json,scene_metadata_json,exists_on_disk,first_seen_at,last_seen_at,missing_since)
@@ -822,7 +888,7 @@ def refresh_scene_inventory(database_path: Path, scene: dict) -> int:
                        missing_since=excluded.missing_since""",
                 {**record, "exists_on_disk": int(exists),
                  "first_seen_at": previous["first_seen_at"] if previous else now, "last_seen_at": now,
-                 "missing_since": None if exists else (previous["missing_since"] if previous else now)},
+                 "missing_since": missing_since},
             )
         connection.commit()
         return len(records)
@@ -1315,7 +1381,12 @@ def reconcile_missing_files(database_path: Path) -> tuple[dict, list[dict]]:
                 "confidence": "none", "reason": "No candidate found",
                 "expected_size": record["size"], "candidate_size": None, "oshash_match": None,
             }
-            if not folder.is_dir():
+            is_dir = False
+            try:
+                is_dir = folder.is_dir()
+            except OSError:
+                is_dir = False
+            if not is_dir:
                 result.update(confidence="skipped", reason="Original folder is unavailable")
                 summary["skipped_folders"] += 1
             elif record["size"] is None:
@@ -1323,7 +1394,11 @@ def reconcile_missing_files(database_path: Path) -> tuple[dict, list[dict]]:
                 summary["unmatched"] += 1
             else:
                 size_matches = []
-                for candidate in folder.iterdir():
+                try:
+                    entries = list(folder.iterdir())
+                except OSError:
+                    entries = []
+                for candidate in entries:
                     try:
                         normalized = os.path.normcase(os.path.abspath(candidate))
                         if (not candidate.is_file() or candidate.suffix.lower() not in VIDEO_EXTENSIONS

@@ -3,6 +3,154 @@
 
 import argparse
 import base64
+import concurrent.futures
+import errno
+from pathlib import Path
+NETWORK_DISCONNECT_ERRNOS = {
+    getattr(errno, "ENOTCONN", 57),       # Socket is not connected
+    getattr(errno, "ETIMEDOUT", 60),      # Operation timed out
+    getattr(errno, "EHOSTDOWN", 64),      # Host is down
+    getattr(errno, "EHOSTUNREACH", 65),   # No route to host
+    getattr(errno, "ECONNRESET", 54),     # Connection reset by peer
+    getattr(errno, "ECONNABORTED", 53),   # Software caused connection abort
+    getattr(errno, "ENETDOWN", 50),       # Network is down
+    getattr(errno, "ENETUNREACH", 51),    # Network is unreachable
+    getattr(errno, "EIO", 5),             # Input/output error
+    getattr(errno, "ESTALE", 70),         # Stale NFS file handle
+}
+
+
+def is_network_disconnect_error(err: BaseException, path=None) -> bool:
+    if isinstance(err, OSError):
+        if err.errno in NETWORK_DISCONNECT_ERRNOS:
+            return True
+        err_msg = str(err).lower()
+        if any(msg in err_msg for msg in ("socket is not connected", "timed out", "host is down", "no route to host", "network is down", "stale file handle", "input/output error")):
+            return True
+    return False
+
+
+def is_path_available(path) -> bool:
+    try:
+        p = Path(path)
+        if not p.is_dir():
+            return False
+        try:
+            with os.scandir(p) as it:
+                pass
+        except OSError as e:
+            if is_network_disconnect_error(e, path=p):
+                return False
+        return True
+    except OSError:
+        return False
+
+
+
+
+class RootAvailabilityTracker:
+    """Tracks availability of monitored roots asynchronously without blocking the caller."""
+    def __init__(self, roots, probe_timeout=5.0):
+        self.roots = list(roots or [])
+        self.probe_timeout = float(probe_timeout)
+        self.lock = threading.Lock()
+        self._states = {}
+        for r in self.roots:
+            self._states[r] = {
+                "status": "available",
+                "in_flight": False,
+                "started_at": 0.0,
+                "last_probed_at": 0.0,
+            }
+        self._recovered_batch = []
+        self._lost_batch = []
+
+    def update_roots(self, roots):
+        with self.lock:
+            self.roots = list(roots or [])
+            for r in self.roots:
+                if r not in self._states:
+                    self._states[r] = {
+                        "status": "available",
+                        "in_flight": False,
+                        "started_at": 0.0,
+                        "last_probed_at": 0.0,
+                    }
+
+    def poll(self):
+        """Non-blocking call by the main monitor loop.
+        Returns (available_roots, unavailable_roots, recovered_roots, lost_roots).
+        NEVER performs filesystem operations on the calling thread.
+        """
+        mono_now = time.monotonic()
+        recovered = []
+        lost = []
+        available = []
+        unavailable = []
+
+        with self.lock:
+            for root in self.roots:
+                state = self._states.get(root)
+                if not state:
+                    continue
+                if state["in_flight"]:
+                    if mono_now - state["started_at"] > self.probe_timeout:
+                        if state["status"] == "available":
+                            state["status"] = "unavailable"
+                            lost.append(root)
+                else:
+                    if mono_now - state["last_probed_at"] >= 5.0 or state["last_probed_at"] == 0.0:
+                        self._launch_probe_unlocked(root, mono_now)
+
+                if state["status"] == "available":
+                    available.append(root)
+                else:
+                    unavailable.append(root)
+
+            recovered_batch = self._recovered_batch
+            lost_batch = self._lost_batch
+            self._recovered_batch = []
+            self._lost_batch = []
+
+        all_recovered = list(dict.fromkeys(recovered + recovered_batch))
+        all_lost = list(dict.fromkeys(lost + lost_batch))
+        return available, unavailable, all_recovered, all_lost
+
+    def _launch_probe_unlocked(self, root, mono_now):
+        state = self._states[root]
+        state["in_flight"] = True
+        state["started_at"] = mono_now
+
+        def probe_worker():
+            success = False
+            try:
+                p = Path(root)
+                if p.is_dir():
+                    try:
+                        with os.scandir(p) as it:
+                            pass
+                        success = True
+                    except OSError as e:
+                        if not is_network_disconnect_error(e):
+                            success = True
+            except (OSError, Exception):
+                success = False
+
+            with self.lock:
+                state["in_flight"] = False
+                state["last_probed_at"] = time.monotonic()
+                prev_status = state["status"]
+                new_status = "available" if success else "unavailable"
+                state["status"] = new_status
+                if prev_status != new_status:
+                    if new_status == "available":
+                        self._recovered_batch.append(root)
+                    else:
+                        self._lost_batch.append(root)
+
+        t = threading.Thread(target=probe_worker, name=f"probe_{Path(root).name}", daemon=True)
+        t.start()
+
 import hashlib
 import logging
 import json
@@ -793,6 +941,12 @@ class CompletedDownloadWorker(threading.Thread):
         self.contact_sheet_script = ""
         self.allow_custom_contact_sheet_script = False
         self.track_temporary_downloads = False
+        self._scanning_folders = set()
+        self._scanning_lock = threading.Lock()
+        self._scan_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max(1, min(4, len(self.incoming_folders) or 1)),
+            thread_name_prefix="incoming_scan"
+        )
         if self.enabled:
             self._restore_candidates()
             self._recover_recent_files()
@@ -833,13 +987,19 @@ class CompletedDownloadWorker(threading.Thread):
             valid = valid | TEMPORARY_DOWNLOAD_EXTENSIONS
         found = set()
         for folder in self.incoming_folders:
-            if folder.is_dir():
-                try:
-                    for path in folder.rglob("*"):
+            try:
+                if not folder.is_dir():
+                    continue
+                for path in folder.rglob("*"):
+                    try:
                         if path.is_file() and path.suffix.lower() in valid:
                             found.add(str(path.resolve()))
-                except Exception as exc:
-                    logger.debug("Failed scanning incoming folder %s: %s", folder, exc)
+                    except OSError as err:
+                        if is_network_disconnect_error(err, path):
+                            break
+                        continue
+            except OSError as exc:
+                logger.debug("Failed scanning incoming folder %s: %s", folder, exc)
         return found
 
     def _current_video_paths(self):
@@ -986,9 +1146,15 @@ class CompletedDownloadWorker(threading.Thread):
     def submit_tree(self, path):
         """Discover videos inside a newly-created or newly-moved download directory."""
         root = Path(path)
-        if not self.enabled or not root.is_dir():
+        if not self.enabled:
             return 0
-        return sum(1 for child in root.rglob("*") if child.is_file() and self.submit(child))
+        try:
+            if not root.is_dir():
+                return 0
+            return sum(1 for child in root.rglob("*") if child.is_file() and self.submit(child))
+        except OSError as exc:
+            logger.debug("submit_tree failed on %s: %s", path, exc)
+            return 0
 
     def _resolve_relocation(self, path):
         with self.lock:
@@ -1419,7 +1585,10 @@ class CompletedDownloadWorker(threading.Thread):
                 continue
             try:
                 stat = Path(path).stat()
-            except OSError:
+            except OSError as err:
+                if is_network_disconnect_error(err, path):
+                    candidate["check_after"] = mono_now + 5.0
+                    continue
                 with self.lock:
                     self.candidates.pop(path, None)
                 self._save_state(path, "gone", detail="File disappeared before it finished")
@@ -1450,23 +1619,71 @@ class CompletedDownloadWorker(threading.Thread):
                     self._scan(path, candidate)
 
     def _fallback_check(self):
-        for path in self._current_video_paths():
-            with self.lock:
-                pending = path in self.candidates
-            if pending or self._is_in_inventory(path) or self._was_imported(path):
-                continue
-            try:
-                created_during_this_run = Path(path).stat().st_mtime >= self.started_at
-            except OSError:
-                continue
-            if created_during_this_run:
-                self.submit(path)
+        try:
+            for path in self._current_video_paths():
+                with self.lock:
+                    pending = path in self.candidates
+                if pending or self._is_in_inventory(path) or self._was_imported(path):
+                    continue
+                try:
+                    created_during_this_run = Path(path).stat().st_mtime >= self.started_at
+                except OSError:
+                    continue
+                if created_during_this_run:
+                    self.submit(path)
+        except Exception as exc:
+            logger.debug("Error in _fallback_check: %s", exc)
 
-
+    def trigger_recovery_scan(self, root):
+        """Discovers files that arrived while a network share was offline."""
+        try:
+            if not self.enabled:
+                return
+            root_path = Path(root).resolve()
+            valid = VIDEO_EXTENSIONS | COMPANION_EXTENSIONS
+            if getattr(self, "track_temporary_downloads", False):
+                valid = valid | TEMPORARY_DOWNLOAD_EXTENSIONS
+            for folder in self.incoming_folders:
+                matched = False
+                try:
+                    folder.resolve().relative_to(root_path)
+                    matched = True
+                except (ValueError, OSError):
+                    if root_path == folder.resolve():
+                        matched = True
+                if matched:
+                    try:
+                        if not folder.is_dir():
+                            continue
+                        for path in folder.rglob("*"):
+                            try:
+                                if path.is_file() and path.suffix.lower() in valid:
+                                    resolved = str(path.resolve())
+                                    with self.lock:
+                                        pending = resolved in self.candidates
+                                    if pending or self._is_in_inventory(resolved) or self._was_imported(resolved):
+                                        continue
+                                    try:
+                                        if path.stat().st_mtime >= self.started_at:
+                                            self.submit(resolved)
+                                    except OSError:
+                                        continue
+                            except OSError as err:
+                                if is_network_disconnect_error(err, path):
+                                    break
+                                continue
+                    except OSError as exc:
+                        logger.debug("Failed recovery scan for folder %s: %s", folder, exc)
+        except Exception as exc:
+            logger.debug("Error triggering recovery scan for %s: %s", root, exc)
 
     def stop(self):
         self.stopping = True
         self.wake.set()
+        try:
+            self._scan_pool.shutdown(wait=False)
+        except Exception:
+            pass
 
     def run(self):
         while not self.stopping:
@@ -1632,7 +1849,15 @@ class LibraryEventHandler(FileSystemEventHandler):
             created_at = self._recent_creates.get(path, 0)
         if time.monotonic() - created_at < 5.0:
             return
-        if not Path(path).exists():
+        try:
+            exists = Path(path).exists()
+        except OSError as err:
+            if is_network_disconnect_error(err, path):
+                return
+            exists = False
+        if not exists:
+            if is_network_disconnect_error(OSError(errno.ENOENT, "No such file"), path):
+                return
             record_activity(self.database_path, "filesystem", "external deletion", "review", severity="warning",
                             old_path=path, detail="File remained absent after the notification delay")
             notify(self.notifications, f"File deleted or moved without a paired event: {Path(path).name}")
@@ -1778,7 +2003,7 @@ def main():
     database_path = Path(args.database)
     control_path = Path(args.control)
     roots = json.loads(args.roots_json)
-    available = [root for root in roots if Path(root).is_dir()]
+    available = [root for root in roots if is_path_available(root)]
     unavailable = [root for root in roots if root not in available]
     if not claim_monitor_ownership(database_path, args.token, os.getpid(), available, unavailable):
         logger.warning("Another Watchtower monitor already owns this database; exiting duplicate startup")
@@ -1811,8 +2036,13 @@ def main():
     incoming_worker.allow_custom_contact_sheet_script = runtime.get("allow_custom_contact_sheet_script") is True
     observer = Observer()
     handler = LibraryEventHandler(database_path, worker, runtime.get("mac_notifications") is True, incoming_worker)
+    watched_roots = {}
     for root in available:
-        observer.schedule(handler, root, recursive=True)
+        try:
+            watch = observer.schedule(handler, root, recursive=True)
+            watched_roots[root] = watch
+        except Exception as exc:
+            logger.warning("Failed scheduling observer on %s: %s", root, exc)
     update_status(database_path, args.token, os.getpid(), "running", available, unavailable)
     for root in unavailable:
         record_activity(database_path, "monitor", "library root unavailable", "warning", severity="warning",
@@ -1827,8 +2057,42 @@ def main():
     observer.start()
     if worker.transcoder_compatibility:
         handler.restore_transcoder_candidates()
+    tracker = RootAvailabilityTracker(roots, probe_timeout=5.0)
+    for r in unavailable:
+        if r in tracker._states:
+            tracker._states[r]["status"] = "unavailable"
     try:
         while True:
+            available, unavailable, recovered, lost = tracker.poll()
+
+            for root in lost:
+                logger.warning("Library root became unavailable: %s", root)
+                record_activity(database_path, "monitor", "library root unavailable", "warning",
+                                severity="warning", old_path=root,
+                                detail="Network share disconnected or became unresponsive")
+                notify(runtime.get("mac_notifications") is True, f"Library root unavailable: {Path(root).name}")
+                watch = watched_roots.pop(root, None)
+                if watch:
+                    try:
+                        observer.unschedule(watch)
+                    except Exception:
+                        pass
+
+            for root in recovered:
+                logger.info("Library root reconnected: %s", root)
+                record_activity(database_path, "monitor", "library root recovered", "running",
+                                severity="info", new_path=root,
+                                detail="Network share reconnected; monitoring resumed")
+                notify(runtime.get("mac_notifications") is True, f"Library root reconnected: {Path(root).name}")
+                if root not in watched_roots:
+                    try:
+                        watch = observer.schedule(handler, root, recursive=True)
+                        watched_roots[root] = watch
+                    except Exception as exc:
+                        logger.warning("Failed scheduling observer on reconnected root %s: %s", root, exc)
+                if incoming_worker:
+                    incoming_worker.trigger_recovery_scan(root)
+
             reload_monitor_if_code_changed(
                 loaded_code_signature, runtime_path, runtime, worker,
                 incoming_worker, database_path
