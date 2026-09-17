@@ -719,15 +719,9 @@ class TestProposedFixRegression:
         companion.write_bytes(b"i")
         companion_str = str(companion.resolve())
 
-        # Apply Fix 2 monkey-patch: filter to videos only
+        # Apply Fix 2 test setup: filter scannable extensions to videos only
         import librarymanager_monitor as mod
-        original_current_video_paths = worker._current_video_paths
-
-        def video_only_paths():
-            return {p for p in original_current_video_paths()
-                    if Path(p).suffix.lower() in VIDEO_EXTENSIONS}
-
-        worker._current_video_paths = video_only_paths
+        worker._scannable_extensions = lambda: VIDEO_EXTENSIONS
 
         # Companion is on disk, not in candidates, not in inventory
         assert companion_str not in worker.candidates
@@ -740,7 +734,7 @@ class TestProposedFixRegression:
         )
 
         # Restore and verify without Fix 2 it works
-        del worker._current_video_paths  # remove monkey-patch
+        del worker._scannable_extensions  # remove monkey-patch
         worker._fallback_check()
         without_fix2 = companion_str in worker.candidates
         assert without_fix2, "Without Fix 2: companion IS discovered by fallback"
@@ -784,11 +778,7 @@ class TestProposedFixRegression:
 
         # Apply Fix 2: filter fallback to videos only
         import librarymanager_monitor as mod
-        original_cvp = worker._current_video_paths
-
-        def video_only_paths():
-            return {p for p in original_cvp() if Path(p).suffix.lower() in VIDEO_EXTENSIONS}
-        worker._current_video_paths = video_only_paths
+        worker._scannable_extensions = lambda: VIDEO_EXTENSIONS
 
         # Fallback runs but CANNOT rediscover companion (Fix 2)
         worker._fallback_check()
