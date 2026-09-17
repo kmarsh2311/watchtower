@@ -700,6 +700,7 @@ class CompletedDownloadWorker(threading.Thread):
         self.lock = threading.RLock()
         self.stopping = False
         self.wake = threading.Event()
+        self.companion_retry_interval = 300.0
         self.started_at = time.time()
         self.last_fallback = self.started_at
         self.generate_contact_sheets = False
@@ -792,7 +793,7 @@ class CompletedDownloadWorker(threading.Thread):
         connection = connect(self.database_path)
         try:
             rows = connection.execute(
-                "SELECT path,size,modified_ns,stable_since,attempts FROM incoming_files WHERE status IN ('waiting','scanning','downloading')"
+                "SELECT path,size,modified_ns,stable_since,attempts,status,detail FROM incoming_files WHERE status IN ('waiting','scanning','downloading')"
             ).fetchall()
         finally:
             connection.close()
@@ -813,6 +814,9 @@ class CompletedDownloadWorker(threading.Thread):
                     "attempts": int(row["attempts"] or 0),
                     "is_companion": is_companion,
                     "is_temporary": is_temporary,
+                    "last_saved_status": row["status"],
+                    "last_saved_detail": row["detail"],
+                    "check_after": 0.0,
                 }
 
     def _save_state(self, path, status, *, stat=None, stable_since=None, job_id=None, detail=None, attempts=None):
@@ -857,16 +861,6 @@ class CompletedDownloadWorker(threading.Thread):
         suffix = Path(normalized).suffix.lower()
         is_temporary = suffix in TEMPORARY_DOWNLOAD_EXTENSIONS
         is_companion = (not is_temporary) and (suffix in COMPANION_EXTENSIONS)
-        candidate = {
-            "size": stat.st_size,
-            "modified_ns": stat.st_mtime_ns,
-            "stable_since": stable_since,
-            "attempts": current["attempts"] if current else 0,
-            "is_companion": is_companion,
-            "is_temporary": is_temporary,
-        }
-        with self.lock:
-            self.candidates[normalized] = candidate
         if is_temporary:
             status = "downloading"
             detail = "Incoming download in progress"
@@ -876,6 +870,31 @@ class CompletedDownloadWorker(threading.Thread):
         else:
             status = "waiting"
             detail = f"Waiting for video to remain unchanged for {self.settle_seconds // 60} minute(s)"
+        candidate = {
+            "size": stat.st_size,
+            "modified_ns": stat.st_mtime_ns,
+            "stable_since": stable_since,
+            "attempts": current["attempts"] if current else 0,
+            "is_companion": is_companion,
+            "is_temporary": is_temporary,
+            "last_saved_status": status,
+            "last_saved_detail": detail,
+            "check_after": 0.0,
+        }
+        with self.lock:
+            self.candidates[normalized] = candidate
+            if not is_companion and not is_temporary:
+                video_p = Path(normalized)
+                for c_path, c_info in self.candidates.items():
+                    if c_info.get("is_companion"):
+                        cand_p = Path(c_path)
+                        try:
+                            if cand_p.parent.resolve() == video_p.parent.resolve():
+                                matched, _ = match_companion_to_video(cand_p, video_p)
+                                if matched:
+                                    c_info["check_after"] = 0.0
+                        except OSError:
+                            pass
         self._save_state(normalized, status, stat=stat, stable_since=stable_since,
                          attempts=candidate["attempts"], detail=detail)
         self.wake.set()
@@ -1119,6 +1138,26 @@ class CompletedDownloadWorker(threading.Thread):
                 resolve_filesystem_event(self.database_path, "created", c_path)
                 notify(self.notifications, f"Companion paired: {cand.name} → Scene {scene['id']}")
 
+    def _save_companion_waiting(self, path, candidate, detail):
+        with self.lock:
+            needs_save = (
+                candidate.get("last_saved_status") != "waiting"
+                or candidate.get("last_saved_detail") != detail
+            )
+        if needs_save:
+            try:
+                self._save_state(path, "waiting", detail=detail)
+                with self.lock:
+                    candidate["last_saved_status"] = "waiting"
+                    candidate["last_saved_detail"] = detail
+            except Exception as exc:
+                logger.warning("Failed saving companion state for %s: %s", path, exc)
+                with self.lock:
+                    candidate["check_after"] = time.monotonic() + 5.0
+                return
+        with self.lock:
+            candidate["check_after"] = time.monotonic() + self.companion_retry_interval
+
     def _process_companion(self, path, candidate):
         cand_path = Path(path)
         if not cand_path.is_file():
@@ -1133,7 +1172,7 @@ class CompletedDownloadWorker(threading.Thread):
             if Path(other).suffix.lower() in VIDEO_EXTENSIONS:
                 matched, _ = match_companion_to_video(cand_path, Path(other))
                 if matched:
-                    self._save_state(path, "waiting", detail=f"Waiting for video {Path(other).name} to finish downloading")
+                    self._save_companion_waiting(path, candidate, f"Waiting for video {Path(other).name} to finish downloading")
                     return
 
         connection = connect(self.database_path)
@@ -1155,7 +1194,7 @@ class CompletedDownloadWorker(threading.Thread):
 
                 if target_path != cand_path:
                     if target_path.exists():
-                        self._save_state(path, "waiting", detail=f"Companion destination already exists: {target_path}")
+                        self._save_companion_waiting(path, candidate, f"Companion destination already exists: {target_path}")
                         record_activity(self.database_path, "companion", "companion collision", "review",
                                         severity="warning", scene_id=row["scene_id"], old_path=str(cand_path),
                                         new_path=str(target_path),
@@ -1165,7 +1204,7 @@ class CompletedDownloadWorker(threading.Thread):
                         expect_filesystem_move(self.database_path, str(cand_path), str(target_path))
                         cand_path.rename(target_path)
                     except OSError as err:
-                        self._save_state(path, "waiting", detail=f"Could not relocate to {target_path}: {err}")
+                        self._save_companion_waiting(path, candidate, f"Could not relocate to {target_path}: {err}")
                         return
 
                 with self.lock:
@@ -1184,10 +1223,11 @@ class CompletedDownloadWorker(threading.Thread):
                 notify(self.notifications, f"Companion paired: {cand_path.name} → Scene {row['scene_id']}")
                 return
 
-        self._save_state(path, "waiting", detail="Waiting for matching video to arrive")
+        self._save_companion_waiting(path, candidate, "Waiting for matching video to arrive")
 
-    def evaluate_once(self, now=None):
+    def evaluate_once(self, now=None, mono_now=None):
         now = time.time() if now is None else float(now)
+        mono_now = time.monotonic() if mono_now is None else float(mono_now)
         with self.lock:
             pending = list(self.candidates.items())
         for path, candidate in pending:
@@ -1213,6 +1253,10 @@ class CompletedDownloadWorker(threading.Thread):
             settle_needed = min(3, self.settle_seconds) if is_comp else self.settle_seconds
             if now - candidate["stable_since"] >= settle_needed:
                 if is_comp:
+                    with self.lock:
+                        check_after = candidate.get("check_after", 0.0)
+                    if mono_now < check_after:
+                        continue
                     self._process_companion(path, candidate)
                 else:
                     with self.lock:
