@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.9 — 2026-09-17
+
+- Add robust network-share disconnect and hang resilience for NAS/SMB/NFS mounts with non-blocking availability probing and thread pool isolation.
+- Add bounded single-flight deletion scheduler preventing thread exhaustion during bulk or rapid deletion operations.
+- Replace full inventory table scans with indexed range queries in find_scene_for_companion.
+- Propagate notification preference hot-reloads dynamically without requiring a daemon restart.
+- Enhance image companion pairing with explicit rules for generic artwork, ambiguous matches, and unrelated images, adding Review actions for Dismiss and Ignore.
+- Seamlessly preserve single logical candidates across browser download lifecycles (Chrome .com.google.Chrome.* -> Unconfirmed *.crdownload -> .mp4, Firefox .part, Safari .download), eliminating intermediate fragmentation into false problem events.
+- Strictly classify only true companion extensions as companions, preventing temporary download files from triggering false companion moves.
+- Register temporary downloads completing outside incoming folders as newly created videos rather than uninventoried moves.
+
+
 ## 1.0.8 — 2026-09-15
 
 - Bundle `watchdog` 6.0.0 with Watchtower so filesystem monitoring works in clean Stash Docker containers without a separate `pip install`.
