@@ -1205,9 +1205,14 @@ class CompletedDownloadWorker(threading.Thread):
             connection.close()
         for row in rows:
             path = row["path"]
-            if not self.accepts(path) or not Path(path).is_file() or self._is_in_inventory(path):
+            try:
+                p = Path(path)
+                if not self.accepts(path) or not p.is_file() or self._is_in_inventory(path):
+                    continue
+                stat = p.stat()
+            except OSError as err:
+                logger.debug("Candidate file %s inaccessible or removed during restore: %s", path, err)
                 continue
-            stat = Path(path).stat()
             unchanged = row["size"] == stat.st_size and row["modified_ns"] == stat.st_mtime_ns
             is_temporary = is_temporary_download(path)
             is_companion = (not is_temporary) and (Path(path).suffix.lower() in COMPANION_EXTENSIONS)
@@ -1456,9 +1461,9 @@ class CompletedDownloadWorker(threading.Thread):
 
     def _scan(self, path, candidate):
         attempts = candidate["attempts"] + 1
-        self._save_state(path, "scanning", stable_since=candidate["stable_since"], attempts=attempts,
-                         detail="Stash is adding the video and generating its thumbnail and previews")
         try:
+            self._save_state(path, "scanning", stable_since=candidate["stable_since"], attempts=attempts,
+                             detail="Stash is adding the video and generating its thumbnail and previews")
             while True:
                 job_id = self.stash.metadata_scan(paths=[path], flags=INCOMING_SCAN_FLAGS)
                 self._save_state(path, "scanning", stable_since=candidate["stable_since"], attempts=attempts,
@@ -1544,17 +1549,56 @@ class CompletedDownloadWorker(threading.Thread):
 
             return True
         except Exception as error:
-            if attempts < self.max_attempts and Path(path).is_file():
-                retry_at = time.time()
+            is_db_error = isinstance(error, sqlite3.Error)
+            if is_db_error:
+                # Safeguard 2: Database lock/error is not a scan failure; do not exhaust normal scan attempts
+                original_stable = candidate.get("stable_since", time.time())
                 with self.lock:
-                    self.candidates[path] = {**candidate, "stable_since": retry_at, "attempts": attempts}
-                self._save_state(path, "waiting", stable_since=retry_at, attempts=attempts,
-                                 detail=f"Scan attempt {attempts} failed; it will retry: {error}")
+                    self.candidates[path] = {
+                        **candidate,
+                        "stable_since": original_stable,
+                        "check_after": time.monotonic() + 10.0,
+                    }
+                logger.warning(
+                    "Database error during incoming scan for %s; scheduled retry in 10s (attempt count preserved at %d): %s",
+                    path, candidate.get("attempts", 0), error
+                )
+                try:
+                    self._save_state(path, "waiting", stable_since=original_stable, attempts=candidate.get("attempts", 0),
+                                     detail=f"Database busy during scan; will retry: {error}")
+                except Exception as save_err:
+                    logger.debug("Could not update state for %s after database error: %s", path, save_err)
             else:
-                self._save_state(path, "failed", attempts=attempts, detail=str(error))
-                record_activity(self.database_path, "incoming", "completed video scan", "failed",
-                                severity="error", new_path=path, detail=str(error))
-                notify(self.notifications, f"Could not add completed video: {Path(path).name}")
+                file_present = True
+                try:
+                    file_present = Path(path).is_file()
+                except OSError:
+                    file_present = True
+                if attempts < self.max_attempts and file_present:
+                    retry_at = time.time()
+                    with self.lock:
+                        self.candidates[path] = {
+                            **candidate,
+                            "stable_since": retry_at,
+                            "attempts": attempts,
+                            "check_after": time.monotonic() + 5.0,
+                        }
+                    try:
+                        self._save_state(path, "waiting", stable_since=retry_at, attempts=attempts,
+                                         detail=f"Scan attempt {attempts} failed; it will retry: {error}")
+                    except Exception as save_err:
+                        logger.warning("Could not update state for %s after scan failure: %s", path, save_err)
+                else:
+                    try:
+                        self._save_state(path, "failed", attempts=attempts, detail=str(error))
+                    except Exception as save_err:
+                        logger.warning("Could not mark %s failed: %s", path, save_err)
+                    try:
+                        record_activity(self.database_path, "incoming", "completed video scan", "failed",
+                                        severity="error", new_path=path, detail=str(error))
+                    except Exception as act_err:
+                        logger.warning("Could not record failure activity for %s: %s", path, act_err)
+                    notify(self.notifications, f"Could not add completed video: {Path(path).name}")
             return False
 
     def _pair_companions_for_video(self, video_path, scene):
@@ -1832,19 +1876,36 @@ class CompletedDownloadWorker(threading.Thread):
                 continue
             if candidate.get("is_temporary"):
                 continue
+            with self.lock:
+                check_after = candidate.get("check_after", 0.0)
+            if mono_now < check_after:
+                continue
+
             is_comp = candidate.get("is_companion") or Path(path).suffix.lower() in COMPANION_EXTENSIONS
             settle_needed = min(3, self.settle_seconds) if is_comp else self.settle_seconds
             if now - candidate["stable_since"] >= settle_needed:
                 if is_comp:
-                    with self.lock:
-                        check_after = candidate.get("check_after", 0.0)
-                    if mono_now < check_after:
-                        continue
                     self._process_companion(path, candidate)
                 else:
                     with self.lock:
                         self.candidates.pop(path, None)
-                    self._scan(path, candidate)
+                    try:
+                        self._scan(path, candidate)
+                    except Exception as scan_err:
+                        logger.error("Unhandled error scanning %s: %s", path, scan_err, exc_info=True)
+                        file_present = True
+                        try:
+                            file_present = Path(path).is_file()
+                        except OSError:
+                            file_present = True
+                        if file_present:
+                            with self.lock:
+                                if path not in self.candidates:
+                                    self.candidates[path] = {
+                                        **candidate,
+                                        "stable_since": candidate.get("stable_since", time.time()),
+                                        "check_after": mono_now + 10.0,
+                                    }
 
     def _fallback_check(self):
         try:
@@ -1888,7 +1949,10 @@ class CompletedDownloadWorker(threading.Thread):
 
     def run(self):
         while not self.stopping:
-            self.evaluate_once()
+            try:
+                self.evaluate_once()
+            except Exception as exc:
+                logger.error("Unexpected error in CompletedDownloadWorker evaluation loop: %s", exc, exc_info=True)
             now = time.time()
             if now - self.last_fallback >= self.fallback_seconds:
                 self._fallback_check()
