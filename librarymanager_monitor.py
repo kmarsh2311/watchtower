@@ -3,7 +3,6 @@
 
 import argparse
 import base64
-import concurrent.futures
 import errno
 from pathlib import Path
 NETWORK_DISCONNECT_ERRNOS = {
@@ -990,12 +989,8 @@ class CompletedDownloadWorker(threading.Thread):
         self.contact_sheet_script = ""
         self.allow_custom_contact_sheet_script = False
         self.track_temporary_downloads = track_temporary_downloads
-        self._scanning_folders = set()
-        self._scanning_lock = threading.Lock()
-        self._scan_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max(1, min(4, len(self.incoming_folders) or 1)),
-            thread_name_prefix="incoming_scan"
-        )
+        self._active_scans = {}
+        self._scan_lock = threading.Lock()
         if self.enabled:
             self._restore_candidates()
             self._recover_recent_files()
@@ -1031,9 +1026,7 @@ class CompletedDownloadWorker(threading.Thread):
     def _current_incoming_paths(self):
         if not self.incoming_folders:
             return set()
-        valid = VIDEO_EXTENSIONS | COMPANION_EXTENSIONS
-        if getattr(self, "track_temporary_downloads", False):
-            valid = valid | TEMPORARY_DOWNLOAD_EXTENSIONS
+        valid = self._scannable_extensions()
         found = set()
         for folder in self.incoming_folders:
             try:
@@ -1073,17 +1066,134 @@ class CompletedDownloadWorker(threading.Thread):
         finally:
             connection.close()
 
+    def _scannable_extensions(self):
+        valid = VIDEO_EXTENSIONS | COMPANION_EXTENSIONS
+        if getattr(self, "track_temporary_downloads", False):
+            valid = valid | TEMPORARY_DOWNLOAD_EXTENSIONS
+        return valid
+
+    def _folder_key(self, folder):
+        if not folder:
+            return ""
+        try:
+            return os.path.normpath(str(folder))
+        except Exception:
+            return str(folder)
+
+    def _normalize_prefixes(self, p):
+        s = os.path.normpath(os.path.abspath(str(p)))
+        variants = [s]
+        if s.startswith("/private/"):
+            variants.append(s[len("/private"):])
+        elif s.startswith("/var/") or s.startswith("/tmp/") or s.startswith("/etc/"):
+            variants.append("/private" + s)
+        return variants
+
+    def _owning_incoming_folder(self, path):
+        if not self.incoming_folders or not path:
+            return None
+        path_variants = self._normalize_prefixes(path)
+        best_match = None
+        for folder in self.incoming_folders:
+            folder_variants = self._normalize_prefixes(folder)
+            matched = any(
+                pv == fv or pv.startswith(fv + os.sep)
+                for fv in folder_variants
+                for pv in path_variants
+            )
+            if matched:
+                folder_str = os.path.normpath(str(folder))
+                if best_match is None or len(folder_str) > len(os.path.normpath(str(best_match))):
+                    best_match = folder
+        return best_match
+
+    def _dispatch_folder_scan(self, folder, cutoff):
+        if not self.enabled or self.stopping:
+            return None
+        folder_path = Path(folder)
+        key = self._folder_key(folder_path)
+        with self._scan_lock:
+            existing = self._active_scans.get(key)
+            if existing is not None:
+                if existing.is_alive():
+                    return None
+                else:
+                    self._active_scans.pop(key, None)
+            thread = threading.Thread(
+                target=self._scan_incoming_folder,
+                args=(folder_path, cutoff),
+                name=f"incoming-scan-{folder_path.name or 'folder'}",
+                daemon=True,
+            )
+            self._active_scans[key] = thread
+            thread.start()
+            return thread
+
+    def _scan_incoming_folder(self, folder, cutoff):
+        folder_path = Path(folder)
+        key = self._folder_key(folder_path)
+        try:
+            try:
+                if not folder_path.is_dir():
+                    return
+            except OSError as err:
+                logger.debug("Cannot access incoming folder %s: %s", folder_path, err)
+                return
+
+            valid = self._scannable_extensions()
+            try:
+                for path in folder_path.rglob("*"):
+                    if self.stopping:
+                        break
+                    try:
+                        if not path.is_file():
+                            continue
+                        suffix = path.suffix.lower()
+                        if suffix not in valid:
+                            if not (getattr(self, "track_temporary_downloads", False) and is_temporary_download(path)):
+                                continue
+                        resolved = str(path.resolve())
+                        with self.lock:
+                            pending = resolved in self.candidates
+                        if pending or self._is_in_inventory(resolved) or self._was_imported(resolved):
+                            continue
+                        try:
+                            if path.stat().st_mtime >= cutoff:
+                                self.submit(resolved)
+                        except OSError:
+                            continue
+                    except OSError as err:
+                        if is_network_disconnect_error(err, path):
+                            break
+                        continue
+            except OSError as exc:
+                logger.debug("Failed scanning incoming folder %s: %s", folder_path, exc)
+        except Exception as exc:
+            logger.debug("Unexpected error scanning incoming folder %s: %s", folder_path, exc)
+        finally:
+            with self._scan_lock:
+                if self._active_scans.get(key) is threading.current_thread():
+                    self._active_scans.pop(key, None)
+
+    def _wait_scans(self, threads, max_wait=0.05):
+        deadline = time.monotonic() + max_wait
+        for t in threads:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                break
+            t.join(timeout=rem)
+
     def _recover_recent_files(self):
         """Recover downloads that completed shortly before the watcher restarted."""
+        if not self.enabled:
+            return
         recent_after = self.started_at - self.settle_seconds
-        for path in self._current_video_paths():
-            if path in self.candidates or self._is_in_inventory(path) or self._was_imported(path):
-                continue
-            try:
-                if Path(path).stat().st_mtime >= recent_after:
-                    self.submit(path)
-            except OSError:
-                continue
+        threads = []
+        for folder in self.incoming_folders:
+            t = self._dispatch_folder_scan(folder, recent_after)
+            if t:
+                threads.append(t)
+        self._wait_scans(threads, max_wait=0.05)
 
     def _restore_candidates(self):
         connection = connect(self.database_path)
@@ -1200,16 +1310,58 @@ class CompletedDownloadWorker(threading.Thread):
 
     def submit_tree(self, path):
         """Discover videos inside a newly-created or newly-moved download directory."""
+        if not self.enabled or not path:
+            return 0
+        owning_folder = self._owning_incoming_folder(path)
+        if owning_folder is None:
+            return 0
+
+        key = self._folder_key(owning_folder)
         root = Path(path)
-        if not self.enabled:
-            return 0
-        try:
-            if not root.is_dir():
+        result = [0]
+        with self._scan_lock:
+            existing = self._active_scans.get(key)
+            if existing is not None and existing.is_alive():
                 return 0
-            return sum(1 for child in root.rglob("*") if child.is_file() and self.submit(child))
+            thread = threading.Thread(
+                target=self._scan_tree_worker,
+                args=(root, key, result),
+                name=f"incoming-tree-{root.name or 'tree'}",
+                daemon=True,
+            )
+            self._active_scans[key] = thread
+            thread.start()
+
+        self._wait_scans([thread], max_wait=0.05)
+        return result[0]
+
+    def _scan_tree_worker(self, root, key, result):
+        try:
+            try:
+                if not root.is_dir():
+                    return
+            except OSError as err:
+                logger.debug("submit_tree cannot access %s: %s", root, err)
+                return
+
+            count = 0
+            for child in root.rglob("*"):
+                if self.stopping:
+                    break
+                try:
+                    if child.is_file() and self.submit(child):
+                        count += 1
+                except OSError as err:
+                    if is_network_disconnect_error(err, child):
+                        break
+                    continue
+            result[0] = count
         except OSError as exc:
-            logger.debug("submit_tree failed on %s: %s", path, exc)
-            return 0
+            logger.debug("submit_tree scan failed on %s: %s", root, exc)
+        finally:
+            with self._scan_lock:
+                if self._active_scans.get(key) is threading.current_thread():
+                    self._active_scans.pop(key, None)
 
     def _resolve_relocation(self, path):
         with self.lock:
@@ -1696,17 +1848,14 @@ class CompletedDownloadWorker(threading.Thread):
 
     def _fallback_check(self):
         try:
-            for path in self._current_video_paths():
-                with self.lock:
-                    pending = path in self.candidates
-                if pending or self._is_in_inventory(path) or self._was_imported(path):
-                    continue
-                try:
-                    created_during_this_run = Path(path).stat().st_mtime >= self.started_at
-                except OSError:
-                    continue
-                if created_during_this_run:
-                    self.submit(path)
+            if not self.enabled:
+                return
+            threads = []
+            for folder in self.incoming_folders:
+                t = self._dispatch_folder_scan(folder, self.started_at)
+                if t:
+                    threads.append(t)
+            self._wait_scans(threads, max_wait=0.05)
         except Exception as exc:
             logger.debug("Error in _fallback_check: %s", exc)
 
@@ -1716,9 +1865,7 @@ class CompletedDownloadWorker(threading.Thread):
             if not self.enabled:
                 return
             root_path = Path(root).resolve()
-            valid = VIDEO_EXTENSIONS | COMPANION_EXTENSIONS
-            if getattr(self, "track_temporary_downloads", False):
-                valid = valid | TEMPORARY_DOWNLOAD_EXTENSIONS
+            threads = []
             for folder in self.incoming_folders:
                 matched = False
                 try:
@@ -1728,38 +1875,16 @@ class CompletedDownloadWorker(threading.Thread):
                     if root_path == folder.resolve():
                         matched = True
                 if matched:
-                    try:
-                        if not folder.is_dir():
-                            continue
-                        for path in folder.rglob("*"):
-                            try:
-                                if path.is_file() and (path.suffix.lower() in valid or (getattr(self, "track_temporary_downloads", False) and is_temporary_download(path))):
-                                    resolved = str(path.resolve())
-                                    with self.lock:
-                                        pending = resolved in self.candidates
-                                    if pending or self._is_in_inventory(resolved) or self._was_imported(resolved):
-                                        continue
-                                    try:
-                                        if path.stat().st_mtime >= self.started_at:
-                                            self.submit(resolved)
-                                    except OSError:
-                                        continue
-                            except OSError as err:
-                                if is_network_disconnect_error(err, path):
-                                    break
-                                continue
-                    except OSError as exc:
-                        logger.debug("Failed recovery scan for folder %s: %s", folder, exc)
+                    t = self._dispatch_folder_scan(folder, self.started_at)
+                    if t:
+                        threads.append(t)
+            self._wait_scans(threads, max_wait=0.05)
         except Exception as exc:
             logger.debug("Error triggering recovery scan for %s: %s", root, exc)
 
     def stop(self):
         self.stopping = True
         self.wake.set()
-        try:
-            self._scan_pool.shutdown(wait=False)
-        except Exception:
-            pass
 
     def run(self):
         while not self.stopping:
