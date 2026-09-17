@@ -1263,6 +1263,58 @@ a.lm-activity-scene-pill:hover {
   opacity: 0.9;
 }
 
+.lm-terminal-line.unmatched {
+  color: #ffb52e;
+  text-shadow: 0 0 5px rgba(255, 181, 46, 0.45);
+}
+.lm-terminal-line.unmatched span {
+  color: #ffb52e !important;
+  font-weight: 700;
+}
+.lm-terminal-line.unmatched em {
+  color: #ffb52e !important;
+  opacity: 0.9;
+}
+
+.lm-terminal-line.ignored {
+  color: #8395a7;
+  text-shadow: none;
+  opacity: 0.75;
+}
+.lm-terminal-line.ignored span {
+  color: #8395a7 !important;
+}
+.lm-terminal-line.ignored em {
+  color: #8395a7 !important;
+}
+
+.lm-terminal-inline-btn {
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 0.72rem;
+  padding: 0.1rem 0.4rem;
+  margin-left: 0.45rem;
+  cursor: pointer;
+  opacity: 0.85;
+  line-height: 1;
+  vertical-align: middle;
+  transition: opacity 0.15s, background 0.15s;
+}
+.lm-terminal-inline-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+}
+.lm-terminal-inline-btn.dismiss {
+  color: #ff6b6b;
+  border-color: rgba(255, 107, 107, 0.5);
+}
+.lm-terminal-inline-btn.retry {
+  color: #20e64a;
+  border-color: rgba(32, 230, 74, 0.5);
+}
+
 /* Real Revolving Lighthouse (Single 360° Rotating Beam) */
 .lm-brand-wrapper {
   position: relative;

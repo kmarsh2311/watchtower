@@ -93,6 +93,79 @@ COMPANION_EXTENSIONS = {
 WATCHED_EXTENSIONS = VIDEO_EXTENSIONS | COMPANION_EXTENSIONS | TEMPORARY_DOWNLOAD_EXTENSIONS
 
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+GENERIC_ARTWORK_STEMS = {"cover", "poster", "fanart", "folder", "thumb"}
+
+
+def is_image_companion(path) -> bool:
+    try:
+        return Path(path).suffix.lower() in IMAGE_EXTENSIONS
+    except Exception:
+        return False
+
+
+def is_generic_artwork(path) -> bool:
+    try:
+        p = Path(path)
+        return p.suffix.lower() in IMAGE_EXTENSIONS and p.stem.lower() in GENERIC_ARTWORK_STEMS
+    except Exception:
+        return False
+
+
+def find_eligible_videos_in_folder(folder: Path, database_path: Path = None, candidates: dict = None) -> set:
+    eligible = set()
+    try:
+        f_resolved = folder.resolve()
+    except OSError:
+        return eligible
+
+    # 1. On disk in folder
+    try:
+        if folder.is_dir():
+            for item in folder.iterdir():
+                if item.is_file() and item.suffix.lower() in VIDEO_EXTENSIONS:
+                    if item.suffix.lower() not in TEMPORARY_DOWNLOAD_EXTENSIONS:
+                        try:
+                            eligible.add(item.resolve())
+                        except OSError:
+                            pass
+    except OSError:
+        pass
+
+    # 2. In candidates (in-memory)
+    if candidates:
+        for c_p, c_cand in candidates.items():
+            if not c_cand.get("is_companion") and not c_cand.get("is_temporary"):
+                p = Path(c_p)
+                if p.suffix.lower() in VIDEO_EXTENSIONS:
+                    try:
+                        if p.parent.resolve() == f_resolved:
+                            eligible.add(p.resolve())
+                    except OSError:
+                        pass
+
+    # 3. In database files table (existing scenes)
+    if database_path:
+        try:
+            con = connect(database_path)
+            try:
+                rows = con.execute("SELECT path FROM files WHERE exists_on_disk=1").fetchall()
+                for r in rows:
+                    p = Path(r["path"])
+                    if p.suffix.lower() in VIDEO_EXTENSIONS:
+                        try:
+                            if p.parent.resolve() == f_resolved:
+                                eligible.add(p.resolve())
+                        except OSError:
+                            pass
+            finally:
+                con.close()
+        except Exception:
+            pass
+
+    return eligible
+
+
 def _sidecar_match_key(name: str) -> str:
     nfkd = unicodedata.normalize("NFKD", str(name or ""))
     no_accents = "".join(c for c in nfkd if not unicodedata.combining(c))
@@ -173,6 +246,16 @@ def find_scene_for_companion(con, companion_path_or_name):
         "SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk=1"
     ).fetchall()
     local_rows = [r for r in rows if str(Path(r["path"]).parent.resolve()) == c_dir]
+
+    # Generic artwork matching: only associate when exactly one video is in that folder
+    if is_generic_artwork(c_path):
+        eligible = find_eligible_videos_in_folder(c_path.parent)
+        all_vid_paths = {p.resolve() for p in eligible}
+        for r in local_rows:
+            all_vid_paths.add(Path(r["path"]).resolve())
+        if len(all_vid_paths) == 1 and len(local_rows) == 1:
+            return local_rows[0], f".{c_stem.lower()}" if c_stem.lower() != "cover" else ""
+        return None, ""
     matches = []
     for row in local_rows:
         video = Path(row["basename"])
@@ -773,7 +856,7 @@ class CompletedDownloadWorker(threading.Thread):
         connection = connect(self.database_path)
         try:
             row = connection.execute("SELECT status FROM incoming_files WHERE path=?", (path,)).fetchone()
-            return bool(row and row["status"] in ("imported", "paired", "dismissed"))
+            return bool(row and row["status"] in ("imported", "paired", "dismissed", "unmatched", "ignored"))
         finally:
             connection.close()
 
@@ -891,7 +974,7 @@ class CompletedDownloadWorker(threading.Thread):
                         try:
                             if cand_p.parent.resolve() == video_p.parent.resolve():
                                 matched, _ = match_companion_to_video(cand_p, video_p)
-                                if matched:
+                                if matched or is_generic_artwork(cand_p):
                                     c_info["check_after"] = 0.0
                         except OSError:
                             pass
@@ -1093,6 +1176,11 @@ class CompletedDownloadWorker(threading.Thread):
         with self.lock:
             candidates_list = list(self.candidates.items())
 
+        eligible_videos = find_eligible_videos_in_folder(
+            video_p.parent, self.database_path, dict(candidates_list)
+        )
+        single_video_in_folder = (len(eligible_videos) <= 1)
+
         for c_path, c_info in candidates_list:
             cand = Path(c_path)
             if cand.suffix.lower() not in COMPANION_EXTENSIONS or not cand.is_file():
@@ -1100,7 +1188,45 @@ class CompletedDownloadWorker(threading.Thread):
             # Never pair pending companions across incoming directories.
             if cand.parent.resolve() != video_p.parent.resolve():
                 continue
+
             matched, remainder = match_companion_to_video(cand, video_p)
+            generic = is_generic_artwork(cand)
+            is_img = is_image_companion(cand)
+
+            if not matched and generic:
+                if single_video_in_folder:
+                    matched = True
+                    exact_target = actual_path.parent / f"{actual_path.stem}{cand.suffix}"
+                    if cand.stem.lower() == "cover" and not exact_target.exists():
+                        remainder = ""
+                    else:
+                        remainder = f".{cand.stem.lower()}"
+                else:
+                    with self.lock:
+                        self.candidates.pop(c_path, None)
+                    self._save_state(c_path, "unmatched", detail="Ambiguous generic artwork: multiple videos in folder")
+                    record_activity(self.database_path, "companion", "ambiguous artwork skipped", "review",
+                                    old_path=c_path, detail="Generic artwork not paired because folder contains multiple videos")
+                    continue
+
+            if not matched and is_img:
+                matches_other_video = False
+                for other_vid in eligible_videos:
+                    if other_vid.resolve() != video_p.resolve():
+                        other_m, _ = match_companion_to_video(cand, other_vid)
+                        if other_m:
+                            matches_other_video = True
+                            break
+                if matches_other_video:
+                    continue
+
+                with self.lock:
+                    self.candidates.pop(c_path, None)
+                self._save_state(c_path, "unmatched", detail="Unrelated image: filename does not match any video in folder")
+                record_activity(self.database_path, "companion", "unrelated image skipped", "recorded",
+                                old_path=c_path, detail="Image filename does not match any video in folder")
+                continue
+
             if matched:
                 if cand.name.lower().startswith(actual_path.name.lower()):
                     target_name = actual_path.name + cand.suffix
@@ -1112,6 +1238,10 @@ class CompletedDownloadWorker(threading.Thread):
 
                 if target_path != cand:
                     if target_path.exists():
+                        if generic and remainder == "":
+                            target_name = actual_path.stem + f".{cand.stem.lower()}" + cand.suffix
+                            target_path = actual_path.parent / target_name
+                    if target_path.exists() and target_path != cand:
                         self._save_state(c_path, "waiting", detail=f"Companion destination already exists: {target_path}")
                         record_activity(self.database_path, "companion", "companion collision", "review",
                                         severity="warning", old_path=str(cand), new_path=str(target_path),
@@ -1137,6 +1267,19 @@ class CompletedDownloadWorker(threading.Thread):
                                 detail=f"Companion relocated and paired with newly scanned scene {scene['id']}")
                 resolve_filesystem_event(self.database_path, "created", c_path)
                 notify(self.notifications, f"Companion paired: {cand.name} → Scene {scene['id']}")
+
+    def _save_unmatched_companion(self, path, candidate, detail, activity_action=None, activity_detail=None):
+        try:
+            self._save_state(path, "unmatched", detail=detail)
+            with self.lock:
+                self.candidates.pop(path, None)
+            if activity_action:
+                record_activity(self.database_path, "companion", activity_action, "recorded",
+                                old_path=path, detail=activity_detail or detail)
+        except Exception as exc:
+            logger.warning("Failed saving unmatched companion state for %s: %s", path, exc)
+            with self.lock:
+                candidate["check_after"] = time.monotonic() + 5.0
 
     def _save_companion_waiting(self, path, candidate, detail):
         with self.lock:
@@ -1223,6 +1366,45 @@ class CompletedDownloadWorker(threading.Thread):
                 notify(self.notifications, f"Companion paired: {cand_path.name} → Scene {row['scene_id']}")
                 return
 
+        # Check image companion matching rules if no match was found above
+        if is_image_companion(cand_path):
+            with self.lock:
+                cand_map = dict(self.candidates)
+            eligible_videos = find_eligible_videos_in_folder(cand_path.parent, self.database_path, cand_map)
+
+            if is_generic_artwork(cand_path):
+                if len(eligible_videos) > 1:
+                    self._save_unmatched_companion(path, candidate, "Ambiguous generic artwork: multiple videos in folder",
+                                                   activity_action="ambiguous artwork skipped",
+                                                   activity_detail="Generic artwork not paired because folder contains multiple videos")
+                    return
+                elif len(eligible_videos) == 1:
+                    vid = next(iter(eligible_videos))
+                    self._save_companion_waiting(path, candidate, f"Waiting for video {vid.name} to finish downloading")
+                    return
+                else:
+                    self._save_companion_waiting(path, candidate, "Waiting for matching video to arrive")
+                    return
+            else:
+                matching_vid = None
+                for vid in eligible_videos:
+                    m, _ = match_companion_to_video(cand_path, vid)
+                    if m:
+                        matching_vid = vid
+                        break
+
+                if matching_vid:
+                    self._save_companion_waiting(path, candidate, f"Waiting for video {matching_vid.name} to finish downloading")
+                    return
+                elif len(eligible_videos) >= 1:
+                    self._save_unmatched_companion(path, candidate, "Unrelated image: filename does not match any video in folder",
+                                                   activity_action="unrelated image skipped",
+                                                   activity_detail="Image filename does not match any video in folder")
+                    return
+                else:
+                    self._save_companion_waiting(path, candidate, "Waiting for matching video to arrive")
+                    return
+
         self._save_companion_waiting(path, candidate, "Waiting for matching video to arrive")
 
     def evaluate_once(self, now=None, mono_now=None):
@@ -1231,6 +1413,10 @@ class CompletedDownloadWorker(threading.Thread):
         with self.lock:
             pending = list(self.candidates.items())
         for path, candidate in pending:
+            if self._was_imported(path):
+                with self.lock:
+                    self.candidates.pop(path, None)
+                continue
             try:
                 stat = Path(path).stat()
             except OSError:
@@ -1275,6 +1461,8 @@ class CompletedDownloadWorker(threading.Thread):
                 continue
             if created_during_this_run:
                 self.submit(path)
+
+
 
     def stop(self):
         self.stopping = True

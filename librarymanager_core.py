@@ -448,8 +448,17 @@ def incoming_summary(database_path: Path) -> dict:
         now = datetime.now().timestamp()
         for row in connection.execute(
             """SELECT path,status,size,stable_since,settle_seconds,attempts,scan_job_id,detail,last_checked_at
-               FROM incoming_files WHERE status IN ('waiting','scanning','failed','downloading','generating_sheet')
-               ORDER BY CASE status WHEN 'failed' THEN 0 WHEN 'generating_sheet' THEN 1 WHEN 'scanning' THEN 2 WHEN 'waiting' THEN 3 ELSE 4 END,last_checked_at DESC LIMIT 20"""
+               FROM incoming_files WHERE status IN ('waiting','scanning','failed','downloading','generating_sheet','unmatched','ignored')
+               ORDER BY CASE status
+                   WHEN 'failed' THEN 0
+                   WHEN 'unmatched' THEN 1
+                   WHEN 'waiting' THEN 2
+                   WHEN 'downloading' THEN 3
+                   WHEN 'generating_sheet' THEN 4
+                   WHEN 'scanning' THEN 5
+                   WHEN 'ignored' THEN 6
+                   ELSE 7
+               END, last_checked_at DESC LIMIT 50"""
         ):
             item = dict(row)
             item["remaining_seconds"] = max(0, int((item["stable_since"] or now) + (item["settle_seconds"] or 300) - now)) \

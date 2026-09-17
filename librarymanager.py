@@ -1290,6 +1290,11 @@ def main():
             connection.commit()
         finally:
             connection.close()
+        try:
+            if Path(path).is_file():
+                os.utime(path, None)
+        except OSError:
+            pass
         audit(database_path, "incoming", "retry scan", "waiting", new_path=path, detail="User initiated manual re-scan from console")
         message = json.dumps({"status": "waiting", "path": path, "detail": "Re-scan scheduled"}, ensure_ascii=False)
     elif mode == "dismiss_incoming_file":
@@ -1300,14 +1305,14 @@ def main():
         connection = connect(database_path)
         try:
             connection.execute(
-                "UPDATE incoming_files SET status='dismissed', detail='User dismissed failure' WHERE path=?",
+                "UPDATE incoming_files SET status='ignored', detail='Ignored by user' WHERE path=?",
                 (path,)
             )
             connection.commit()
         finally:
             connection.close()
-        audit(database_path, "incoming", "dismiss failed scan", "dismissed", new_path=path, detail="User dismissed failed incoming video alert from console")
-        message = json.dumps({"status": "dismissed", "path": path, "detail": "Dismissed failed incoming alert"}, ensure_ascii=False)
+        audit(database_path, "incoming", "ignore item", "ignored", new_path=path, detail="User ignored incoming file from console")
+        message = json.dumps({"status": "ignored", "path": path, "detail": "Item ignored by user"}, ensure_ascii=False)
     elif mode == "retry_all_incoming_files":
         connection = connect(database_path)
         try:

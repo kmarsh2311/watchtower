@@ -2068,6 +2068,9 @@
               const isPendingRename = item.status === "pending_rename";
               const isRenaming = item.status === "renaming";
               const isGeneratingSheet = item.status === "generating_sheet";
+              const isUnmatched = item.status === "unmatched";
+              const isIgnored = item.status === "ignored";
+              const isImage = /\.(jpg|jpeg|png|webp)$/i.test(item.path);
               let displayName = basename(item.path);
               if (isDownloading) {
                 displayName = displayName.replace(/\.(crdownload|part|partial|download|tmp|temp|!qb)$/i, "");
@@ -2148,7 +2151,11 @@
                 );
               }
 
-              const badgeText = isRenaming
+              const badgeText = isUnmatched
+                ? "UNMATCHED"
+                : isIgnored
+                ? "IGNORED"
+                : isRenaming
                 ? "RENAMING"
                 : isDownloading
                 ? "DOWNLOADING"
@@ -2156,8 +2163,14 @@
                 ? "ADDING"
                 : isGeneratingSheet
                 ? "GENERATING"
+                : isImage
+                ? "WAITING (IMG)"
                 : "FINISHING";
-              const statusDetail = isRenaming
+              const statusDetail = isUnmatched
+                ? (item.detail || "IMAGE UNMATCHED")
+                : isIgnored
+                ? (item.detail || "IGNORED BY USER")
+                : isRenaming
                 ? "APPLYING FILENAME IN STASH"
                 : isDownloading
                 ? "INCOMING DOWNLOAD (IN PROGRESS)"
@@ -2165,12 +2178,33 @@
                 ? "STASH IS CHECKING IT"
                 : isGeneratingSheet
                 ? "CREATING CONTACT SHEET (CSM)"
+                : item.detail && !item.detail.startsWith("Discovered")
+                ? item.detail
                 : `READY IN ${countdown(item)}`;
+
+              const showDismiss = isUnmatched || (item.status === "waiting" && isImage);
+              const showRetry = isUnmatched || isIgnored;
 
               return React.createElement("div", { className: `lm-terminal-line ${item.status}`, key: item.path },
                 React.createElement("span", null, badgeText),
-                React.createElement("strong", null, displayName),
-                React.createElement("em", null, statusDetail)
+                React.createElement("strong", { title: item.path }, displayName),
+                React.createElement("em", null,
+                  React.createElement("span", null, statusDetail),
+                  showRetry && React.createElement("button", {
+                    type: "button",
+                    className: "lm-terminal-inline-btn retry",
+                    disabled: !!busy,
+                    title: "Retry pairing against current folder contents",
+                    onClick: () => handleRetryIncoming(item.path)
+                  }, "⟳ RETRY"),
+                  showDismiss && React.createElement("button", {
+                    type: "button",
+                    className: "lm-terminal-inline-btn dismiss",
+                    disabled: !!busy,
+                    title: "Ignore this image without moving or deleting the file",
+                    onClick: () => handleDismissIncoming(item.path)
+                  }, "✕ IGNORE")
+                )
               );
             })
           ) :
