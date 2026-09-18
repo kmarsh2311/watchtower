@@ -4,6 +4,8 @@
 import argparse
 import base64
 import errno
+import threading
+import time
 from pathlib import Path
 NETWORK_DISCONNECT_ERRNOS = {
     getattr(errno, "ENOTCONN", 57),       # Socket is not connected
@@ -29,29 +31,166 @@ def is_network_disconnect_error(err: BaseException, path=None) -> bool:
     return False
 
 
-def is_path_available(path) -> bool:
-    try:
-        p = Path(path)
-        if not p.is_dir():
-            return False
-        try:
-            with os.scandir(p) as it:
-                pass
-        except OSError as e:
-            if is_network_disconnect_error(e, path=p):
-                return False
-        return True
-    except OSError:
+def is_path_available(path, timeout=2.0) -> bool:
+    if not path:
         return False
+    result = [False]
+
+    def _check():
+        try:
+            p = Path(path)
+            if not p.is_dir():
+                return
+            try:
+                with os.scandir(p) as it:
+                    pass
+            except OSError as e:
+                if is_network_disconnect_error(e, path=p):
+                    return
+            result[0] = True
+        except (OSError, Exception):
+            result[0] = False
+
+    t = threading.Thread(target=_check, name=f"check_{Path(path).name}", daemon=True)
+    t.start()
+    t.join(timeout=float(timeout))
+    if t.is_alive():
+        logger.warning("Availability probe for %s timed out after %.1fs (unresponsive mount)", path, timeout)
+        return False
+    return result[0]
+
+
+class BoundedFSOperation:
+    """Executes filesystem operations with bounded timeout and per-root concurrency limits.
+    Prevents repeated events from accumulating unlimited blocked threads on unresponsive mounts."""
+    def __init__(self, max_workers_per_root=2):
+        self.max_workers_per_root = int(max_workers_per_root)
+        self._lock = threading.Lock()
+        self._active_workers: dict[str, list[dict]] = {}
+        self._exhausted_logged: set[str] = set()
+
+    def run(self, root_key, func, args=(), timeout=1.5):
+        root_key = str(root_key or "")
+        timeout = float(timeout)
+        now = time.monotonic()
+        res = [None]
+        err = [None]
+        entry = None
+
+        with self._lock:
+            # 1. Prune dead threads & detect hung threads
+            active = []
+            for w in self._active_workers.get(root_key, []):
+                t = w["thread"]
+                if t.is_alive():
+                    if not w["timed_out"] and (now - w["started_at"] > w["timeout"]):
+                        w["timed_out"] = True
+                    active.append(w)
+            self._active_workers[root_key] = active
+
+            # 2. Check for confirmed outage (active hung thread) vs busy
+            has_hung_thread = any(w["timed_out"] for w in active)
+            if len(active) >= self.max_workers_per_root:
+                if has_hung_thread:
+                    if root_key not in self._exhausted_logged:
+                        self._exhausted_logged.add(root_key)
+                        logger.warning(
+                            "Root %s in confirmed outage (%d active hung worker(s)); rejecting operations",
+                            root_key, len([w for w in active if w["timed_out"]])
+                        )
+                    return None, "outage"
+                else:
+                    # Workers are busy processing concurrent requests normally; do NOT treat as outage
+                    return None, "busy"
+
+            self._exhausted_logged.discard(root_key)
+
+            def _target():
+                try:
+                    res[0] = func(*args)
+                except Exception as e:
+                    err[0] = e
+
+            t = threading.Thread(
+                target=_target,
+                name=f"fs_op_{Path(root_key).name if root_key else 'default'}",
+                daemon=True,
+            )
+            entry = {
+                "thread": t,
+                "started_at": now,
+                "timeout": timeout,
+                "timed_out": False,
+            }
+            self._active_workers.setdefault(root_key, []).append(entry)
+            # Concurrency-safe: start the thread while holding the lock so it is never
+            # pruned prematurely before is_alive() becomes True
+            t.start()
+
+        t.join(timeout=timeout)
+        if t.is_alive():
+            with self._lock:
+                entry["timed_out"] = True
+            logger.warning("Filesystem operation on root %s timed out after %.1fs", root_key, timeout)
+            return None, "timeout"
+
+        if err[0]:
+            raise err[0]
+        return res[0], "ok"
+
+
+default_fs_limiter = BoundedFSOperation(max_workers_per_root=2)
+
+
+def probe_roots_startup(roots, timeout=2.0, max_workers=4):
+    """Probes root availability at startup with a bounded worker pool and global deadline,
+    avoiding nested thread-per-root explosion."""
+    if not roots:
+        return [], []
+
+    results = {}
+    pending = list(roots)
+    deadline = time.monotonic() + float(timeout)
+
+    def _worker(r):
+        try:
+            p = Path(r)
+            if not p.is_dir():
+                results[r] = False
+                return
+            try:
+                with os.scandir(p) as it:
+                    pass
+                results[r] = True
+            except OSError as e:
+                results[r] = not is_network_disconnect_error(e, path=p)
+        except (OSError, Exception):
+            results[r] = False
+
+    active_threads = []
+    while (pending or active_threads) and time.monotonic() < deadline:
+        while pending and len(active_threads) < max_workers:
+            r = pending.pop(0)
+            t = threading.Thread(target=_worker, args=(r,), name=f"startup_probe_{Path(r).name}", daemon=True)
+            t.start()
+            active_threads.append(t)
+
+        time.sleep(0.02)
+        active_threads = [t for t in active_threads if t.is_alive()]
+
+    available = [r for r in roots if results.get(r) is True]
+    unavailable = [r for r in roots if r not in available]
+    return available, unavailable
 
 
 
 
 class RootAvailabilityTracker:
     """Tracks availability of monitored roots asynchronously without blocking the caller."""
-    def __init__(self, roots, probe_timeout=5.0):
+    def __init__(self, roots, probe_timeout=5.0, max_hung_probes=2):
         self.roots = list(roots or [])
         self.probe_timeout = float(probe_timeout)
+        self.max_hung_probes = int(max_hung_probes)
         self.lock = threading.Lock()
         self._states = {}
         for r in self.roots:
@@ -60,6 +199,9 @@ class RootAvailabilityTracker:
                 "in_flight": False,
                 "started_at": 0.0,
                 "last_probed_at": 0.0,
+                "probe_id": 0,
+                "active_threads": [],
+                "exhausted_logged": False,
             }
         self._recovered_batch = []
         self._lost_batch = []
@@ -74,11 +216,21 @@ class RootAvailabilityTracker:
                         "in_flight": False,
                         "started_at": 0.0,
                         "last_probed_at": 0.0,
+                        "probe_id": 0,
+                        "active_threads": [],
+                        "exhausted_logged": False,
                     }
 
     def get_unavailable_roots(self) -> list[str]:
         with self.lock:
             return [r for r, s in self._states.items() if s.get("status") != "available"]
+
+    def mark_root_unavailable(self, root):
+        with self.lock:
+            state = self._states.get(root)
+            if state and state["status"] == "available":
+                state["status"] = "unavailable"
+                self._lost_batch.append(root)
 
     def poll(self):
         """Non-blocking call by the main monitor loop.
@@ -96,14 +248,34 @@ class RootAvailabilityTracker:
                 state = self._states.get(root)
                 if not state:
                     continue
+
+                state["active_threads"] = [t for t in state["active_threads"] if t.is_alive()]
+                alive_count = len(state["active_threads"])
+
                 if state["in_flight"]:
                     if mono_now - state["started_at"] > self.probe_timeout:
+                        state["in_flight"] = False
+                        state["last_probed_at"] = mono_now
                         if state["status"] == "available":
                             state["status"] = "unavailable"
                             lost.append(root)
                 else:
-                    if mono_now - state["last_probed_at"] >= 5.0 or state["last_probed_at"] == 0.0:
-                        self._launch_probe_unlocked(root, mono_now)
+                    if alive_count >= self.max_hung_probes:
+                        if state["status"] == "available":
+                            state["status"] = "unavailable"
+                            lost.append(root)
+                        if not state.get("exhausted_logged"):
+                            logger.warning(
+                                "Root %s exhausted probe worker allowance (%d active blocked thread(s)); "
+                                "automatic recovery paused until thread capacity becomes available",
+                                root, alive_count
+                            )
+                            state["exhausted_logged"] = True
+                    else:
+                        state["exhausted_logged"] = False
+                        interval = 15.0 if alive_count > 0 else 5.0
+                        if mono_now - state["last_probed_at"] >= interval or state["last_probed_at"] == 0.0:
+                            self._launch_probe_unlocked(root, mono_now)
 
                 if state["status"] == "available":
                     available.append(root)
@@ -123,8 +295,10 @@ class RootAvailabilityTracker:
         state = self._states[root]
         state["in_flight"] = True
         state["started_at"] = mono_now
+        state["probe_id"] += 1
+        current_probe_id = state["probe_id"]
 
-        def probe_worker():
+        def probe_worker(p_id):
             success = False
             try:
                 p = Path(root)
@@ -140,6 +314,8 @@ class RootAvailabilityTracker:
                 success = False
 
             with self.lock:
+                if p_id != state["probe_id"]:
+                    return
                 state["in_flight"] = False
                 state["last_probed_at"] = time.monotonic()
                 prev_status = state["status"]
@@ -151,7 +327,8 @@ class RootAvailabilityTracker:
                     else:
                         self._lost_batch.append(root)
 
-        t = threading.Thread(target=probe_worker, name=f"probe_{Path(root).name}", daemon=True)
+        t = threading.Thread(target=probe_worker, args=(current_probe_id,), name=f"probe_{Path(root).name}", daemon=True)
+        state["active_threads"].append(t)
         t.start()
 
 import hashlib
@@ -993,6 +1170,13 @@ class CompletedDownloadWorker(threading.Thread):
         self._pending_scans = {}
         self._max_consecutive_passes = 5
         self._scan_lock = threading.Lock()
+        self._recovery_lock = threading.Lock()
+        self._active_recovery_scans = {}
+        self._pending_recovery_scans = set()
+        self._deferred_lock = threading.Lock()
+        self._deferred_busy_submissions = set()
+        self._deferred_busy_relocations = []
+        self.availability_tracker = None
         if self.enabled:
             self._restore_candidates()
             self._recover_recent_files()
@@ -1000,17 +1184,7 @@ class CompletedDownloadWorker(threading.Thread):
     def _is_inside_incoming(self, candidate_path):
         if not self.incoming_folders or not candidate_path:
             return False
-        try:
-            resolved = Path(candidate_path).resolve()
-            for root in self.incoming_folders:
-                try:
-                    resolved.relative_to(root)
-                    return True
-                except (OSError, ValueError):
-                    continue
-        except (OSError, ValueError):
-            return False
-        return False
+        return self._owning_incoming_folder(candidate_path) is not None
 
     def accepts(self, path):
         if not self.enabled or not path:
@@ -1360,14 +1534,36 @@ class CompletedDownloadWorker(threading.Thread):
     def submit(self, path):
         if not self.accepts(path):
             return False
-        normalized = str(Path(path).resolve())
+        root_key = self._owning_incoming_folder(path) or str(path)
+
+        def _resolve_and_stat():
+            try:
+                norm = str(Path(path).resolve())
+            except OSError:
+                norm = os.path.normpath(os.path.abspath(str(path)))
+            st = Path(norm).stat()
+            return norm, st
+
+        try:
+            res, status = default_fs_limiter.run(root_key, _resolve_and_stat, timeout=1.5)
+            if status in ("timeout", "outage"):
+                if getattr(self, "availability_tracker", None):
+                    self.availability_tracker.mark_root_unavailable(root_key)
+                return False
+            elif status == "busy":
+                with self._deferred_lock:
+                    self._deferred_busy_submissions.add(str(path))
+                self.wake.set()
+                return False
+            if not res:
+                return False
+            normalized, stat = res
+        except OSError:
+            return False
+
         if consume_expected_create(self.database_path, normalized) or consume_expected_create(self.database_path, str(path)):
             return False
         if self._is_in_inventory(normalized) or self._was_imported(normalized):
-            return False
-        try:
-            stat = Path(normalized).stat()
-        except OSError:
             return False
         with self.lock:
             current = self.candidates.get(normalized)
@@ -1406,7 +1602,7 @@ class CompletedDownloadWorker(threading.Thread):
                     if c_info.get("is_companion"):
                         cand_p = Path(c_path)
                         try:
-                            if cand_p.parent.resolve() == video_p.parent.resolve():
+                            if cand_p.parent == video_p.parent:
                                 matched, _ = match_companion_to_video(cand_p, video_p)
                                 if matched or is_generic_artwork(cand_p):
                                     c_info["check_after"] = 0.0
@@ -1483,8 +1679,36 @@ class CompletedDownloadWorker(threading.Thread):
 
     def relocate(self, source, destination):
         """Carry an unimported download's wait/scan state to its new path."""
-        source = str(Path(source).resolve())
-        destination = str(Path(destination).resolve())
+        root_key = self._owning_incoming_folder(destination) or self._owning_incoming_folder(source) or str(destination)
+
+        def _resolve_both():
+            try:
+                s = str(Path(source).resolve())
+            except OSError:
+                s = os.path.normpath(os.path.abspath(str(source)))
+            try:
+                d = str(Path(destination).resolve())
+            except OSError:
+                d = os.path.normpath(os.path.abspath(str(destination)))
+            return s, d
+
+        try:
+            res, status = default_fs_limiter.run(root_key, _resolve_both, timeout=1.5)
+            if status in ("timeout", "outage"):
+                if getattr(self, "availability_tracker", None):
+                    self.availability_tracker.mark_root_unavailable(root_key)
+                return False
+            elif status == "busy":
+                with self._deferred_lock:
+                    self._deferred_busy_relocations.append((str(source), str(destination)))
+                self.wake.set()
+                return False
+            if not res:
+                return False
+            source, destination = res
+        except OSError:
+            return False
+
         is_dest_video = Path(destination).suffix.lower() in VIDEO_EXTENSIONS
         is_dest_temp = is_temporary_download(destination)
         if not self.enabled or (not is_dest_video and not is_dest_temp):
@@ -1512,7 +1736,18 @@ class CompletedDownloadWorker(threading.Thread):
                 return False
 
         try:
-            stat = Path(destination).stat()
+            stat, status = default_fs_limiter.run(root_key, lambda: Path(destination).stat(), timeout=1.5)
+            if status in ("timeout", "outage"):
+                if getattr(self, "availability_tracker", None):
+                    self.availability_tracker.mark_root_unavailable(root_key)
+                return False
+            elif status == "busy":
+                with self._deferred_lock:
+                    self._deferred_busy_relocations.append((str(source), str(destination)))
+                self.wake.set()
+                return False
+            if not stat:
+                return False
         except OSError:
             return False
 
@@ -1982,7 +2217,21 @@ class CompletedDownloadWorker(threading.Thread):
 
         self._save_companion_waiting(path, candidate, "Waiting for matching video to arrive")
 
+    def _retry_deferred_busy_operations(self):
+        with self._deferred_lock:
+            pending_relocations = list(self._deferred_busy_relocations)
+            self._deferred_busy_relocations.clear()
+            pending_submissions = list(self._deferred_busy_submissions)
+            self._deferred_busy_submissions.clear()
+
+        for src, dst in pending_relocations:
+            self.relocate(src, dst)
+
+        for p in pending_submissions:
+            self.submit(p)
+
     def evaluate_once(self, now=None, mono_now=None):
+        self._retry_deferred_busy_operations()
         now = time.time() if now is None else float(now)
         mono_now = time.monotonic() if mono_now is None else float(mono_now)
         with self.lock:
@@ -2057,28 +2306,58 @@ class CompletedDownloadWorker(threading.Thread):
         except Exception as exc:
             logger.debug("Error in _fallback_check: %s", exc)
 
-    def trigger_recovery_scan(self, root):
-        """Discovers files that arrived while a network share was offline."""
-        try:
-            if not self.enabled:
-                return
-            root_path = Path(root).resolve()
-            threads = []
-            for folder in self.incoming_folders:
-                matched = False
-                try:
-                    folder.resolve().relative_to(root_path)
-                    matched = True
-                except (ValueError, OSError):
-                    if root_path == folder.resolve():
-                        matched = True
-                if matched:
-                    t = self._dispatch_folder_scan(folder, self.started_at)
-                    if t:
-                        threads.append(t)
-            self._wait_scans(threads, max_wait=0.05)
-        except Exception as exc:
-            logger.debug("Error triggering recovery scan for %s: %s", root, exc)
+    def trigger_recovery_scan(self, root, max_wait=0.05):
+        """Discovers files that arrived while a network share was offline.
+        Genuinely asynchronous: delegates recovery work to a background worker so the
+        calling thread does not execute the scan, and coalesces repeated recovery requests."""
+        if not self.enabled or not root or self.stopping:
+            return None
+        root_str = str(root)
+        with self._recovery_lock:
+            existing = self._active_recovery_scans.get(root_str)
+            if existing is not None and existing.is_alive():
+                self._pending_recovery_scans.add(root_str)
+                return existing
+
+            t = threading.Thread(
+                target=self._run_recovery_scan,
+                args=(root_str,),
+                name=f"recovery-scan-{Path(root_str).name or 'root'}",
+                daemon=True,
+            )
+            self._active_recovery_scans[root_str] = t
+            t.start()
+        if max_wait > 0:
+            t.join(timeout=float(max_wait))
+        return t
+
+    def _run_recovery_scan(self, root_str):
+        while not self.stopping:
+            try:
+                root_variants = self._normalize_prefixes(root_str)
+                threads = []
+                for folder in self.incoming_folders:
+                    folder_variants = self._normalize_prefixes(folder)
+                    matched = any(
+                        fv == rv or fv.startswith(rv.rstrip(os.sep) + os.sep)
+                        for fv in folder_variants
+                        for rv in root_variants
+                    )
+                    if matched:
+                        t = self._dispatch_folder_scan(folder, self.started_at)
+                        if t:
+                            threads.append(t)
+                if threads:
+                    self._wait_scans(threads, max_wait=0.2)
+            except Exception as exc:
+                logger.debug("Error in _run_recovery_scan for %s: %s", root_str, exc)
+
+            with self._recovery_lock:
+                if root_str in self._pending_recovery_scans and not self.stopping:
+                    self._pending_recovery_scans.discard(root_str)
+                    continue
+                self._active_recovery_scans.pop(root_str, None)
+                break
 
     def stop(self):
         self.stopping = True
@@ -2105,6 +2384,8 @@ class LibraryEventHandler(FileSystemEventHandler):
         self.notifications = notifications
         self.incoming_worker = incoming_worker
         self.availability_tracker = availability_tracker
+        if incoming_worker and availability_tracker and not getattr(incoming_worker, "availability_tracker", None):
+            incoming_worker.availability_tracker = availability_tracker
         # Track when each path last had a 'created' event so the delayed
         # "still missing?" check can tell the difference between a genuine
         # deletion and a rapid delete-then-recreate (e.g. atomic download swap).
@@ -2144,18 +2425,21 @@ class LibraryEventHandler(FileSystemEventHandler):
         def decide():
             with self._recent_creates_lock:
                 self._transcoder_decision_timers.pop(source, None)
-            row = inventoried_source(self.database_path, source)
-            if not row:
-                return
-            selected, reason = transcoder_replacement_decision(self.database_path, source, row)
-            if selected:
-                self.worker.submit(source, selected)
-            else:
-                promote_transcoder_review(self.database_path, source, reason)
-                record_activity(self.database_path, "filesystem", "transcoder replacement", "review",
-                                severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
-                                old_path=source, detail=reason)
-                notify(self.notifications, f"Transcoder replacement needs review: {Path(source).name}")
+            try:
+                row = inventoried_source(self.database_path, source)
+                if not row:
+                    return
+                selected, reason = transcoder_replacement_decision(self.database_path, source, row)
+                if selected:
+                    self.worker.submit(source, selected)
+                else:
+                    promote_transcoder_review(self.database_path, source, reason)
+                    record_activity(self.database_path, "filesystem", "transcoder replacement", "review",
+                                    severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
+                                    old_path=source, detail=reason)
+                    notify(self.notifications, f"Transcoder replacement needs review: {Path(source).name}")
+            except Exception as exc:
+                logger.debug("Transcoder decision exception for %s: %s", source, exc)
 
         with self._recent_creates_lock:
             previous = self._transcoder_decision_timers.pop(source, None)
@@ -2178,6 +2462,8 @@ class LibraryEventHandler(FileSystemEventHandler):
             self.incoming_worker.submit_tree(event.src_path)
         if event.is_directory:
             return
+        if self._is_path_offline(event.src_path):
+            return
         # Resolve any transient delete event if the file is recreated/present
         resolve_filesystem_event(self.database_path, "deleted", event.src_path)
         if consume_expected_create(self.database_path, event.src_path):
@@ -2193,11 +2479,28 @@ class LibraryEventHandler(FileSystemEventHandler):
             if Path(event.src_path).suffix.lower() in COMPANION_EXTENSIONS:
                 cand = Path(event.src_path)
                 parent = cand.parent
+                root_key = self._root_for_path(event.src_path)
+
+                def _find_matching_companion_video():
+                    for v_ext in VIDEO_EXTENSIONS:
+                        try:
+                            if (parent / (cand.stem + v_ext)).is_file() or (parent / cand.stem).is_file():
+                                return True
+                        except OSError:
+                            break
+                    return False
+
                 has_matching_video = False
-                for v_ext in VIDEO_EXTENSIONS:
-                    if (parent / (cand.stem + v_ext)).is_file() or (parent / cand.stem).is_file():
-                        has_matching_video = True
-                        break
+                try:
+                    res, status = default_fs_limiter.run(root_key, _find_matching_companion_video, timeout=1.0)
+                    if status in ("timeout", "outage"):
+                        if self.availability_tracker:
+                            self.availability_tracker.mark_root_unavailable(root_key)
+                        return
+                    has_matching_video = bool(res) if status == "ok" else False
+                except OSError:
+                    has_matching_video = False
+
                 if has_matching_video:
                     return
             with self._recent_creates_lock:
@@ -2282,8 +2585,17 @@ class LibraryEventHandler(FileSystemEventHandler):
                     con.close()
             except Exception:
                 pass
-        if unavail and is_file_on_unavailable_root(path, unavail):
-            return True
+        if not unavail:
+            return False
+        variants = [str(path)]
+        s = str(path)
+        if s.startswith("/private/"):
+            variants.append(s[len("/private"):])
+        elif s.startswith("/var/") or s.startswith("/tmp/") or s.startswith("/etc/"):
+            variants.append("/private" + s)
+        for v in variants:
+            if is_file_on_unavailable_root(v, unavail):
+                return True
         return False
 
     def _root_for_path(self, path: str) -> str:
@@ -2390,6 +2702,8 @@ class LibraryEventHandler(FileSystemEventHandler):
         # Modification events are useful only for the incoming stability timer. They do not
         # identify a move/deletion and must not create an unexplained review warning.
         if not event.is_directory and self._relevant(event.src_path, False):
+            if self._is_path_offline(event.src_path):
+                return
             if (getattr(self.worker, "transcoder_compatibility", False) is True
                     and Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS):
                 with self._recent_creates_lock:
@@ -2406,6 +2720,8 @@ class LibraryEventHandler(FileSystemEventHandler):
                 self.incoming_worker.relocate_tree(event.src_path, event.dest_path)
                 self.incoming_worker.submit_tree(event.dest_path)
             if event.is_directory:
+                return
+            if self._is_path_offline(event.src_path) or self._is_path_offline(event.dest_path):
                 return
             if not event.is_directory and consume_expected_move(self.database_path, event.src_path, event.dest_path):
                 return
@@ -2545,8 +2861,7 @@ def main():
     database_path = Path(args.database)
     control_path = Path(args.control)
     roots = json.loads(args.roots_json)
-    available = [root for root in roots if is_path_available(root)]
-    unavailable = [root for root in roots if root not in available]
+    available, unavailable = probe_roots_startup(roots, timeout=2.0, max_workers=4)
     if not claim_monitor_ownership(database_path, args.token, os.getpid(), available, unavailable):
         logger.warning("Another Watchtower monitor already owns this database; exiting duplicate startup")
         return
@@ -2601,6 +2916,8 @@ def main():
         handler.restore_transcoder_candidates()
     tracker = RootAvailabilityTracker(roots, probe_timeout=5.0)
     handler.availability_tracker = tracker
+    if incoming_worker:
+        incoming_worker.availability_tracker = tracker
     for r in unavailable:
         if r in tracker._states:
             tracker._states[r]["status"] = "unavailable"
@@ -2634,7 +2951,7 @@ def main():
                     except Exception as exc:
                         logger.warning("Failed scheduling observer on reconnected root %s: %s", root, exc)
                 if incoming_worker:
-                    incoming_worker.trigger_recovery_scan(root)
+                    incoming_worker.trigger_recovery_scan(root, max_wait=0)
 
             reload_monitor_if_code_changed(
                 loaded_code_signature, runtime_path, runtime, worker,
