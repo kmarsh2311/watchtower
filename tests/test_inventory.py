@@ -441,7 +441,9 @@ class InventoryTests(unittest.TestCase):
                                "size": Path(path).stat().st_size, "duration": 1, "fingerprints": []}],
                 }]}}
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
+        td = tempfile.TemporaryDirectory()
+        try:
+            temporary_directory = td.name
             root = Path(temporary_directory)
             incoming = root / "Incoming"
             library = root / "Library"
@@ -463,21 +465,13 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(incoming_summary(root / "inventory.sqlite3")["imported"], 1)
             finally:
                 worker.stop()
-                if os.name == "nt":
-                    import gc
-                    gc.collect()
-                    for p in [destination, source, root / "inventory.sqlite3"]:
-                        try:
-                            if p.is_file():
-                                p.unlink()
-                        except OSError:
-                            pass
-                    for d in [incoming, library]:
-                        try:
-                            if d.is_dir():
-                                d.rmdir()
-                        except OSError:
-                            pass
+        finally:
+            for _ in range(5):
+                try:
+                    td.cleanup()
+                    break
+                except OSError:
+                    time.sleep(0.1)
 
     def test_incoming_folder_must_be_inside_a_stash_library(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
