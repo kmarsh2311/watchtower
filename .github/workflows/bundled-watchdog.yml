@@ -28,4 +28,5 @@ jobs:
       - name: Run full Python test suite
         run: python -m pytest tests/
       - name: Run complete UI test suite
+        if: always()
         run: node tests/test_ui.mjs

@@ -302,22 +302,30 @@ def rename_lock(database_path: Path):
     try:
         if os.name == "nt":
             import msvcrt
-            lock_file.seek(0)
             if os.fstat(lock_file.fileno()).st_size == 0:
                 lock_file.write(b"0")
                 lock_file.flush()
+            lock_file.seek(0)
             msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
         else:
             import fcntl
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         yield
     finally:
-        if os.name == "nt":
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-        lock_file.close()
+        try:
+            if os.name == "nt":
+                try:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            else:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
+        finally:
+            lock_file.close()
 
 
 def utc_now() -> str:

@@ -1258,11 +1258,14 @@ class CompletedDownloadWorker(threading.Thread):
 
     def _normalize_prefixes(self, p):
         s = os.path.normpath(os.path.abspath(str(p)))
+        if os.name == "nt":
+            s = os.path.normcase(s)
         variants = [s]
-        if s.startswith("/private/"):
-            variants.append(s[len("/private"):])
-        elif s.startswith("/var/") or s.startswith("/tmp/") or s.startswith("/etc/"):
-            variants.append("/private" + s)
+        if os.name != "nt":
+            if s.startswith("/private/"):
+                variants.append(s[len("/private"):])
+            elif s.startswith("/var/") or s.startswith("/tmp/") or s.startswith("/etc/"):
+                variants.append("/private" + s)
         return variants
 
     def _owning_incoming_folder(self, path):

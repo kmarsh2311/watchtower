@@ -64,7 +64,8 @@ class CrossPlatformSimulationTests(unittest.TestCase):
                 runtime_data = json.loads(runtime_file.read_text(encoding="utf-8"))
                 self.assertEqual(runtime_data["server_connection"]["ApiKey"], "test-key")
                 self.assertEqual(runtime_data["database"], str(fake_db))
-                self.assertEqual(stat.S_IMODE(runtime_file.stat().st_mode), 0o600)
+                if os.name != "nt":
+                    self.assertEqual(stat.S_IMODE(runtime_file.stat().st_mode), 0o600)
 
                 # 5. Disable startup
                 off_status = librarymanager.configure_system_startup(False, server_conn, fake_db)
@@ -102,7 +103,8 @@ class CrossPlatformSimulationTests(unittest.TestCase):
                 self.assertIn("librarymanager_startup.py", desktop_text)
                 self.assertIn("X-GNOME-Autostart-enabled=true", desktop_text)
                 runtime_file = Path(librarymanager.__file__).with_name("startup-runtime.json")
-                self.assertEqual(stat.S_IMODE(runtime_file.stat().st_mode), 0o600)
+                if os.name != "nt":
+                    self.assertEqual(stat.S_IMODE(runtime_file.stat().st_mode), 0o600)
 
                 # 4. Disable startup
                 off_status = librarymanager.configure_system_startup(False, server_conn, fake_db)

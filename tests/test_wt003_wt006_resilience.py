@@ -305,12 +305,13 @@ def test_wt003_is_inside_incoming_preserves_folder_boundaries_and_symlinks(tmp_p
     assert worker._owning_incoming_folder(sibling) is None
 
     # 3. macOS /private alias variant matches
-    inc_str = str(incoming / "video.mp4")
-    if inc_str.startswith("/private/"):
-        alt_path = inc_str[len("/private"):]
-    else:
-        alt_path = "/private" + inc_str
-    assert worker._is_inside_incoming(alt_path) is True
+    if os.name != "nt":
+        inc_str = str(incoming / "video.mp4")
+        if inc_str.startswith("/private/"):
+            alt_path = inc_str[len("/private"):]
+        else:
+            alt_path = "/private" + inc_str
+        assert worker._is_inside_incoming(alt_path) is True
 
 
 def test_wt003_bounded_filesystem_operations_prevent_watchdog_hang(tmp_path):

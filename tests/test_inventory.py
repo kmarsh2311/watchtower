@@ -149,7 +149,11 @@ class InventoryTests(unittest.TestCase):
             script.write_text("#!/bin/sh\nexit 0\n")
             script.chmod(0o600)
             not_executable = generate_video_contact_sheet(video, custom_script=script, allow_custom_script=True)
-            self.assertIn("not executable", not_executable["error"])
+            err_msg = not_executable.get("error", "")
+            if os.name == "nt":
+                self.assertTrue("not executable" in err_msg or "WinError 193" in err_msg or "%1 is not a valid Win32 application" in err_msg)
+            else:
+                self.assertIn("not executable", err_msg)
 
     def test_contact_sheet_uses_ffmpeg_fallback_when_imagemagick_is_missing(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -354,6 +358,10 @@ class InventoryTests(unittest.TestCase):
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
             worker.candidates.clear()
             self.assertEqual(worker.submit_tree(incoming / "Torrent"), 2)
+            worker.stopping = True
+            with worker._scan_lock:
+                for t in list(worker._active_scans.values()):
+                    t.join(timeout=1.0)
 
     def test_file_change_restarts_settle_timer_after_pause(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -368,6 +376,10 @@ class InventoryTests(unittest.TestCase):
             video.write_bytes(b"resumed download")
             worker.evaluate_once(previous + 120)
             self.assertEqual(worker.candidates[path]["stable_since"], previous + 120)
+            worker.stopping = True
+            with worker._scan_lock:
+                for t in list(worker._active_scans.values()):
+                    t.join(timeout=1.0)
 
     def test_pending_download_move_preserves_wait_state_outside_incoming_folder(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -432,6 +444,10 @@ class InventoryTests(unittest.TestCase):
             self.assertTrue(worker._scan(str(source.resolve()), candidate))
             self.assertEqual(stash.scans, [[str(source.resolve())], [str(destination.resolve())]])
             self.assertEqual(incoming_summary(root / "inventory.sqlite3")["imported"], 1)
+            worker.stopping = True
+            with worker._scan_lock:
+                for t in list(worker._active_scans.values()):
+                    t.join(timeout=1.0)
 
     def test_incoming_folder_must_be_inside_a_stash_library(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -683,10 +699,13 @@ class InventoryTests(unittest.TestCase):
             scene_id, _, pending = claim_due_rename(database, 1001.0)
             self.assertIsNone(scene_id)
             self.assertEqual(pending, 0)
-            with librarymanager_core.connect(database) as connection:
-                row = connection.execute(
+            con = librarymanager_core.connect(database)
+            try:
+                row = con.execute(
                     "SELECT status,processing_started_at FROM rename_queue WHERE scene_id='10'"
                 ).fetchone()
+            finally:
+                con.close()
             self.assertEqual(row["status"], "processing")
             self.assertEqual(row["processing_started_at"], 1000.0)
 
@@ -764,23 +783,29 @@ class InventoryTests(unittest.TestCase):
             record_filesystem_event(database, "created", path)
 
             self.assertEqual(filesystem_monitor_summary(database)["pending_events"], 1)
-            with sqlite3.connect(database) as connection:
-                status, count = connection.execute(
+            con = sqlite3.connect(database)
+            try:
+                status, count = con.execute(
                     "SELECT status,event_count FROM filesystem_events"
                 ).fetchone()
+            finally:
+                con.close()
             self.assertEqual(status, "pending")
             self.assertEqual(count, 2)
 
     def test_reused_live_pid_is_not_accepted_as_watchtower_monitor(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"
-            with librarymanager_core.connect(database) as connection:
-                connection.execute(
+            con = librarymanager_core.connect(database)
+            try:
+                con.execute(
                     """UPDATE filesystem_monitor_status SET token=?,pid=?,state='running',started_at=?,heartbeat_at=?
                        WHERE id=1""",
                     ("expected-token", 4321, librarymanager_core.utc_now(), librarymanager_core.utc_now()),
                 )
-                connection.commit()
+                con.commit()
+            finally:
+                con.close()
             with patch.object(librarymanager_core, "_is_pid_alive", return_value=True), \
                     patch.object(librarymanager_core, "_pid_matches_monitor", return_value=False):
                 summary = filesystem_monitor_summary(database)
@@ -977,8 +1002,12 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(first[0]["base_stem"], "Scene")
             self.assertTrue(first[0]["proposed_path"].endswith("Scene - Example Studio.mp4"))
             # Previously persisted filename bases are cleaned as well.
-            with sqlite3.connect(database) as connection:
-                connection.execute("UPDATE filename_state SET base_stem='[examplestudio] Scene'")
+            con = sqlite3.connect(database)
+            try:
+                con.execute("UPDATE filename_state SET base_stem='[examplestudio] Scene'")
+                con.commit()
+            finally:
+                con.close()
             _, second = preview_safe_filenames(database)
             self.assertEqual(second[0]["base_stem"], "Scene")
 
