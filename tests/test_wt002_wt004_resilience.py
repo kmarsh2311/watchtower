@@ -114,7 +114,7 @@ def test_wt004_relocate_preserves_concurrent_candidate_updates(tmp_path):
     real_stat = Path.stat
 
     def slow_dest_stat(path_obj):
-        if str(path_obj.resolve()) == dest_str:
+        if str(path_obj) == dest_str or os.path.abspath(str(path_obj)) == dest_str:
             # Simulate concurrent worker update to source candidate while stat is in-flight
             with worker.lock:
                 worker.candidates[source_str]["attempts"] = 2
@@ -167,7 +167,7 @@ def test_wt004_relocate_aborts_if_candidate_removed_concurrently(tmp_path):
     real_stat = Path.stat
 
     def concurrent_remove_stat(path_obj):
-        if str(path_obj.resolve()) == dest_str:
+        if str(path_obj) == dest_str or os.path.abspath(str(path_obj)) == dest_str:
             # Simulate another thread removing source while destination is being checked
             with worker.lock:
                 worker.candidates.pop(source_str, None)
@@ -218,7 +218,7 @@ def test_wt004_relocate_db_only_aborts_if_status_changed_concurrently(tmp_path):
     real_stat = Path.stat
 
     def concurrent_db_update(path_obj):
-        if str(path_obj.resolve()) == dest_str:
+        if str(path_obj) == dest_str or os.path.abspath(str(path_obj)) == dest_str:
             # Another thread marks source as completed
             con = sqlite3.connect(str(db_path))
             con.execute("UPDATE incoming_files SET status='completed' WHERE path=?", (source_str,))

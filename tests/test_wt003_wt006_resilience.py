@@ -333,13 +333,17 @@ def test_wt003_bounded_filesystem_operations_prevent_watchdog_hang(tmp_path):
     )
 
     hang_event = threading.Event()
+    real_stat = Path.stat
 
-    def mock_stat_hang(*args, **kwargs):
-        hang_event.wait(timeout=5.0)
-        return MagicMock()
+    def mock_stat_hang(self, *args, **kwargs):
+        p_str = str(self)
+        if "hung_download" in p_str or "incoming" in p_str:
+            hang_event.wait(timeout=5.0)
+            return MagicMock()
+        return real_stat(self, *args, **kwargs)
 
     try:
-        with patch("pathlib.Path.stat", side_effect=mock_stat_hang):
+        with patch.object(Path, "stat", mock_stat_hang):
             t0 = time.monotonic()
             # Send an event on an incoming candidate
             test_file = str(incoming / "hung_download.mp4")
