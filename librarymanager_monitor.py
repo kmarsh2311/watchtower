@@ -1512,6 +1512,8 @@ class CompletedDownloadWorker(threading.Thread):
         connection = connect(self.database_path)
         try:
             existing = connection.execute("SELECT attempts, first_seen_at FROM incoming_files WHERE path=?", (path,)).fetchone()
+            if status == "gone" and not existing:
+                return
             attempt_count = int(existing["attempts"] if existing else 0) if attempts is None else int(attempts)
             initial_seen = (existing["first_seen_at"] if existing and existing["first_seen_at"] else None) or first_seen_at or utc_now()
             connection.execute(
@@ -2531,9 +2533,11 @@ class LibraryEventHandler(FileSystemEventHandler):
                 resolve_filesystem_event(self.database_path, "created", event.src_path)
                 return
             if self.incoming_worker:
+                was_candidate = False
                 with self.incoming_worker.lock:
-                    self.incoming_worker.candidates.pop(event.src_path, None)
-                self.incoming_worker._save_state(event.src_path, "gone", detail="File removed from disk")
+                    was_candidate = bool(self.incoming_worker.candidates.pop(event.src_path, None))
+                if was_candidate or self.incoming_worker._is_inside_incoming(event.src_path):
+                    self.incoming_worker._save_state(event.src_path, "gone", detail="File removed from disk")
             if not is_temporary_download(event.src_path):
                 if Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS:
                     with self._recent_creates_lock:
