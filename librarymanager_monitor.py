@@ -1181,6 +1181,7 @@ class CompletedDownloadWorker(threading.Thread):
         self.allow_custom_contact_sheet_script = False
         self.track_temporary_downloads = track_temporary_downloads
         self._active_scans = {}
+        self._all_scan_threads = set()
         self._pending_scans = {}
         self._max_consecutive_passes = 5
         self._scan_lock = threading.Lock()
@@ -1353,6 +1354,7 @@ class CompletedDownloadWorker(threading.Thread):
                 daemon=True,
             )
             self._active_scans[key] = thread
+            self._all_scan_threads.add(thread)
             thread.start()
             return thread
 
@@ -1429,6 +1431,7 @@ class CompletedDownloadWorker(threading.Thread):
                         daemon=True,
                     )
                     self._active_scans[key] = next_thread
+                    self._all_scan_threads.add(next_thread)
                     next_thread.start()
                 else:
                     if self._active_scans.get(key) is threading.current_thread():
@@ -1637,7 +1640,7 @@ class CompletedDownloadWorker(threading.Thread):
         self.wake.set()
         return True
 
-    def submit_tree(self, path):
+    def submit_tree(self, path, max_wait=0.05):
         """Discover videos inside a newly-created or newly-moved download directory."""
         if not self.enabled or not path:
             return 0
@@ -1661,9 +1664,10 @@ class CompletedDownloadWorker(threading.Thread):
                 daemon=True,
             )
             self._active_scans[key] = thread
+            self._all_scan_threads.add(thread)
             thread.start()
 
-        self._wait_scans([thread], max_wait=0.05)
+        self._wait_scans([thread], max_wait=float(max_wait))
         return result[0]
 
     def _scan_tree_worker(self, root, key=None, result=None):
@@ -2350,6 +2354,7 @@ class CompletedDownloadWorker(threading.Thread):
                 daemon=True,
             )
             self._active_recovery_scans[root_str] = t
+            self._all_scan_threads.add(t)
             t.start()
         if max_wait > 0:
             t.join(timeout=float(max_wait))
@@ -2387,15 +2392,13 @@ class CompletedDownloadWorker(threading.Thread):
         self.stopping = True
         self.wake.set()
         with self._scan_lock:
-            scans = list(self._active_scans.values())
+            scans = [t for t in self._all_scan_threads if t is not threading.current_thread() and t.is_alive()]
         for t in scans:
-            if t is not threading.current_thread() and t.is_alive():
-                t.join(timeout=timeout)
+            t.join(timeout=timeout)
         with self._recovery_lock:
-            recovs = list(self._active_recovery_scans.values())
+            recovs = [t for t in self._active_recovery_scans.values() if t is not threading.current_thread() and t.is_alive()]
         for t in recovs:
-            if t is not threading.current_thread() and t.is_alive():
-                t.join(timeout=timeout)
+            t.join(timeout=timeout)
 
     def run(self):
         while not self.stopping:

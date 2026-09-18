@@ -366,8 +366,11 @@ class InventoryTests(unittest.TestCase):
             (nested / "unfinished.mp4.part").write_bytes(b"partial")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
             try:
+                with worker._scan_lock:
+                    initial_threads = list(worker._all_scan_threads)
+                worker._wait_scans(initial_threads, max_wait=2.0)
                 worker.candidates.clear()
-                self.assertEqual(worker.submit_tree(incoming / "Torrent"), 2)
+                self.assertEqual(worker.submit_tree(incoming / "Torrent", max_wait=2.0), 2)
             finally:
                 worker.stop()
 
