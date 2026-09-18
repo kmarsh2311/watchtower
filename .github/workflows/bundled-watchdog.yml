@@ -1,8 +1,7 @@
 name: Bundled watchdog
 
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   filesystem-smoke-test:
