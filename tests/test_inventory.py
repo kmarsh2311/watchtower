@@ -149,7 +149,11 @@ class InventoryTests(unittest.TestCase):
             script.write_text("#!/bin/sh\nexit 0\n")
             script.chmod(0o600)
             not_executable = generate_video_contact_sheet(video, custom_script=script, allow_custom_script=True)
-            self.assertIn("not executable", not_executable["error"])
+            err_msg = not_executable.get("error", "")
+            if os.name == "nt":
+                self.assertTrue("not executable" in err_msg or "WinError 193" in err_msg or "%1 is not a valid Win32 application" in err_msg)
+            else:
+                self.assertIn("not executable", err_msg)
 
     def test_contact_sheet_uses_ffmpeg_fallback_when_imagemagick_is_missing(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -297,18 +301,21 @@ class InventoryTests(unittest.TestCase):
             incoming = root / "Incoming"
             incoming.mkdir()
             worker = CompletedDownloadWorker(database, FakeStash(""), incoming, True, 60, False)
-            video = incoming / "finished.mp4"
-            video.write_bytes(b"video")
-            worker.stash.path = str(video.resolve())
-            self.assertTrue(worker.submit(video))
-            candidate = worker.candidates[str(video.resolve())]
-            worker.evaluate_once(candidate["stable_since"] + 59)
-            self.assertEqual(worker.stash.scans, [])
-            worker.evaluate_once(candidate["stable_since"] + 60)
-            self.assertEqual(worker.stash.scans, [[str(video.resolve())]])
-            self.assertTrue(worker.stash.flags["scanGeneratePreviews"])
-            self.assertTrue(worker.stash.flags["scanGenerateSprites"])
-            self.assertEqual(incoming_summary(database)["imported"], 1)
+            try:
+                video = incoming / "finished.mp4"
+                video.write_bytes(b"video")
+                worker.stash.path = str(video.resolve())
+                self.assertTrue(worker.submit(video))
+                candidate = worker.candidates[str(video.resolve())]
+                worker.evaluate_once(candidate["stable_since"] + 59)
+                self.assertEqual(worker.stash.scans, [])
+                worker.evaluate_once(candidate["stable_since"] + 60)
+                self.assertEqual(worker.stash.scans, [[str(video.resolve())]])
+                self.assertTrue(worker.stash.flags["scanGeneratePreviews"])
+                self.assertTrue(worker.stash.flags["scanGenerateSprites"])
+                self.assertEqual(incoming_summary(database)["imported"], 1)
+            finally:
+                worker.stop()
 
     def test_completed_download_ignores_temporary_and_preexisting_files(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -323,9 +330,12 @@ class InventoryTests(unittest.TestCase):
             temporary = incoming / "new.mp4.part"
             temporary.write_bytes(b"partial")
             worker = CompletedDownloadWorker(database, object(), incoming, True, 300, False)
-            worker._fallback_check()
-            self.assertEqual(worker.candidates, {})
-            self.assertFalse(worker.submit(temporary))
+            try:
+                worker._fallback_check()
+                self.assertEqual(worker.candidates, {})
+                self.assertFalse(worker.submit(temporary))
+            finally:
+                worker.stop()
 
     def test_restart_recovers_recent_direct_final_video_but_not_old_files(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -339,8 +349,11 @@ class InventoryTests(unittest.TestCase):
             recent = incoming / "direct-final.m4v"
             recent.write_bytes(b"new")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
-            self.assertIn(str(recent.resolve()), worker.candidates)
-            self.assertNotIn(str(old.resolve()), worker.candidates)
+            try:
+                self.assertIn(str(recent.resolve()), worker.candidates)
+                self.assertNotIn(str(old.resolve()), worker.candidates)
+            finally:
+                worker.stop()
 
     def test_new_download_subfolder_discovers_all_nested_videos(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -352,8 +365,14 @@ class InventoryTests(unittest.TestCase):
             (nested / "two.avi").write_bytes(b"two")
             (nested / "unfinished.mp4.part").write_bytes(b"partial")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
-            worker.candidates.clear()
-            self.assertEqual(worker.submit_tree(incoming / "Torrent"), 2)
+            try:
+                with worker._scan_lock:
+                    initial_threads = list(worker._all_scan_threads)
+                worker._wait_scans(initial_threads, max_wait=2.0)
+                worker.candidates.clear()
+                self.assertEqual(worker.submit_tree(incoming / "Torrent", max_wait=2.0), 2)
+            finally:
+                worker.stop()
 
     def test_file_change_restarts_settle_timer_after_pause(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -363,11 +382,14 @@ class InventoryTests(unittest.TestCase):
             video = incoming / "paused.mp4"
             video.write_bytes(b"first")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
-            path = str(video.resolve())
-            previous = worker.candidates[path]["stable_since"]
-            video.write_bytes(b"resumed download")
-            worker.evaluate_once(previous + 120)
-            self.assertEqual(worker.candidates[path]["stable_since"], previous + 120)
+            try:
+                path = str(video.resolve())
+                previous = worker.candidates[path]["stable_since"]
+                video.write_bytes(b"resumed download")
+                worker.evaluate_once(previous + 120)
+                self.assertEqual(worker.candidates[path]["stable_since"], previous + 120)
+            finally:
+                worker.stop()
 
     def test_pending_download_move_preserves_wait_state_outside_incoming_folder(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -379,15 +401,18 @@ class InventoryTests(unittest.TestCase):
             source = incoming / "video.mp4"
             source.write_bytes(b"video")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
-            old_path = str(source.resolve())
-            stable_since = worker.candidates[old_path]["stable_since"]
-            destination = library / "video.mp4"
-            source.rename(destination)
-            self.assertTrue(worker.relocate(source, destination))
-            new_path = str(destination.resolve())
-            self.assertNotIn(old_path, worker.candidates)
-            self.assertEqual(worker.candidates[new_path]["stable_since"], stable_since)
-            self.assertEqual(worker._resolve_relocation(old_path), new_path)
+            try:
+                old_path = str(source.resolve())
+                stable_since = worker.candidates[old_path]["stable_since"]
+                destination = library / "video.mp4"
+                source.rename(destination)
+                self.assertTrue(worker.relocate(source, destination))
+                new_path = str(destination.resolve())
+                self.assertNotIn(old_path, worker.candidates)
+                self.assertEqual(worker.candidates[new_path]["stable_since"], stable_since)
+                self.assertEqual(worker._resolve_relocation(old_path), new_path)
+            finally:
+                worker.stop()
 
     def test_move_during_stash_scan_follows_destination_without_review_failure(self):
         class MovingStash:
@@ -416,7 +441,9 @@ class InventoryTests(unittest.TestCase):
                                "size": Path(path).stat().st_size, "duration": 1, "fingerprints": []}],
                 }]}}
 
-        with tempfile.TemporaryDirectory() as temporary_directory:
+        td = tempfile.TemporaryDirectory()
+        try:
+            temporary_directory = td.name
             root = Path(temporary_directory)
             incoming = root / "Incoming"
             library = root / "Library"
@@ -427,11 +454,24 @@ class InventoryTests(unittest.TestCase):
             source.write_bytes(b"video")
             stash = MovingStash()
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", stash, incoming, True, 60, False)
-            stash.worker, stash.source, stash.destination = worker, str(source.resolve()), str(destination.resolve())
-            candidate = worker.candidates.pop(str(source.resolve()))
-            self.assertTrue(worker._scan(str(source.resolve()), candidate))
-            self.assertEqual(stash.scans, [[str(source.resolve())], [str(destination.resolve())]])
-            self.assertEqual(incoming_summary(root / "inventory.sqlite3")["imported"], 1)
+            try:
+                with worker._scan_lock:
+                    initial_threads = list(worker._all_scan_threads)
+                worker._wait_scans(initial_threads, max_wait=2.0)
+                stash.worker, stash.source, stash.destination = worker, str(source.resolve()), str(destination.resolve())
+                candidate = worker.candidates.pop(str(source.resolve()))
+                self.assertTrue(worker._scan(str(source.resolve()), candidate))
+                self.assertEqual(stash.scans, [[str(source.resolve())], [str(destination.resolve())]])
+                self.assertEqual(incoming_summary(root / "inventory.sqlite3")["imported"], 1)
+            finally:
+                worker.stop()
+        finally:
+            for _ in range(5):
+                try:
+                    td.cleanup()
+                    break
+                except OSError:
+                    time.sleep(0.1)
 
     def test_incoming_folder_must_be_inside_a_stash_library(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -484,14 +524,17 @@ class InventoryTests(unittest.TestCase):
             incA.mkdir()
             incB.mkdir()
             worker = CompletedDownloadWorker(database, object(), None, True, 300, False, incoming_folders=[str(incA), str(incB)])
-            videoA = incA / "videoA.mp4"
-            videoB = incB / "videoB.mkv"
-            videoA.write_bytes(b"contentA")
-            videoB.write_bytes(b"contentB")
-            self.assertTrue(worker.submit(videoA))
-            self.assertTrue(worker.submit(videoB))
-            self.assertIn(str(videoA.resolve()), worker.candidates)
-            self.assertIn(str(videoB.resolve()), worker.candidates)
+            try:
+                videoA = incA / "videoA.mp4"
+                videoB = incB / "videoB.mkv"
+                videoA.write_bytes(b"contentA")
+                videoB.write_bytes(b"contentB")
+                self.assertTrue(worker.submit(videoA))
+                self.assertTrue(worker.submit(videoB))
+                self.assertIn(str(videoA.resolve()), worker.candidates)
+                self.assertIn(str(videoB.resolve()), worker.candidates)
+            finally:
+                worker.stop()
 
     def test_filename_style_choices_control_order_and_separators(self):
         options = {
@@ -683,10 +726,13 @@ class InventoryTests(unittest.TestCase):
             scene_id, _, pending = claim_due_rename(database, 1001.0)
             self.assertIsNone(scene_id)
             self.assertEqual(pending, 0)
-            with librarymanager_core.connect(database) as connection:
-                row = connection.execute(
+            con = librarymanager_core.connect(database)
+            try:
+                row = con.execute(
                     "SELECT status,processing_started_at FROM rename_queue WHERE scene_id='10'"
                 ).fetchone()
+            finally:
+                con.close()
             self.assertEqual(row["status"], "processing")
             self.assertEqual(row["processing_started_at"], 1000.0)
 
@@ -764,23 +810,29 @@ class InventoryTests(unittest.TestCase):
             record_filesystem_event(database, "created", path)
 
             self.assertEqual(filesystem_monitor_summary(database)["pending_events"], 1)
-            with sqlite3.connect(database) as connection:
-                status, count = connection.execute(
+            con = sqlite3.connect(database)
+            try:
+                status, count = con.execute(
                     "SELECT status,event_count FROM filesystem_events"
                 ).fetchone()
+            finally:
+                con.close()
             self.assertEqual(status, "pending")
             self.assertEqual(count, 2)
 
     def test_reused_live_pid_is_not_accepted_as_watchtower_monitor(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             database = Path(temporary_directory) / "inventory.sqlite3"
-            with librarymanager_core.connect(database) as connection:
-                connection.execute(
+            con = librarymanager_core.connect(database)
+            try:
+                con.execute(
                     """UPDATE filesystem_monitor_status SET token=?,pid=?,state='running',started_at=?,heartbeat_at=?
                        WHERE id=1""",
                     ("expected-token", 4321, librarymanager_core.utc_now(), librarymanager_core.utc_now()),
                 )
-                connection.commit()
+                con.commit()
+            finally:
+                con.close()
             with patch.object(librarymanager_core, "_is_pid_alive", return_value=True), \
                     patch.object(librarymanager_core, "_pid_matches_monitor", return_value=False):
                 summary = filesystem_monitor_summary(database)
@@ -977,8 +1029,12 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(first[0]["base_stem"], "Scene")
             self.assertTrue(first[0]["proposed_path"].endswith("Scene - Example Studio.mp4"))
             # Previously persisted filename bases are cleaned as well.
-            with sqlite3.connect(database) as connection:
-                connection.execute("UPDATE filename_state SET base_stem='[examplestudio] Scene'")
+            con = sqlite3.connect(database)
+            try:
+                con.execute("UPDATE filename_state SET base_stem='[examplestudio] Scene'")
+                con.commit()
+            finally:
+                con.close()
             _, second = preview_safe_filenames(database)
             self.assertEqual(second[0]["base_stem"], "Scene")
 

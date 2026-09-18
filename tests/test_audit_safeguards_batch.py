@@ -107,15 +107,16 @@ class TestDeletionSchedulerSafeguards:
         handler = LibraryEventHandler(db_path, move_worker, False, incoming_worker=None, availability_tracker=tracker)
 
         threads_before = threading.active_count()
-        # Fire 200 deletion events across 2 roots
-        for i in range(200):
-            root = "root1" if i % 2 == 0 else "root2"
-            p = tmp_path / root / f"video_{i:04d}.mp4"
-            handler.on_deleted(FileDeletedEvent(str(p)))
+        # Fire 200 deletion events across 2 roots without race with background drain timer
+        with patch.object(handler, "_drain_pending_deletions"):
+            for i in range(200):
+                root = "root1" if i % 2 == 0 else "root2"
+                p = tmp_path / root / f"video_{i:04d}.mp4"
+                handler.on_deleted(FileDeletedEvent(str(p)))
 
-        # Verify items entered pending queue without exploding threads
-        with handler._deletion_scheduler_lock:
-            assert len(handler._pending_deletions) == 200
+            # Verify items entered pending queue without exploding threads
+            with handler._deletion_scheduler_lock:
+                assert len(handler._pending_deletions) == 200
 
         threads_during = threading.active_count()
         # Max new threads should be at most 2 (the single timer and at most per-root worker)
