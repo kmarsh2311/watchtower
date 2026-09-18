@@ -466,6 +466,18 @@ class InventoryTests(unittest.TestCase):
                 if os.name == "nt":
                     import gc
                     gc.collect()
+                    for p in [destination, source, root / "inventory.sqlite3"]:
+                        try:
+                            if p.is_file():
+                                p.unlink()
+                        except OSError:
+                            pass
+                    for d in [incoming, library]:
+                        try:
+                            if d.is_dir():
+                                d.rmdir()
+                        except OSError:
+                            pass
 
     def test_incoming_folder_must_be_inside_a_stash_library(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
