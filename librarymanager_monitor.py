@@ -1140,9 +1140,12 @@ class CompletedDownloadWorker(threading.Thread):
         for f in raw_folders:
             if f:
                 try:
-                    p = Path(f).resolve()
+                    p = Path(f)
                     if p not in self.incoming_folders:
                         self.incoming_folders.append(p)
+                    resolved = p.resolve()
+                    if resolved not in self.incoming_folders:
+                        self.incoming_folders.append(resolved)
                 except Exception:
                     pass
         self.incoming_folder = self.incoming_folders[0] if self.incoming_folders else None
