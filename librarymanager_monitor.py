@@ -990,6 +990,8 @@ class CompletedDownloadWorker(threading.Thread):
         self.allow_custom_contact_sheet_script = False
         self.track_temporary_downloads = track_temporary_downloads
         self._active_scans = {}
+        self._pending_scans = {}
+        self._max_consecutive_passes = 5
         self._scan_lock = threading.Lock()
         if self.enabled:
             self._restore_candidates()
@@ -1107,6 +1109,33 @@ class CompletedDownloadWorker(threading.Thread):
                     best_match = folder
         return best_match
 
+    def _enqueue_pending_scan(self, key, folder, cutoff=None, tree=None):
+        pending = self._pending_scans.setdefault(key, {
+            "folder": Path(folder),
+            "cutoff": cutoff,
+            "trees": set(),
+            "full_scan": False,
+        })
+        if cutoff is not None:
+            if pending["cutoff"] is None:
+                pending["cutoff"] = cutoff
+            else:
+                pending["cutoff"] = min(pending["cutoff"], cutoff)
+        if tree is not None:
+            tree_p = Path(tree)
+            try:
+                if tree_p.resolve() == Path(folder).resolve():
+                    pending["full_scan"] = True
+                    pending["trees"].clear()
+                elif not pending["full_scan"]:
+                    pending["trees"].add(tree_p)
+                    if len(pending["trees"]) > 50:
+                        pending["full_scan"] = True
+                        pending["cutoff"] = 0.0
+                        pending["trees"].clear()
+            except OSError:
+                pass
+
     def _dispatch_folder_scan(self, folder, cutoff):
         if not self.enabled or self.stopping:
             return None
@@ -1116,12 +1145,14 @@ class CompletedDownloadWorker(threading.Thread):
             existing = self._active_scans.get(key)
             if existing is not None:
                 if existing.is_alive():
+                    self._enqueue_pending_scan(key, folder_path, cutoff=cutoff)
                     return None
                 else:
                     self._active_scans.pop(key, None)
             thread = threading.Thread(
-                target=self._scan_incoming_folder,
-                args=(folder_path, cutoff),
+                target=self._run_folder_scan,
+                args=(key, folder_path),
+                kwargs={"initial_cutoff": cutoff},
                 name=f"incoming-scan-{folder_path.name or 'folder'}",
                 daemon=True,
             )
@@ -1129,9 +1160,86 @@ class CompletedDownloadWorker(threading.Thread):
             thread.start()
             return thread
 
+    def _run_folder_scan(self, key, folder, initial_cutoff=None, initial_tree=None, result=None, prev_thread=None):
+        if prev_thread is not None:
+            try:
+                prev_thread.join()
+            except Exception:
+                pass
+
+        pass_count = 0
+        max_passes = getattr(self, "_max_consecutive_passes", 5)
+        current_cutoff = initial_cutoff
+        current_tree = initial_tree
+        is_initial = (current_tree is not None or current_cutoff is not None)
+
+        try:
+            while not self.stopping and pass_count < max_passes:
+                if not is_initial:
+                    with self._scan_lock:
+                        if self.stopping:
+                            break
+                        pending = self._pending_scans.pop(key, None)
+                        if not pending:
+                            break
+
+                    pass_count += 1
+                    trees = list(pending.get("trees") or [])
+                    cutoff = pending.get("cutoff")
+                    full_scan = pending.get("full_scan")
+
+                    for t_path in trees:
+                        if self.stopping:
+                            break
+                        try:
+                            self._scan_tree_worker(t_path)
+                        except Exception as exc:
+                            logger.debug("Error scanning deferred tree %s: %s", t_path, exc)
+
+                    if self.stopping:
+                        break
+
+                    if full_scan:
+                        try:
+                            self._scan_incoming_folder(folder, 0.0)
+                        except Exception as exc:
+                            logger.debug("Error during full scan for %s: %s", folder, exc)
+                    elif cutoff is not None:
+                        try:
+                            self._scan_incoming_folder(folder, cutoff)
+                        except Exception as exc:
+                            logger.debug("Error during cutoff scan for %s: %s", folder, exc)
+                else:
+                    pass_count += 1
+                    is_initial = False
+                    try:
+                        if current_tree is not None:
+                            count = self._scan_tree_worker(current_tree)
+                            if result is not None and pass_count == 1:
+                                result[0] = count
+                        elif current_cutoff is not None:
+                            self._scan_incoming_folder(folder, current_cutoff)
+                    except Exception as exc:
+                        logger.debug("Error during initial scan for %s: %s", folder, exc)
+        finally:
+            with self._scan_lock:
+                if key in self._pending_scans and not self.stopping:
+                    curr_thread = threading.current_thread()
+                    next_thread = threading.Thread(
+                        target=self._run_folder_scan,
+                        args=(key, folder),
+                        kwargs={"prev_thread": curr_thread},
+                        name=f"incoming-continuation-{Path(folder).name or 'folder'}",
+                        daemon=True,
+                    )
+                    self._active_scans[key] = next_thread
+                    next_thread.start()
+                else:
+                    if self._active_scans.get(key) is threading.current_thread():
+                        self._active_scans.pop(key, None)
+
     def _scan_incoming_folder(self, folder, cutoff):
         folder_path = Path(folder)
-        key = self._folder_key(folder_path)
         try:
             try:
                 if not folder_path.is_dir():
@@ -1170,10 +1278,6 @@ class CompletedDownloadWorker(threading.Thread):
                 logger.debug("Failed scanning incoming folder %s: %s", folder_path, exc)
         except Exception as exc:
             logger.debug("Unexpected error scanning incoming folder %s: %s", folder_path, exc)
-        finally:
-            with self._scan_lock:
-                if self._active_scans.get(key) is threading.current_thread():
-                    self._active_scans.pop(key, None)
 
     def _wait_scans(self, threads, max_wait=0.05):
         deadline = time.monotonic() + max_wait
@@ -1327,10 +1431,12 @@ class CompletedDownloadWorker(threading.Thread):
         with self._scan_lock:
             existing = self._active_scans.get(key)
             if existing is not None and existing.is_alive():
+                self._enqueue_pending_scan(key, owning_folder, tree=root)
                 return 0
             thread = threading.Thread(
-                target=self._scan_tree_worker,
-                args=(root, key, result),
+                target=self._run_folder_scan,
+                args=(key, owning_folder),
+                kwargs={"initial_tree": root, "result": result},
                 name=f"incoming-tree-{root.name or 'tree'}",
                 daemon=True,
             )
@@ -1340,14 +1446,14 @@ class CompletedDownloadWorker(threading.Thread):
         self._wait_scans([thread], max_wait=0.05)
         return result[0]
 
-    def _scan_tree_worker(self, root, key, result):
+    def _scan_tree_worker(self, root, key=None, result=None):
         try:
             try:
                 if not root.is_dir():
-                    return
+                    return 0
             except OSError as err:
                 logger.debug("submit_tree cannot access %s: %s", root, err)
-                return
+                return 0
 
             count = 0
             for child in root.rglob("*"):
@@ -1360,13 +1466,12 @@ class CompletedDownloadWorker(threading.Thread):
                     if is_network_disconnect_error(err, child):
                         break
                     continue
-            result[0] = count
+            if result is not None:
+                result[0] = count
+            return count
         except OSError as exc:
             logger.debug("submit_tree scan failed on %s: %s", root, exc)
-        finally:
-            with self._scan_lock:
-                if self._active_scans.get(key) is threading.current_thread():
-                    self._active_scans.pop(key, None)
+            return 0
 
     def _resolve_relocation(self, path):
         with self.lock:
@@ -1384,57 +1489,89 @@ class CompletedDownloadWorker(threading.Thread):
         is_dest_temp = is_temporary_download(destination)
         if not self.enabled or (not is_dest_video and not is_dest_temp):
             return False
+        if self._is_in_inventory(destination) or self._was_imported(destination):
+            return False
+
         with self.lock:
             if self.relocations.get(source) == destination and destination in self.candidates:
                 return True
-            candidate = self.candidates.pop(source, None)
-        if candidate is None:
+            in_candidates = source in self.candidates
+
+        if not in_candidates:
+            if self._is_in_inventory(source) or self._was_imported(source):
+                return False
             connection = connect(self.database_path)
             try:
                 row = connection.execute(
-                    "SELECT size,modified_ns,stable_since,attempts,status,first_seen_at FROM incoming_files WHERE path=?", (source,)
+                    "SELECT size,modified_ns,stable_since,attempts,status,first_seen_at FROM incoming_files WHERE path=? AND status IN ('waiting','scanning','downloading')",
+                    (source,)
                 ).fetchone()
             finally:
                 connection.close()
-            if not row or row["status"] not in ("waiting", "scanning", "downloading"):
+            if not row:
                 return False
-            candidate = {"size": row["size"], "modified_ns": row["modified_ns"],
-                         "stable_since": float(row["stable_since"] or time.time()),
-                         "attempts": int(row["attempts"] or 0),
-                         "is_temporary": row["status"] == "downloading",
-                         "first_seen_at": row["first_seen_at"]}
+
         try:
             stat = Path(destination).stat()
         except OSError:
             return False
-        if is_dest_temp:
-            candidate["is_temporary"] = True
-            if candidate.get("size") != stat.st_size or candidate.get("modified_ns") != stat.st_mtime_ns:
-                candidate.update(size=stat.st_size, modified_ns=stat.st_mtime_ns, stable_since=time.time())
-            with self.lock:
+
+        with self.lock:
+            if in_candidates:
+                candidate = self.candidates.pop(source, None)
+                if candidate is None:
+                    return False
+            else:
+                if source in self.candidates:
+                    candidate = self.candidates.pop(source, None)
+                else:
+                    if self._is_in_inventory(source) or self._was_imported(source):
+                        return False
+                    connection = connect(self.database_path)
+                    try:
+                        row = connection.execute(
+                            "SELECT size,modified_ns,stable_since,attempts,status,first_seen_at FROM incoming_files WHERE path=? AND status IN ('waiting','scanning','downloading')",
+                            (source,)
+                        ).fetchone()
+                    finally:
+                        connection.close()
+                    if not row:
+                        return False
+                    candidate = {
+                        "size": row["size"],
+                        "modified_ns": row["modified_ns"],
+                        "stable_since": float(row["stable_since"] or time.time()),
+                        "attempts": int(row["attempts"] or 0),
+                        "is_temporary": row["status"] == "downloading",
+                        "first_seen_at": row["first_seen_at"],
+                    }
+
+            if is_dest_temp:
+                candidate["is_temporary"] = True
+                if candidate.get("size") != stat.st_size or candidate.get("modified_ns") != stat.st_mtime_ns:
+                    candidate.update(size=stat.st_size, modified_ns=stat.st_mtime_ns, stable_since=time.time())
                 self.relocations[source] = destination
                 self.candidates[destination] = candidate
-            self._save_state(source, "moved", detail=f"Download state transferred to {destination}")
-            self._save_state(destination, "downloading", stat=stat, stable_since=candidate["stable_since"],
-                             attempts=candidate.get("attempts", 0), detail="Incoming download in progress",
-                             first_seen_at=candidate.get("first_seen_at"))
-            self.wake.set()
-            return True
-        else:
-            if candidate.get("is_temporary"):
-                candidate["is_temporary"] = False
-                candidate["stable_since"] = time.time()
-            if candidate.get("size") != stat.st_size or candidate.get("modified_ns") != stat.st_mtime_ns:
-                candidate.update(size=stat.st_size, modified_ns=stat.st_mtime_ns, stable_since=time.time())
-            with self.lock:
+                self._save_state(source, "moved", detail=f"Download state transferred to {destination}")
+                self._save_state(destination, "downloading", stat=stat, stable_since=candidate["stable_since"],
+                                 attempts=candidate.get("attempts", 0), detail="Incoming download in progress",
+                                 first_seen_at=candidate.get("first_seen_at"))
+                self.wake.set()
+                return True
+            else:
+                if candidate.get("is_temporary"):
+                    candidate["is_temporary"] = False
+                    candidate["stable_since"] = time.time()
+                if candidate.get("size") != stat.st_size or candidate.get("modified_ns") != stat.st_mtime_ns:
+                    candidate.update(size=stat.st_size, modified_ns=stat.st_mtime_ns, stable_since=time.time())
                 self.relocations[source] = destination
                 self.candidates[destination] = candidate
-            self._save_state(source, "moved", detail=f"Download completed and renamed to {destination}")
-            self._save_state(destination, "waiting", stat=stat, stable_since=candidate["stable_since"],
-                             attempts=candidate.get("attempts", 0), detail=f"Waiting for video to remain unchanged for {self.settle_seconds // 60} minute(s)",
-                             first_seen_at=candidate.get("first_seen_at"))
-            self.wake.set()
-            return True
+                self._save_state(source, "moved", detail=f"Download completed and renamed to {destination}")
+                self._save_state(destination, "waiting", stat=stat, stable_since=candidate["stable_since"],
+                                 attempts=candidate.get("attempts", 0), detail=f"Waiting for video to remain unchanged for {self.settle_seconds // 60} minute(s)",
+                                 first_seen_at=candidate.get("first_seen_at"))
+                self.wake.set()
+                return True
 
     def relocate_tree(self, source, destination):
         """Transfer active children when an entire download directory is moved."""
