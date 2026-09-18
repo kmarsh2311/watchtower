@@ -453,6 +453,9 @@ class InventoryTests(unittest.TestCase):
             stash = MovingStash()
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", stash, incoming, True, 60, False)
             try:
+                with worker._scan_lock:
+                    initial_threads = list(worker._all_scan_threads)
+                worker._wait_scans(initial_threads, max_wait=2.0)
                 stash.worker, stash.source, stash.destination = worker, str(source.resolve()), str(destination.resolve())
                 candidate = worker.candidates.pop(str(source.resolve()))
                 self.assertTrue(worker._scan(str(source.resolve()), candidate))
@@ -460,6 +463,9 @@ class InventoryTests(unittest.TestCase):
                 self.assertEqual(incoming_summary(root / "inventory.sqlite3")["imported"], 1)
             finally:
                 worker.stop()
+                if os.name == "nt":
+                    import gc
+                    gc.collect()
 
     def test_incoming_folder_must_be_inside_a_stash_library(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
