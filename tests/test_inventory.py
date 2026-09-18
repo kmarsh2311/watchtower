@@ -301,18 +301,21 @@ class InventoryTests(unittest.TestCase):
             incoming = root / "Incoming"
             incoming.mkdir()
             worker = CompletedDownloadWorker(database, FakeStash(""), incoming, True, 60, False)
-            video = incoming / "finished.mp4"
-            video.write_bytes(b"video")
-            worker.stash.path = str(video.resolve())
-            self.assertTrue(worker.submit(video))
-            candidate = worker.candidates[str(video.resolve())]
-            worker.evaluate_once(candidate["stable_since"] + 59)
-            self.assertEqual(worker.stash.scans, [])
-            worker.evaluate_once(candidate["stable_since"] + 60)
-            self.assertEqual(worker.stash.scans, [[str(video.resolve())]])
-            self.assertTrue(worker.stash.flags["scanGeneratePreviews"])
-            self.assertTrue(worker.stash.flags["scanGenerateSprites"])
-            self.assertEqual(incoming_summary(database)["imported"], 1)
+            try:
+                video = incoming / "finished.mp4"
+                video.write_bytes(b"video")
+                worker.stash.path = str(video.resolve())
+                self.assertTrue(worker.submit(video))
+                candidate = worker.candidates[str(video.resolve())]
+                worker.evaluate_once(candidate["stable_since"] + 59)
+                self.assertEqual(worker.stash.scans, [])
+                worker.evaluate_once(candidate["stable_since"] + 60)
+                self.assertEqual(worker.stash.scans, [[str(video.resolve())]])
+                self.assertTrue(worker.stash.flags["scanGeneratePreviews"])
+                self.assertTrue(worker.stash.flags["scanGenerateSprites"])
+                self.assertEqual(incoming_summary(database)["imported"], 1)
+            finally:
+                worker.stop()
 
     def test_completed_download_ignores_temporary_and_preexisting_files(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -327,9 +330,12 @@ class InventoryTests(unittest.TestCase):
             temporary = incoming / "new.mp4.part"
             temporary.write_bytes(b"partial")
             worker = CompletedDownloadWorker(database, object(), incoming, True, 300, False)
-            worker._fallback_check()
-            self.assertEqual(worker.candidates, {})
-            self.assertFalse(worker.submit(temporary))
+            try:
+                worker._fallback_check()
+                self.assertEqual(worker.candidates, {})
+                self.assertFalse(worker.submit(temporary))
+            finally:
+                worker.stop()
 
     def test_restart_recovers_recent_direct_final_video_but_not_old_files(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -343,8 +349,11 @@ class InventoryTests(unittest.TestCase):
             recent = incoming / "direct-final.m4v"
             recent.write_bytes(b"new")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
-            self.assertIn(str(recent.resolve()), worker.candidates)
-            self.assertNotIn(str(old.resolve()), worker.candidates)
+            try:
+                self.assertIn(str(recent.resolve()), worker.candidates)
+                self.assertNotIn(str(old.resolve()), worker.candidates)
+            finally:
+                worker.stop()
 
     def test_new_download_subfolder_discovers_all_nested_videos(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -356,12 +365,11 @@ class InventoryTests(unittest.TestCase):
             (nested / "two.avi").write_bytes(b"two")
             (nested / "unfinished.mp4.part").write_bytes(b"partial")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
-            worker.candidates.clear()
-            self.assertEqual(worker.submit_tree(incoming / "Torrent"), 2)
-            worker.stopping = True
-            with worker._scan_lock:
-                for t in list(worker._active_scans.values()):
-                    t.join(timeout=1.0)
+            try:
+                worker.candidates.clear()
+                self.assertEqual(worker.submit_tree(incoming / "Torrent"), 2)
+            finally:
+                worker.stop()
 
     def test_file_change_restarts_settle_timer_after_pause(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -371,15 +379,14 @@ class InventoryTests(unittest.TestCase):
             video = incoming / "paused.mp4"
             video.write_bytes(b"first")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
-            path = str(video.resolve())
-            previous = worker.candidates[path]["stable_since"]
-            video.write_bytes(b"resumed download")
-            worker.evaluate_once(previous + 120)
-            self.assertEqual(worker.candidates[path]["stable_since"], previous + 120)
-            worker.stopping = True
-            with worker._scan_lock:
-                for t in list(worker._active_scans.values()):
-                    t.join(timeout=1.0)
+            try:
+                path = str(video.resolve())
+                previous = worker.candidates[path]["stable_since"]
+                video.write_bytes(b"resumed download")
+                worker.evaluate_once(previous + 120)
+                self.assertEqual(worker.candidates[path]["stable_since"], previous + 120)
+            finally:
+                worker.stop()
 
     def test_pending_download_move_preserves_wait_state_outside_incoming_folder(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -391,15 +398,18 @@ class InventoryTests(unittest.TestCase):
             source = incoming / "video.mp4"
             source.write_bytes(b"video")
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", object(), incoming, True, 300, False)
-            old_path = str(source.resolve())
-            stable_since = worker.candidates[old_path]["stable_since"]
-            destination = library / "video.mp4"
-            source.rename(destination)
-            self.assertTrue(worker.relocate(source, destination))
-            new_path = str(destination.resolve())
-            self.assertNotIn(old_path, worker.candidates)
-            self.assertEqual(worker.candidates[new_path]["stable_since"], stable_since)
-            self.assertEqual(worker._resolve_relocation(old_path), new_path)
+            try:
+                old_path = str(source.resolve())
+                stable_since = worker.candidates[old_path]["stable_since"]
+                destination = library / "video.mp4"
+                source.rename(destination)
+                self.assertTrue(worker.relocate(source, destination))
+                new_path = str(destination.resolve())
+                self.assertNotIn(old_path, worker.candidates)
+                self.assertEqual(worker.candidates[new_path]["stable_since"], stable_since)
+                self.assertEqual(worker._resolve_relocation(old_path), new_path)
+            finally:
+                worker.stop()
 
     def test_move_during_stash_scan_follows_destination_without_review_failure(self):
         class MovingStash:
@@ -439,15 +449,14 @@ class InventoryTests(unittest.TestCase):
             source.write_bytes(b"video")
             stash = MovingStash()
             worker = CompletedDownloadWorker(root / "inventory.sqlite3", stash, incoming, True, 60, False)
-            stash.worker, stash.source, stash.destination = worker, str(source.resolve()), str(destination.resolve())
-            candidate = worker.candidates.pop(str(source.resolve()))
-            self.assertTrue(worker._scan(str(source.resolve()), candidate))
-            self.assertEqual(stash.scans, [[str(source.resolve())], [str(destination.resolve())]])
-            self.assertEqual(incoming_summary(root / "inventory.sqlite3")["imported"], 1)
-            worker.stopping = True
-            with worker._scan_lock:
-                for t in list(worker._active_scans.values()):
-                    t.join(timeout=1.0)
+            try:
+                stash.worker, stash.source, stash.destination = worker, str(source.resolve()), str(destination.resolve())
+                candidate = worker.candidates.pop(str(source.resolve()))
+                self.assertTrue(worker._scan(str(source.resolve()), candidate))
+                self.assertEqual(stash.scans, [[str(source.resolve())], [str(destination.resolve())]])
+                self.assertEqual(incoming_summary(root / "inventory.sqlite3")["imported"], 1)
+            finally:
+                worker.stop()
 
     def test_incoming_folder_must_be_inside_a_stash_library(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -500,14 +509,17 @@ class InventoryTests(unittest.TestCase):
             incA.mkdir()
             incB.mkdir()
             worker = CompletedDownloadWorker(database, object(), None, True, 300, False, incoming_folders=[str(incA), str(incB)])
-            videoA = incA / "videoA.mp4"
-            videoB = incB / "videoB.mkv"
-            videoA.write_bytes(b"contentA")
-            videoB.write_bytes(b"contentB")
-            self.assertTrue(worker.submit(videoA))
-            self.assertTrue(worker.submit(videoB))
-            self.assertIn(str(videoA.resolve()), worker.candidates)
-            self.assertIn(str(videoB.resolve()), worker.candidates)
+            try:
+                videoA = incA / "videoA.mp4"
+                videoB = incB / "videoB.mkv"
+                videoA.write_bytes(b"contentA")
+                videoB.write_bytes(b"contentB")
+                self.assertTrue(worker.submit(videoA))
+                self.assertTrue(worker.submit(videoB))
+                self.assertIn(str(videoA.resolve()), worker.candidates)
+                self.assertIn(str(videoB.resolve()), worker.candidates)
+            finally:
+                worker.stop()
 
     def test_filename_style_choices_control_order_and_separators(self):
         options = {

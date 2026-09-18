@@ -1131,24 +1131,35 @@ class MoveWorker(threading.Thread):
 
 class CompletedDownloadWorker(threading.Thread):
     """Wait for new incoming videos to settle, then request one targeted Stash scan."""
+    def _set_incoming_folders(self, raw_folders):
+        self.incoming_folders = []
+        self._folder_variants_map = {}
+        for f in raw_folders:
+            if f:
+                try:
+                    p = Path(f)
+                    try:
+                        canonical = p.resolve()
+                    except OSError:
+                        canonical = p
+                    if canonical not in self.incoming_folders:
+                        self.incoming_folders.append(canonical)
+                    variants = self._folder_variants_map.setdefault(canonical, set())
+                    variants.add(os.path.normpath(str(p)))
+                    variants.add(os.path.normpath(str(canonical)))
+                    if os.name == "nt":
+                        variants.add(os.path.normcase(os.path.normpath(str(p))))
+                        variants.add(os.path.normcase(os.path.normpath(str(canonical))))
+                except Exception:
+                    pass
+        self.incoming_folder = self.incoming_folders[0] if self.incoming_folders else None
+
     def __init__(self, database_path, stash, incoming_folder, enabled, settle_seconds, notifications,
                  fallback_seconds=60, max_attempts=3, incoming_folders=None, track_temporary_downloads=False):
         super().__init__(daemon=True)
         self.database_path, self.stash = database_path, stash
         raw_folders = incoming_folders if incoming_folders is not None else ([incoming_folder] if incoming_folder else [])
-        self.incoming_folders = []
-        for f in raw_folders:
-            if f:
-                try:
-                    p = Path(f)
-                    if p not in self.incoming_folders:
-                        self.incoming_folders.append(p)
-                    resolved = p.resolve()
-                    if resolved not in self.incoming_folders:
-                        self.incoming_folders.append(resolved)
-                except Exception:
-                    pass
-        self.incoming_folder = self.incoming_folders[0] if self.incoming_folders else None
+        self._set_incoming_folders(raw_folders)
         self.enabled = bool(enabled and self.incoming_folders)
         self.settle_seconds = max(60, int(settle_seconds or 300))
         self.notifications = notifications
@@ -1255,7 +1266,10 @@ class CompletedDownloadWorker(threading.Thread):
         if not folder:
             return ""
         try:
-            return os.path.normpath(str(folder))
+            norm = os.path.normpath(str(folder))
+            if os.name == "nt":
+                norm = os.path.normcase(norm)
+            return norm
         except Exception:
             return str(folder)
 
@@ -1277,7 +1291,9 @@ class CompletedDownloadWorker(threading.Thread):
         path_variants = self._normalize_prefixes(path)
         best_match = None
         for folder in self.incoming_folders:
-            folder_variants = self._normalize_prefixes(folder)
+            folder_variants = set(self._normalize_prefixes(folder))
+            if hasattr(self, "_folder_variants_map") and folder in self._folder_variants_map:
+                folder_variants.update(self._folder_variants_map[folder])
             matched = any(
                 pv == fv or pv.startswith(fv + os.sep)
                 for fv in folder_variants
@@ -2367,9 +2383,19 @@ class CompletedDownloadWorker(threading.Thread):
                 self._active_recovery_scans.pop(root_str, None)
                 break
 
-    def stop(self):
+    def stop(self, timeout=5.0):
         self.stopping = True
         self.wake.set()
+        with self._scan_lock:
+            scans = list(self._active_scans.values())
+        for t in scans:
+            if t is not threading.current_thread() and t.is_alive():
+                t.join(timeout=timeout)
+        with self._recovery_lock:
+            recovs = list(self._active_recovery_scans.values())
+        for t in recovs:
+            if t is not threading.current_thread() and t.is_alive():
+                t.join(timeout=timeout)
 
     def run(self):
         while not self.stopping:
@@ -2992,11 +3018,9 @@ def main():
                             _new_folders = new_cfg.get("incoming_folders")
                             _new_folder_str = new_cfg.get("incoming_folder")
                             if _new_folders is not None:
-                                incoming_worker.incoming_folders = [Path(f).resolve() for f in _new_folders if f]
-                                incoming_worker.incoming_folder = incoming_worker.incoming_folders[0] if incoming_worker.incoming_folders else None
+                                incoming_worker._set_incoming_folders(_new_folders)
                             elif _new_folder_str is not None:
-                                incoming_worker.incoming_folder = Path(_new_folder_str).resolve() if _new_folder_str else None
-                                incoming_worker.incoming_folders = [incoming_worker.incoming_folder] if incoming_worker.incoming_folder else []
+                                incoming_worker._set_incoming_folders([_new_folder_str] if _new_folder_str else [])
                             _new_enabled = new_cfg.get("incoming_imports")
                             if _new_enabled is not None:
                                 incoming_worker.enabled = bool(_new_enabled and incoming_worker.incoming_folders)
