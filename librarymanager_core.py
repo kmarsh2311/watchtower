@@ -479,6 +479,35 @@ def record_activity(database_path: Path, category: str, action: str, status: str
         connection.close()
 
 
+def record_monitor_lifecycle(database_path: Path, action: str, status: str, detail: str = "", metadata: dict | None = None) -> bool:
+    """Append a monitor lifecycle audit event (e.g. MONITOR STARTED, MONITOR STOPPED).
+
+    Prevents duplicate entries if the identical action was recorded within 3 seconds
+    (for instance during rapid reloads or redundant signals). Preserves existing history.
+    """
+    connection = connect(database_path)
+    try:
+        last = connection.execute(
+            "SELECT action, recorded_at FROM activity_log WHERE category='monitor' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if last and last["action"] == action:
+            try:
+                last_dt = datetime.fromisoformat(last["recorded_at"])
+                current_dt = datetime.now(timezone.utc)
+                if abs((current_dt - last_dt).total_seconds()) < 3.0:
+                    return False
+            except Exception:
+                pass
+    finally:
+        connection.close()
+
+    record_activity(
+        database_path, "monitor", action, status,
+        severity="info", detail=detail, metadata=metadata or {}
+    )
+    return True
+
+
 def recent_activity(database_path: Path, limit: int = 250) -> list[dict]:
     connection = connect(database_path)
     try:
