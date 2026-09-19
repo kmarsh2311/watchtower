@@ -479,6 +479,18 @@ def record_activity(database_path: Path, category: str, action: str, status: str
         connection.close()
 
 
+def record_monitor_lifecycle(database_path: Path, action: str, status: str, detail: str = "", metadata: dict | None = None) -> bool:
+    """Append a monitor lifecycle audit event (e.g. MONITOR STARTED, MONITOR STOPPED).
+
+    Relies on process ownership and lifecycle transitions to prevent duplicates.
+    """
+    record_activity(
+        database_path, "monitor", action, status,
+        severity="info", detail=detail, metadata=metadata or {}
+    )
+    return True
+
+
 def recent_activity(database_path: Path, limit: int = 250) -> list[dict]:
     connection = connect(database_path)
     try:

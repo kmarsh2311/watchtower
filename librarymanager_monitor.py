@@ -379,7 +379,7 @@ from librarymanager_core import (
     is_verified_companion_destination,
     expect_filesystem_create, expect_filesystem_move, fingerprint_value,
     is_file_on_unavailable_root,
-                                 opensubtitles_hash, record_activity, record_filesystem_event,
+                                 opensubtitles_hash, record_activity, record_filesystem_event, record_monitor_lifecycle,
                                  resolve_filesystem_event, refresh_scene_inventory, utc_now)
 
 
@@ -3399,6 +3399,11 @@ def main():
         except Exception as exc:
             logger.warning("Failed scheduling observer on %s: %s", root, exc)
     update_status(database_path, args.token, os.getpid(), "running", available, unavailable)
+    record_monitor_lifecycle(
+        database_path, "MONITOR STARTED", "running",
+        detail=f"MONITOR STARTED — watching {len(available)} library root(s) (PID {os.getpid()})",
+        metadata={"pid": os.getpid(), "roots": available, "unavailable_roots": unavailable}
+    )
     for root in unavailable:
         record_activity(database_path, "monitor", "library root unavailable", "warning", severity="warning",
                         old_path=root, detail="Root was unavailable when monitoring started")
@@ -3525,6 +3530,15 @@ def main():
         incoming_worker.stop()
         incoming_worker.join(timeout=10)
         update_status(database_path, args.token, os.getpid(), "stopped", available, unavailable)
+        if "fatal_error" not in locals():
+            try:
+                record_monitor_lifecycle(
+                    database_path, "MONITOR STOPPED", "stopped",
+                    detail=f"MONITOR STOPPED — filesystem watcher stopped (PID {os.getpid()})",
+                    metadata={"pid": os.getpid()}
+                )
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
