@@ -748,12 +748,35 @@ def pending_filesystem_events(database_path: Path, limit: int = 50) -> list[dict
             elif ev_type == "moved" and dest:
                 try:
                     if Path(dest).is_file():
-                        known = connection.execute(
-                            "SELECT 1 FROM files WHERE path=? AND exists_on_disk=1",
+                        dest_row = connection.execute(
+                            "SELECT file_id FROM files WHERE path=? AND exists_on_disk=1",
                             (dest,)
                         ).fetchone()
-                        if known:
-                            resolved = True
+                        if dest_row:
+                            fid = r.get("file_id")
+                            if not fid and src:
+                                src_row = connection.execute("SELECT file_id FROM files WHERE path=?", (src,)).fetchone()
+                                if src_row:
+                                    fid = src_row["file_id"]
+                            if not fid and src:
+                                act = connection.execute(
+                                    "SELECT file_id FROM activity_log WHERE old_path=? AND file_id IS NOT NULL ORDER BY recorded_at DESC LIMIT 1",
+                                    (src,)
+                                ).fetchone()
+                                if act:
+                                    fid = act["file_id"]
+                            if not fid and src:
+                                inv = connection.execute(
+                                    "SELECT file_id FROM inventory_events WHERE old_path=? ORDER BY id DESC LIMIT 1",
+                                    (src,)
+                                ).fetchone()
+                                if inv:
+                                    fid = inv["file_id"]
+                            if fid:
+                                if dest_row["file_id"] == fid:
+                                    resolved = True
+                            else:
+                                resolved = True
                         elif is_verified_companion_destination(connection, dest, src):
                             resolved = True
                 except OSError:

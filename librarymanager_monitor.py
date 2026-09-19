@@ -4,6 +4,7 @@
 import argparse
 import base64
 import errno
+import stat
 import threading
 import time
 from pathlib import Path
@@ -977,7 +978,13 @@ def inventoried_source(database_path, source):
 def tracked_move(database_path, source, destination):
     """Verify a move from the exact inventoried path without changing any record."""
     target = Path(destination)
-    if not target.is_file():
+    try:
+        st = target.stat()
+        if not stat.S_ISREG(st.st_mode):
+            return None, "Destination is not a file"
+    except OSError as err:
+        if is_transient_fs_error(err) or is_network_disconnect_error(err, destination):
+            raise
         return None, "Destination is not a file"
     connection = connect(database_path)
     try:
@@ -1256,6 +1263,11 @@ class MoveWorker(threading.Thread):
     def evaluate_deferred(self, force=True):
         self._evaluate_deferred_moves(force=force)
 
+    def on_root_recovered(self, root=None):
+        """When a library root reconnects, evaluate deferred moves and recover any pending moves."""
+        self.recover_pending_moves()
+        self.evaluate_deferred(force=True)
+
     def recover_pending_moves(self):
         """Recover pending unverified/deferred moves from persistent database records on startup/restart."""
         connection = connect(self.database_path)
@@ -1305,7 +1317,7 @@ class MoveWorker(threading.Thread):
                     last_transient_error = None
                     break
                 except OSError as err:
-                    if is_transient_fs_error(err):
+                    if is_transient_fs_error(err) or is_network_disconnect_error(err, destination):
                         last_transient_error = err
                         if attempt < self.max_immediate_retries:
                             delay = self.immediate_retry_delays[min(attempt, len(self.immediate_retry_delays) - 1)]
@@ -1371,6 +1383,14 @@ class MoveWorker(threading.Thread):
                                 severity="warning", old_path=source, new_path=destination, detail=reason)
                 notify(self.notifications, f"File move needs review: {Path(destination).name}")
                 return
+            conflict = destination_inventory_conflict(self.database_path, destination, row)
+            if conflict:
+                record_activity(self.database_path, "reconciliation", "external move", "review",
+                                severity="warning", scene_id=row['scene_id'], file_id=row["file_id"],
+                                old_path=source, new_path=destination, detail=conflict)
+                notify(self.notifications, f"Destination conflict: {Path(destination).name}")
+                return
+
             compatibility_candidate = (self.transcoder_compatibility
                                        and likely_transcoder_replacement(source, destination))
             if compatibility_candidate:
@@ -3430,6 +3450,8 @@ def main():
                         logger.warning("Failed scheduling observer on reconnected root %s: %s", root, exc)
                 if incoming_worker:
                     incoming_worker.trigger_recovery_scan(root, max_wait=0)
+                if worker:
+                    worker.on_root_recovered(root)
 
             reload_monitor_if_code_changed(
                 loaded_code_signature, runtime_path, runtime, worker,

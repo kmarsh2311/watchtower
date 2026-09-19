@@ -1,3 +1,4 @@
+import errno
 import json
 import tempfile
 from pathlib import Path
@@ -532,6 +533,8 @@ def test_move_worker_permanent_permission_error_exhausts_retries_and_retains_for
         assert stash.metadata_scan.call_count == 0
 
         # Move is retained in deferred_moves for safe later retry
+        print("DEBUG deferred:", worker.deferred_moves, "calls:", stash.metadata_scan.call_count)
+        for a in recent_activity(db): print("ACTIVITY:", dict(a))
         assert (str(source), str(dest)) in worker.deferred_moves
         assert worker.deferred_moves[(str(source), str(dest))]["attempts"] == 1
 
@@ -585,6 +588,8 @@ def test_move_worker_deferred_recovery_when_file_lock_clears(monkeypatch):
         worker.run()
 
         # Initially locked and deferred
+        print("DEBUG deferred:", worker.deferred_moves, "calls:", stash.metadata_scan.call_count)
+        for a in recent_activity(db): print("ACTIVITY:", dict(a))
         assert (str(source), str(dest)) in worker.deferred_moves
         assert stash.metadata_scan.call_count == 0
 
@@ -797,3 +802,322 @@ def test_rapid_consecutive_moves_chain_a_to_b_to_c():
         pending = pending_filesystem_events(db)
         assert len(pending) == 1
         assert pending[0]["source_path"] == str(orphan_src)
+
+
+def test_scenario_1_nas_disconnect_during_move_and_recovers(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "nas_src" / "scene.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"VIDEO_NAS_DATA_" * 15000)
+        _insert_file(db, source, file_id="f_nas", scene_id="s_nas", exists=1)
+
+        dest = tmp / "nas_dst" / "scene.mp4"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        record_filesystem_event(db, "moved", str(source), str(dest), initial_status="pending")
+
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-nas-1"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {
+            "findScene": {"files": [{"id": "f_nas", "path": str(dest), "basename": dest.name}]}
+        }
+
+        # 1. NAS disconnects during move (EIO / network error)
+        disconnected = [True]
+        orig_tracked = tracked_move
+
+        def fake_tracked_move(database_path, src, dst):
+            if disconnected[0]:
+                raise OSError(errno.EIO, "Input/output error: network share dropped")
+            return orig_tracked(database_path, src, dst)
+
+        monkeypatch.setattr("librarymanager_monitor.tracked_move", fake_tracked_move)
+
+        worker = MoveWorker(
+            db, stash, enabled=True, notifications=False,
+            max_immediate_retries=1, immediate_retry_delays=[0.01],
+            max_deferred_attempts=5, initial_deferred_delay=100.0
+        )
+        worker.submit(str(source), str(dest))
+        worker.items.put((None, None))
+        worker.run()
+
+        # While disconnected: move is deferred, scan NOT called, event remains pending
+        print("DEBUG deferred:", worker.deferred_moves, "calls:", stash.metadata_scan.call_count)
+        for a in recent_activity(db): print("ACTIVITY:", dict(a))
+        assert (str(source), str(dest)) in worker.deferred_moves
+        assert stash.metadata_scan.call_count == 0
+        assert len(pending_filesystem_events(db)) == 1
+
+        # 2. NAS share recovers
+        disconnected[0] = False
+        worker.on_root_recovered(str(dest.parent))
+
+        # Confirmed: auto-recovery triggered Stash scan, updated files, and resolved pending event
+        assert stash.metadata_scan.call_count == 1
+        assert stash.metadata_scan.call_args[1]["paths"] == [str(dest)]
+        assert len(pending_filesystem_events(db)) == 0
+
+        con = connect(db)
+        f_row = con.execute("SELECT path, exists_on_disk FROM files WHERE file_id='f_nas'").fetchone()
+        con.close()
+        assert f_row["path"] == str(dest)
+        assert f_row["exists_on_disk"] == 1
+
+
+def test_scenario_2_cross_volume_copy_interrupted_or_incomplete():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "vol1" / "movie.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"COMPLETE_SOURCE_DATA_" * 10000)
+        _insert_file(db, source, file_id="f_part", scene_id="s_part", exists=1)
+
+        dest = tmp / "vol2" / "movie.mp4"
+        dest.parent.mkdir(parents=True)
+        # Interrupted copy: destination has only 500 bytes instead of 210,000 bytes
+        dest.write_bytes(b"PARTIAL_DATA" * 10)
+
+        record_filesystem_event(db, "moved", str(source), str(dest), initial_status="pending")
+
+        stash = MagicMock()
+        worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        worker.submit(str(source), str(dest))
+        worker.items.put((None, None))
+        worker.run()
+
+        # Incomplete copy rejected: scan never called, files table not updated
+        assert stash.metadata_scan.call_count == 0
+        con = connect(db)
+        f_row = con.execute("SELECT path, exists_on_disk FROM files WHERE file_id='f_part'").fetchone()
+        con.close()
+        assert f_row["path"] == str(source)
+        # Event remains pending review
+        assert len(pending_filesystem_events(db)) == 1
+
+
+def test_scenario_3_destination_filename_conflict_with_another_scene():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        # Scene 1: video A
+        vid_a = tmp / "vault" / "video_a.mp4"
+        vid_a.parent.mkdir(parents=True)
+        vid_a.write_bytes(b"DATA_A_" * 15000)
+        _insert_file(db, vid_a, file_id="f_1", scene_id="s_1", exists=1)
+
+        # Scene 2: video B (already exists at dest_path)
+        dest_b = tmp / "vault" / "existing_b.mp4"
+        dest_b.write_bytes(b"DATA_B_" * 15000)
+        _insert_file(db, dest_b, file_id="f_2", scene_id="s_2", exists=1)
+
+        # User attempts move video_a to existing_b
+        record_filesystem_event(db, "moved", str(vid_a), str(dest_b), initial_status="pending")
+
+        stash = MagicMock()
+        worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        worker.submit(str(vid_a), str(dest_b))
+        worker.items.put((None, None))
+        worker.run()
+
+        # Destination conflict rejected: scan never called, neither scene modified
+        assert stash.metadata_scan.call_count == 0
+        con = connect(db)
+        f1 = con.execute("SELECT path FROM files WHERE file_id='f_1'").fetchone()
+        f2 = con.execute("SELECT path FROM files WHERE file_id='f_2'").fetchone()
+        con.close()
+        assert f1["path"] == str(vid_a)
+        assert f2["path"] == str(dest_b)
+        assert len(pending_filesystem_events(db)) == 1
+
+
+def test_scenario_4_multiple_videos_move_simultaneously():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        stash = MagicMock()
+        stash.metadata_scan.side_effect = lambda paths: f"job-{Path(paths[0]).name}"
+        stash.wait_for_job.return_value = True
+
+        files_to_move = []
+        scene_files_map = {}
+        for i in range(5):
+            src = tmp / f"src_{i}" / f"clip_{i}.mp4"
+            src.parent.mkdir(parents=True)
+            src.write_bytes(f"VIDEO_DATA_{i}_".encode() * 15000)
+            _insert_file(db, src, file_id=f"f_{i}", scene_id=f"s_{i}", exists=1)
+
+            dst = tmp / f"dst_{i}" / f"clip_{i}.mp4"
+            dst.parent.mkdir(parents=True)
+            dst.write_bytes(src.read_bytes())
+            src.unlink()
+
+            record_filesystem_event(db, "moved", str(src), str(dst), initial_status="pending")
+            files_to_move.append((str(src), str(dst)))
+            scene_files_map[f"s_{i}"] = [{"id": f"f_{i}", "path": str(dst), "basename": dst.name}]
+
+        stash.call_GQL.side_effect = lambda query, vars: {
+            "findScene": {"files": scene_files_map.get(str(vars["id"]), [])}
+        }
+
+        worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        for s, d in files_to_move:
+            worker.submit(s, d)
+        worker.items.put((None, None))
+        worker.run()
+
+        # All 5 files processed and scanned
+        assert stash.metadata_scan.call_count == 5
+        assert len(pending_filesystem_events(db)) == 0
+
+        con = connect(db)
+        for i in range(5):
+            row = con.execute("SELECT path, exists_on_disk FROM files WHERE file_id=?", (f"f_{i}",)).fetchone()
+            assert row["path"] == str(tmp / f"dst_{i}" / f"clip_{i}.mp4")
+            assert row["exists_on_disk"] == 1
+        con.close()
+
+
+def test_scenario_5_stash_unavailable_or_fails_during_reconnection():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "src" / "scene.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"VIDEO_DATA_" * 15000)
+        _insert_file(db, source, file_id="f_err", scene_id="s_err", exists=1)
+
+        dest = tmp / "dst" / "scene.mp4"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        record_filesystem_event(db, "moved", str(source), str(dest), initial_status="pending")
+
+        # Stash raises network/server failure during metadata scan
+        stash = MagicMock()
+        stash.metadata_scan.side_effect = RuntimeError("500 Internal Server Error: Stash unavailable")
+
+        worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        worker.submit(str(source), str(dest))
+        worker.items.put((None, None))
+        worker.run()
+
+        # Fails closed: original path preserved, event kept pending for later recovery
+        con = connect(db)
+        f_row = con.execute("SELECT path, exists_on_disk FROM files WHERE file_id='f_err'").fetchone()
+        con.close()
+        assert f_row["path"] == str(source)
+        assert len(pending_filesystem_events(db)) == 1
+
+
+def test_scenario_6_video_moves_outside_monitored_library():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "library" / "scene.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"VIDEO_DATA_" * 15000)
+        _insert_file(db, source, file_id="f_out", scene_id="s_out", exists=1)
+
+        outside_dest = tmp / "outside_unmonitored" / "scene.mp4"
+        outside_dest.parent.mkdir(parents=True)
+        outside_dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        record_filesystem_event(db, "moved", str(source), str(outside_dest), initial_status="pending")
+
+        # Stash ignores paths outside library roots
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-outside"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {"findScene": {"files": []}}
+
+        worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        worker.submit(str(source), str(outside_dest))
+        worker.items.put((None, None))
+        worker.run()
+
+        # Fails closed: files table not updated to unmonitored path
+        con = connect(db)
+        f_row = con.execute("SELECT path, exists_on_disk FROM files WHERE file_id='f_out'").fetchone()
+        con.close()
+        assert f_row["path"] == str(source)
+        assert len(pending_filesystem_events(db)) == 1
+
+
+def test_scenario_7_watchtower_restarts_during_large_batch_of_moves():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        stash = MagicMock()
+        stash.metadata_scan.side_effect = lambda paths: f"job-batch-{Path(paths[0]).name}"
+        stash.wait_for_job.return_value = True
+
+        scene_files_map = {}
+        # Batch of 10 video moves + 10 companion JPG moves pending in DB before restart
+        for i in range(10):
+            src = tmp / f"src_{i}" / f"movie_{i}.mp4"
+            src.parent.mkdir(parents=True)
+            src.write_bytes(f"BATCH_DATA_{i}_".encode() * 15000)
+            _insert_file(db, src, file_id=f"fb_{i}", scene_id=f"sb_{i}", exists=1)
+
+            src_jpg = tmp / f"src_{i}" / f"movie_{i}.mp4.jpg"
+            src_jpg.write_bytes(b"JPG_DATA")
+
+            dst = tmp / f"dst_{i}" / f"movie_{i}.mp4"
+            dst.parent.mkdir(parents=True)
+            dst.write_bytes(src.read_bytes())
+
+            dst_jpg = tmp / f"dst_{i}" / f"movie_{i}.mp4.jpg"
+            dst_jpg.write_bytes(src_jpg.read_bytes())
+
+            src.unlink()
+            src_jpg.unlink()
+
+            record_filesystem_event(db, "moved", str(src), str(dst), initial_status="pending")
+            record_filesystem_event(db, "moved", str(src_jpg), str(dst_jpg), initial_status="pending")
+            scene_files_map[f"sb_{i}"] = [{"id": f"fb_{i}", "path": str(dst), "basename": dst.name}]
+
+        stash.call_GQL.side_effect = lambda query, vars: {
+            "findScene": {"files": scene_files_map.get(str(vars["id"]), [])}
+        }
+
+        assert len(pending_filesystem_events(db)) == 20
+
+        # Restart Watchtower: MoveWorker initializes with empty in-memory state,
+        # recovers all 10 pending video moves from DB, and processes them sequentially
+        worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        worker.items.put((None, None))
+        worker.run()
+
+        # All 10 videos scanned and updated, all 10 videos + 10 companion JPG moves resolved
+        assert stash.metadata_scan.call_count == 10
+        assert len(pending_filesystem_events(db)) == 0
+
+        con = connect(db)
+        for i in range(10):
+            row = con.execute("SELECT path, exists_on_disk FROM files WHERE file_id=?", (f"fb_{i}",)).fetchone()
+            assert row["path"] == str(tmp / f"dst_{i}" / f"movie_{i}.mp4")
+            assert row["exists_on_disk"] == 1
+        con.close()
