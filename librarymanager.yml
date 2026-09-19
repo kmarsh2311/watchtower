@@ -115,7 +115,7 @@ settings:
     type: STRING
   incomingSettleMinutes:
     displayName: Wait Before Adding a Video
-    description: Minutes that a video must remain completely unchanged before Library Manager asks Stash to add it (default: 5). If 0 or blank, the 5-minute default is used.
+    description: "Minutes that a video must remain completely unchanged before Library Manager asks Stash to add it (default: 5). If 0 or blank, the 5-minute default is used."
     type: NUMBER
   generateContactSheets:
     displayName: Generate Visual Contact Sheets (CSM)
