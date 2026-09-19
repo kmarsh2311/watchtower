@@ -26,7 +26,7 @@ from librarymanager_core import (
                                  release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
                                  reconcile_filesystem_events, pending_filesystem_events,
                                  pending_transcoder_candidates, promote_transcoder_candidate, utc_now)
-from librarymanager_core import dashboard_data, incoming_summary, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due
+from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due
 
 
 QUERY = """
@@ -1252,12 +1252,17 @@ def main():
             finally:
                 connection.close()
 
+        monitor_summary = filesystem_monitor_summary(database_path)
+        pending = pending_filesystem_events(database_path)
+        is_running = monitor_summary.get("state") == "running" and not monitor_summary.get("is_stale") and monitor_summary.get("pid_alive")
+        annotate_pending_events_processing_state(pending, monitor_summary.get("active_moves", []), monitor_running=is_running, database_path=database_path)
+
         result = {
-            "monitor": filesystem_monitor_summary(database_path),
+            "monitor": monitor_summary,
             "incoming": incoming_summary(database_path),
             "active_jobs": active_jobs,
             "activity": recent_activity(database_path, 250),
-            "pending_events": pending_filesystem_events(database_path),
+            "pending_events": pending,
             "transcoder_candidates": pending_transcoder_candidates(database_path),
             "server_time": time.time(),
             "current_scene_count": current_scene_count(stash),

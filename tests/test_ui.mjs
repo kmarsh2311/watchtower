@@ -211,3 +211,11 @@ test("active moves appear as Reconnecting in HAPPENING NOW and are excluded from
   assert.match(css, /\.lm-terminal-line\.reconnecting/);
   assert.match(css, /\.lm-terminal-line\.waiting_retry/);
 });
+
+test("early companion JPGs appear as WAITING FOR VIDEO and ambiguous standalone JPGs appear under Needs Attention", () => {
+  assert.match(javascript, /waitingMoves = unresolved\.filter\(e => e\.processing_state === "waiting_video"\)/);
+  assert.match(javascript, /"WAITING FOR VIDEO"/);
+  assert.match(javascript, /`WAITING FOR VIDEO: \${targetVideo}`/);
+  assert.match(javascript, /attentionCount = attentionEvents\.length/);
+  assert.match(css, /\.lm-terminal-line\.waiting_video/);
+});
