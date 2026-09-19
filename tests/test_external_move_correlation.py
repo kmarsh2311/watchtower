@@ -728,3 +728,72 @@ def test_move_worker_recovers_deferred_move_on_restart(monkeypatch):
         con.close()
         assert f_row["path"] == str(dest)
         assert f_row["exists_on_disk"] == 1
+
+
+def test_rapid_consecutive_moves_chain_a_to_b_to_c():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        path_a = tmp / "dir_a" / "movie.mp4"
+        path_a.parent.mkdir(parents=True)
+        path_a.write_bytes(b"VIDEO_CHAIN_DATA_" * 15000)
+        _insert_file(db, path_a, file_id="f_chain", scene_id="s_chain", exists=1)
+
+        comp_a = tmp / "dir_a" / "movie.mp4.jpg"
+        comp_a.write_bytes(b"COMPANION_CHAIN_DATA")
+
+        path_b = tmp / "dir_b" / "movie.mp4"
+        path_b.parent.mkdir(parents=True)
+        comp_b = tmp / "dir_b" / "movie.mp4.jpg"
+
+        path_c = tmp / "dir_c" / "movie.mp4"
+        path_c.parent.mkdir(parents=True)
+        comp_c = tmp / "dir_c" / "movie.mp4.jpg"
+        # Files moved A -> B, then rapidly B -> C before MoveWorker finished processing A -> B
+        path_c.write_bytes(path_a.read_bytes())
+        comp_c.write_bytes(comp_a.read_bytes())
+        path_a.unlink()
+        comp_a.unlink()
+
+        # Both moves recorded in filesystem_events (video and companions)
+        record_filesystem_event(db, "moved", str(path_a), str(path_b), initial_status="pending")
+        record_filesystem_event(db, "moved", str(path_b), str(path_c), initial_status="pending")
+        record_filesystem_event(db, "moved", str(comp_a), str(comp_b), initial_status="pending")
+        record_filesystem_event(db, "moved", str(comp_b), str(comp_c), initial_status="pending")
+
+        # Add an unrelated orphan companion to verify it remains pending
+        orphan_src = tmp / "dir_a" / "orphan.mp4.jpg"
+        orphan_dst = tmp / "dir_c" / "orphan.mp4.jpg"
+        orphan_dst.write_bytes(b"ORPHAN")
+        record_filesystem_event(db, "moved", str(orphan_src), str(orphan_dst), initial_status="pending")
+
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-chain-1"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {
+            "findScene": {"files": [{"id": "f_chain", "path": str(path_c), "basename": path_c.name}]}
+        }
+
+        worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        worker.items.put((None, None))
+        worker.run()
+
+        # 1. Stash metadata scan should be called on the final destination path_c
+        assert stash.metadata_scan.call_count == 1
+        assert stash.metadata_scan.call_args[1]["paths"] == [str(path_c)]
+
+        # 2. Files table must be updated to path_c while preserving original file_id and scene_id
+        con = connect(db)
+        f_row = con.execute("SELECT path, exists_on_disk, file_id, scene_id FROM files WHERE file_id='f_chain'").fetchone()
+        con.close()
+        assert f_row is not None
+        assert f_row["path"] == str(path_c)
+        assert f_row["exists_on_disk"] == 1
+        assert f_row["scene_id"] == "s_chain"
+
+        # 3. Both chained video moves and both chained companion moves resolved; only unrelated orphan remains
+        pending = pending_filesystem_events(db)
+        assert len(pending) == 1
+        assert pending[0]["source_path"] == str(orphan_src)
