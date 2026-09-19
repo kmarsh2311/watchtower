@@ -653,3 +653,78 @@ def test_video_move_reconnection_automatically_resolves_companion_jpg_warnings()
         pending = pending_filesystem_events(db)
         assert len(pending) == 1
         assert pending[0]["source_path"] == str(orphan_src)
+
+
+def test_move_worker_recovers_deferred_move_on_restart(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "source" / "scene.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"VIDEO_DATA_" * 15000)
+        _insert_file(db, source, file_id="f_rst", scene_id="s_rst", exists=1)
+
+        dest = tmp / "dest" / "scene.mp4"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        record_filesystem_event(db, "moved", str(source), str(dest), initial_status="pending")
+
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-rst-1"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {
+            "findScene": {"files": [{"id": "f_rst", "path": str(dest), "basename": dest.name}]}
+        }
+
+        # 1. First worker session: file is locked by transient PermissionError
+        locked = [True]
+        original_tracked_move = tracked_move
+
+        def fake_tracked_move(database_path, src, dst):
+            if locked[0]:
+                raise PermissionError(1, f"Operation not permitted: {dst}")
+            return original_tracked_move(database_path, src, dst)
+
+        monkeypatch.setattr("librarymanager_monitor.tracked_move", fake_tracked_move)
+
+        worker1 = MoveWorker(
+            db, stash, enabled=True, notifications=False,
+            max_immediate_retries=1, immediate_retry_delays=[0.01],
+            max_deferred_attempts=3, initial_deferred_delay=100.0
+        )
+        worker1.submit(str(source), str(dest))
+        worker1.items.put((None, None))
+        worker1.run()
+
+        # Before restart: worker1 deferred the move, scan not called
+        assert (str(source), str(dest)) in worker1.deferred_moves
+        assert stash.metadata_scan.call_count == 0
+        assert len(pending_filesystem_events(db)) == 1
+
+        # 2. Watchtower restarts: worker1 is stopped, in-memory state is discarded
+        # File lock now clears on disk
+        locked[0] = False
+
+        worker2 = MoveWorker(db, stash, enabled=True, notifications=False)
+        # worker2 starts with empty in-memory deferred_moves, but recover_pending_moves
+        # recovers the pending move from persistent database records
+        worker2.items.put((None, None))
+        worker2.run()
+
+        # Confirmed: worker2 recovered the move from database, verified identity,
+        # called Stash scan, updated files, and resolved the event
+        assert stash.metadata_scan.call_count == 1
+        assert stash.metadata_scan.call_args[1]["paths"] == [str(dest)]
+        pending = pending_filesystem_events(db)
+        assert len(pending) == 0
+
+        # Files table was updated
+        con = connect(db)
+        f_row = con.execute("SELECT path, exists_on_disk FROM files WHERE file_id='f_rst'").fetchone()
+        con.close()
+        assert f_row["path"] == str(dest)
+        assert f_row["exists_on_disk"] == 1

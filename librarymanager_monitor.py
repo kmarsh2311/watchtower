@@ -1087,7 +1087,7 @@ def correlate_deleted_source(database_path, source, candidate_destinations):
 def resolve_associated_companion_moves(database_path: Path, video_destination: str, video_source: str = None) -> list[str]:
     """After a video is successfully reconnected, verify and resolve any associated pending companion moves."""
     connection = connect(database_path)
-    resolved_keys = []
+    resolved = []
     try:
         dest_video = Path(video_destination)
         parent_dir = str(dest_video.parent)
@@ -1112,16 +1112,18 @@ def resolve_associated_companion_moves(database_path: Path, video_destination: s
                     "UPDATE filesystem_events SET status='resolved' WHERE event_key=?",
                     (r["event_key"],)
                 )
-                resolved_keys.append(r["event_key"])
-                record_activity(
-                    database_path, "companion", "external companion move", "resolved",
-                    old_path=src_p, new_path=dest_p,
-                    detail=f"Companion move verified and resolved alongside reconnected video {dest_video.name}"
-                )
+                resolved.append((r["event_key"], src_p, dest_p))
         connection.commit()
-        return resolved_keys
     finally:
         connection.close()
+
+    for event_key, src_p, dest_p in resolved:
+        record_activity(
+            database_path, "companion", "external companion move", "resolved",
+            old_path=src_p, new_path=dest_p,
+            detail=f"Companion move verified and resolved alongside reconnected video {Path(video_destination).name}"
+        )
+    return [r[0] for r in resolved]
 
 
 class MoveWorker(threading.Thread):
@@ -1134,13 +1136,15 @@ class MoveWorker(threading.Thread):
         self.transcoder_compatibility = bool(transcoder_compatibility)
         self.items = queue.Queue()
         self.stopping = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.deferred_moves = {}
         self.max_immediate_retries = int(max_immediate_retries)
         self.immediate_retry_delays = list(immediate_retry_delays)
         self.max_deferred_attempts = int(max_deferred_attempts)
         self.initial_deferred_delay = float(initial_deferred_delay)
         self.max_deferred_backoff = float(max_deferred_backoff)
+        self.queued_pairs = set()
+        self.recover_pending_moves()
 
     @property
     def automatic_move_reconciliation(self):
@@ -1151,6 +1155,10 @@ class MoveWorker(threading.Thread):
         self.enabled = bool(value)
 
     def submit(self, source, destination):
+        with self.lock:
+            if (source, destination) in self.queued_pairs:
+                return
+            self.queued_pairs.add((source, destination))
         self.items.put((source, destination))
 
     def stop(self):
@@ -1178,6 +1186,25 @@ class MoveWorker(threading.Thread):
     def evaluate_deferred(self, force=True):
         self._evaluate_deferred_moves(force=force)
 
+    def recover_pending_moves(self):
+        """Recover pending unverified/deferred moves from persistent database records on startup/restart."""
+        connection = connect(self.database_path)
+        try:
+            rows = connection.execute(
+                "SELECT source_path, destination_path FROM filesystem_events WHERE event_type='moved' AND status='pending'"
+            ).fetchall()
+            for r in rows:
+                src, dst = r["source_path"], r["destination_path"]
+                if src and dst and Path(dst).suffix.lower() in VIDEO_EXTENSIONS:
+                    with self.lock:
+                        already = (src, dst) in self.deferred_moves or (src, dst) in self.queued_pairs
+                    if not already:
+                        self.submit(src, dst)
+        except Exception as exc:
+            logger.debug("recover_pending_moves failed: %s", exc)
+        finally:
+            connection.close()
+
     def run(self):
         while not self.stopping:
             timeout = self._next_timeout()
@@ -1193,6 +1220,8 @@ class MoveWorker(threading.Thread):
             self._evaluate_deferred_moves()
 
     def _process_move(self, source, destination):
+        with self.lock:
+            self.queued_pairs.discard((source, destination))
         compatibility_candidate = False
         try:
             row = None
