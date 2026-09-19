@@ -1840,12 +1840,13 @@
       const unavailableRoots = monitor.unavailable_roots || [];
       const unresolved = data?.pending_events || [];
       const reconnectingMoves = unresolved.filter(e => e.processing_state === "reconnecting" || e.processing_state === "queued");
+      const waitingMoves = unresolved.filter(e => e.processing_state === "waiting_video");
       const deferredMoves = unresolved.filter(e => e.processing_state === "deferred");
       const attentionEvents = unresolved.filter(e => !e.processing_state);
 
-      const inFlightCount = reconnectingMoves.length + deferredMoves.length;
+      const inFlightCount = reconnectingMoves.length + waitingMoves.length + deferredMoves.length;
       const totalPending = monitor.pending_events != null ? monitor.pending_events : unresolved.length;
-      const attentionCount = monitor.attention_events != null ? monitor.attention_events : Math.max(0, totalPending - inFlightCount);
+      const attentionCount = attentionEvents.length;
 
       const stream = (data?.activity || []).slice(0, 250);
       const isMonitorStale = monitor.is_stale === true || monitor.state === "stale";
@@ -2013,7 +2014,19 @@
 
         React.createElement("div", { className: "lm-terminal-section" },
           React.createElement("h3", null, "HAPPENING NOW"),
-          (waitingAndScanning.length || activeJobs.length || transcoderCandidates.length || reconnectingMoves.length || deferredMoves.length) ? React.createElement(React.Fragment, null,
+          (waitingAndScanning.length || activeJobs.length || transcoderCandidates.length || reconnectingMoves.length || waitingMoves.length || deferredMoves.length) ? React.createElement(React.Fragment, null,
+            waitingMoves.map(event => {
+              const displayName = basename(event.destination_path || event.source_path);
+              const targetVideo = event.companion_of || "VIDEO";
+              return React.createElement("div", {
+                className: "lm-terminal-line waiting_video",
+                key: `waiting-video-${event.event_key || event.last_seen_at || displayName}`
+              },
+                React.createElement("span", null, "WAITING FOR VIDEO"),
+                React.createElement("strong", { title: event.destination_path || event.source_path }, displayName),
+                React.createElement("em", null, `WAITING FOR VIDEO: ${targetVideo}`)
+              );
+            }),
             reconnectingMoves.map(event => {
               const displayName = basename(event.destination_path || event.source_path);
               const isCompanion = !!event.companion_of;

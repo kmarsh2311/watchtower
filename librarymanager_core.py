@@ -654,20 +654,36 @@ def consume_expected_create(database_path: Path, path: str) -> bool:
         connection.close()
 
 
-def annotate_pending_events_processing_state(pending_events: list[dict], active_moves: list[dict]) -> list[dict]:
+def annotate_pending_events_processing_state(
+    pending_events: list[dict],
+    active_moves: list[dict],
+    monitor_running: bool = True,
+    grace_seconds: float = 5.0,
+    current_time: float | None = None,
+    connection=None,
+    database_path: Path | None = None,
+) -> list[dict]:
     """Annotate pending filesystem events with in-flight worker processing states.
 
-    If active_moves is empty (e.g. monitor is stopped, crashed, stale, or idle),
-    all pending events remain with processing_state=None so they appear in Needs Attention.
+    - Moves actively being reconnected by MoveWorker get processing_state='reconnecting'.
+    - Queued moves get processing_state='queued' (presented as reconnecting).
+    - Moves deferred for retry get processing_state='deferred'.
+    - Companion files colocated with active/queued/pending video moves get processing_state='reconnecting'.
+    - Companion files arriving before their video within a bounded 5-second grace period
+      get processing_state='waiting_video' ('WAITING FOR VIDEO').
+    - Ambiguous companions (multiple candidate videos) and standalone JPGs (no associated video)
+      never enter the grace period and remain visible under Needs Attention (processing_state=None).
+    - If the grace period expires without a video move, or if the monitor stops/crashes,
+      processing_state is None so the event surfaces in Needs Attention.
     """
-    if not active_moves:
+    if not monitor_running:
         for ev in pending_events:
             ev["processing_state"] = None
         return pending_events
 
     move_map = {}
     video_destinations = []
-    for m in active_moves:
+    for m in (active_moves or []):
         src = m.get("source_path")
         dst = m.get("destination_path")
         if src and dst:
@@ -678,11 +694,22 @@ def annotate_pending_events_processing_state(pending_events: list[dict], active_
         if src:
             move_map[src] = m
 
+    # Also index video moves present in pending_events (in case both moved simultaneously)
+    pending_video_destinations = []
+    for ev in pending_events:
+        dst = ev.get("destination_path")
+        ev_type = ev.get("event_type")
+        if ev_type == "moved" and dst and Path(dst).suffix.lower() in VIDEO_EXTENSIONS:
+            pending_video_destinations.append(ev)
+
+    now_dt = datetime.fromtimestamp(current_time, tz=timezone.utc) if current_time else datetime.now(timezone.utc)
+
     for ev in pending_events:
         ev["processing_state"] = None
         src = ev.get("source_path")
         dst = ev.get("destination_path")
 
+        # 1. Direct move match against active moves
         matched = None
         if src and dst and (src, dst) in move_map:
             matched = move_map[(src, dst)]
@@ -691,10 +718,21 @@ def annotate_pending_events_processing_state(pending_events: list[dict], active_
         elif src and src in move_map:
             matched = move_map[src]
 
-        if not matched and dst:
+        if matched:
+            ev["processing_state"] = matched.get("status", "reconnecting")
+            if "attempts" in matched:
+                ev["processing_attempts"] = matched["attempts"]
+            if "last_error" in matched:
+                ev["processing_error"] = matched["last_error"]
+            continue
+
+        # 2. Check if this is a companion file
+        if dst:
             try:
                 cand = Path(dst)
                 if cand.suffix.lower() in COMPANION_EXTENSIONS:
+                    # 2a. Check if associated video is in active_moves
+                    companion_video_found = False
                     for vm in video_destinations:
                         vid_dst = Path(vm["destination_path"])
                         if cand.parent == vid_dst.parent:
@@ -703,20 +741,140 @@ def annotate_pending_events_processing_state(pending_events: list[dict], active_
                             c_name = cand.name.lower()
                             v_name = vid_dst.name.lower()
                             if c_stem == v_stem or c_name == v_name + cand.suffix.lower():
-                                matched = vm
+                                ev["processing_state"] = vm.get("status", "reconnecting")
                                 ev["companion_of"] = vid_dst.name
+                                companion_video_found = True
                                 break
+                    if companion_video_found:
+                        continue
+
+                    # 2b. Check if associated video is in pending_events (moved concurrently)
+                    for pvm in pending_video_destinations:
+                        pvid_dst = Path(pvm["destination_path"])
+                        if cand.parent == pvid_dst.parent:
+                            c_stem = cand.stem.lower()
+                            pv_stem = pvid_dst.stem.lower()
+                            c_name = cand.name.lower()
+                            pv_name = pvid_dst.name.lower()
+                            if c_stem == pv_stem or c_name == pv_name + cand.suffix.lower():
+                                ev["processing_state"] = "reconnecting"
+                                ev["companion_of"] = pvid_dst.name
+                                companion_video_found = True
+                                break
+                    if companion_video_found:
+                        continue
+
+                    # 2c. Associated video hasn't been detected yet: evaluate if this is an early companion vs ambiguous/standalone
+                    # Check if this is explicitly a compound companion (e.g. video.mp4.jpg)
+                    is_compound = False
+                    target_video = None
+                    try:
+                        stem_p = Path(cand.stem)
+                        if stem_p.suffix.lower() in VIDEO_EXTENSIONS:
+                            is_compound = True
+                            target_video = cand.stem
+                        elif src:
+                            src_stem_p = Path(Path(src).stem)
+                            if src_stem_p.suffix.lower() in VIDEO_EXTENSIONS:
+                                is_compound = True
+                                target_video = src_stem_p.name
+                    except Exception:
+                        pass
+
+                    # Check for ambiguity in destination directory (multiple video files with matching stem)
+                    is_ambiguous = False
+                    dest_parent = cand.parent
+                    try:
+                        if dest_parent.is_dir():
+                            dest_stem = cand.stem.lower()
+                            matching_dest_vids = []
+                            for vext in VIDEO_EXTENSIONS:
+                                vp = dest_parent / (cand.stem + vext)
+                                if vp.is_file():
+                                    matching_dest_vids.append(vp)
+                            if len(matching_dest_vids) > 1:
+                                is_ambiguous = True
+                    except Exception:
+                        pass
+
+                    # If ambiguous in destination, it can never be safely paired; keep in Needs Attention
+                    if is_ambiguous:
+                        continue
+
+                    # Check if there is an associated video in source directory or database
+                    has_video_association = is_compound
+                    if not has_video_association:
+                        # Check source directory on disk
+                        try:
+                            if src:
+                                src_parent = Path(src).parent
+                                if src_parent.is_dir():
+                                    for vext in VIDEO_EXTENSIONS:
+                                        if (src_parent / (Path(src).stem + vext)).is_file():
+                                            has_video_association = True
+                                            target_video = Path(src).stem + vext
+                                            break
+                        except Exception:
+                            pass
+
+                    if not has_video_association and (connection or database_path):
+                        # Check database files table to see if a video with this stem was inventoried
+                        try:
+                            con = connection
+                            should_close = False
+                            if con is None and database_path:
+                                con = connect(database_path)
+                                should_close = True
+                            try:
+                                stem_query = cand.stem
+                                rows = con.execute(
+                                    """SELECT path FROM files
+                                       WHERE (path LIKE ? OR path LIKE ?)
+                                         AND exists_on_disk=1
+                                       LIMIT 3""",
+                                    (f"%/{stem_query}.%", f"%/{stem_query}")
+                                ).fetchall()
+                                video_rows = [r["path"] for r in rows if Path(r["path"]).suffix.lower() in VIDEO_EXTENSIONS]
+                                if len(video_rows) == 1:
+                                    has_video_association = True
+                                    target_video = Path(video_rows[0]).name
+                                elif len(video_rows) > 1:
+                                    is_ambiguous = True
+                            finally:
+                                if should_close and con:
+                                    con.close()
+                        except Exception:
+                            pass
+
+                    # If ambiguous, or if it is a standalone JPG with no video association:
+                    # Do not treat as waiting for video; leave processing_state = None (Needs Attention)
+                    if is_ambiguous or not has_video_association:
+                        continue
+
+                    # Bounded grace window for verified early companion JPG waiting for its video
+                    seen_str = ev.get("first_seen_at") or ev.get("last_seen_at")
+                    age = None
+                    if seen_str:
+                        try:
+                            dt = datetime.fromisoformat(seen_str)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            age = max(0.0, (now_dt - dt).total_seconds())
+                        except Exception:
+                            age = None
+
+                    if age is not None and age <= grace_seconds:
+                        ev["processing_state"] = "waiting_video"
+                        ev["companion_of"] = target_video or cand.stem
+                        continue
+                    else:
+                        # Grace period expired: leaves processing_state = None (Needs Attention)
+                        pass
             except Exception:
                 pass
 
-        if matched:
-            ev["processing_state"] = matched.get("status", "reconnecting")
-            if "attempts" in matched:
-                ev["processing_attempts"] = matched["attempts"]
-            if "last_error" in matched:
-                ev["processing_error"] = matched["last_error"]
-
     return pending_events
+
 
 
 def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
@@ -742,7 +900,8 @@ def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
             )]
         monitor = filesystem_monitor_summary(database_path)
         pending_events = pending_filesystem_events(database_path)
-        annotate_pending_events_processing_state(pending_events, monitor.get("active_moves", []))
+        is_running = monitor.get("state") == "running" and not monitor.get("is_stale") and monitor.get("pid_alive")
+        annotate_pending_events_processing_state(pending_events, monitor.get("active_moves", []), monitor_running=is_running, database_path=database_path)
         return {
             "inventory": dict(inventory_row) if inventory_row else None,
             "rename_queue": queue_counts,
@@ -1436,7 +1595,15 @@ def filesystem_monitor_summary(database_path: Path) -> dict:
                 active_moves = []
 
         total_pending = sum(counts.values())
-        attention_events = max(0, total_pending - len(active_moves))
+        attention_events = total_pending
+        if effective_state == "running" and not is_stale and pid_alive and total_pending > 0:
+            pending_rows = [dict(row) for row in connection.execute(
+                "SELECT event_key, event_type, source_path, destination_path, first_seen_at, last_seen_at FROM filesystem_events WHERE status='pending'"
+            )]
+            annotate_pending_events_processing_state(pending_rows, active_moves, monitor_running=True, connection=connection, database_path=database_path)
+            attention_events = sum(1 for r in pending_rows if not r.get("processing_state"))
+        elif effective_state == "running" and not is_stale and pid_alive:
+            attention_events = 0
 
         return {
             "state": effective_state,
