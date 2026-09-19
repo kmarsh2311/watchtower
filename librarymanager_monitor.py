@@ -983,13 +983,33 @@ def tracked_move(database_path, source, destination):
     try:
         row = connection.execute("SELECT * FROM files WHERE path=?", (source,)).fetchone()
         if not row:
+            curr = source
+            visited = {curr}
+            while curr:
+                parent = connection.execute(
+                    "SELECT source_path FROM filesystem_events WHERE destination_path=? AND event_type='moved' ORDER BY rowid DESC",
+                    (curr,)
+                ).fetchone()
+                if not parent or not parent["source_path"] or parent["source_path"] in visited:
+                    break
+                curr = parent["source_path"]
+                visited.add(curr)
+                cand = connection.execute("SELECT * FROM files WHERE path=?", (curr,)).fetchone()
+                if cand:
+                    row = cand
+                    break
+        if not row:
             return None, "Source path is not in the inventory"
         if row["size"] is not None and target.stat().st_size != int(row["size"]):
             return None, "Destination size differs from the inventory"
         expected = fingerprint_value(row["fingerprints_json"], "oshash")
         if expected and opensubtitles_hash(target) != expected:
             return None, "Destination oshash differs from the inventory"
-        return dict(row), "Exact source move verified by size" + (" and oshash" if expected else "")
+        origin = row["path"]
+        detail = "Exact source move verified by size" + (" and oshash" if expected else "")
+        if origin != source:
+            detail = f"Chained move from {Path(origin).name} verified by size" + (" and oshash" if expected else "")
+        return dict(row), detail
     finally:
         connection.close()
 
@@ -1124,6 +1144,56 @@ def resolve_associated_companion_moves(database_path: Path, video_destination: s
             detail=f"Companion move verified and resolved alongside reconnected video {Path(video_destination).name}"
         )
     return [r[0] for r in resolved]
+
+
+def resolve_chained_move_events(database_path: Path, origin_source: str, intermediate_source: str, final_destination: str) -> list[str]:
+    """Resolve intermediate pending moved events between origin_source and final_destination."""
+    connection = connect(database_path)
+    resolved_keys = []
+    try:
+        curr_dest = intermediate_source
+        visited = set()
+        chain_steps = [(intermediate_source, final_destination)]
+        while curr_dest and curr_dest not in visited:
+            visited.add(curr_dest)
+            rows = connection.execute(
+                "SELECT event_key, source_path, destination_path FROM filesystem_events "
+                "WHERE destination_path=? AND event_type='moved'",
+                (curr_dest,)
+            ).fetchall()
+            if not rows:
+                break
+            for r in rows:
+                connection.execute(
+                    "UPDATE filesystem_events SET status='resolved' WHERE event_key=?",
+                    (r["event_key"],)
+                )
+                resolved_keys.append(r["event_key"])
+                chain_steps.append((r["source_path"], r["destination_path"]))
+                curr_dest = r["source_path"]
+                if curr_dest == origin_source:
+                    break
+
+        for step_src, step_dst in chain_steps:
+            src_stem = str(Path(step_src).with_suffix(''))
+            dst_stem = str(Path(step_dst).with_suffix(''))
+            comp_rows = connection.execute(
+                "SELECT event_key, source_path, destination_path FROM filesystem_events "
+                "WHERE event_type='moved' AND status='pending'"
+            ).fetchall()
+            for cr in comp_rows:
+                cs = cr["source_path"]
+                cd = cr["destination_path"]
+                if cs and cd and cs.startswith(src_stem) and cd.startswith(dst_stem):
+                    connection.execute(
+                        "UPDATE filesystem_events SET status='resolved' WHERE event_key=?",
+                        (cr["event_key"],)
+                    )
+                    resolved_keys.append(cr["event_key"])
+        connection.commit()
+        return resolved_keys
+    finally:
+        connection.close()
 
 
 class MoveWorker(threading.Thread):
@@ -1285,6 +1355,18 @@ class MoveWorker(threading.Thread):
                     transcode_replacement = True
                     reason = "Likely same-folder transcoder replacement accepted by explicit compatibility setting"
             if not row:
+                if reason == "Destination is not a file":
+                    conn = connect(self.database_path)
+                    try:
+                        has_next = conn.execute(
+                            "SELECT 1 FROM filesystem_events WHERE source_path=? AND event_type='moved' AND status='pending'",
+                            (destination,)
+                        ).fetchone()
+                    finally:
+                        conn.close()
+                    if has_next:
+                        logger.debug("Move %s -> %s destination not on disk but has subsequent move; awaiting chain resolution", source, destination)
+                        return
                 record_activity(self.database_path, "filesystem", "external move", "review",
                                 severity="warning", old_path=source, new_path=destination, detail=reason)
                 notify(self.notifications, f"File move needs review: {Path(destination).name}")
@@ -1367,6 +1449,8 @@ class MoveWorker(threading.Thread):
                     resolve_filesystem_event(self.database_path, "moved", source, destination)
                     resolve_filesystem_event(self.database_path, "deleted", source)
                     resolve_filesystem_event(self.database_path, "created", destination)
+                    if row["path"] != source:
+                        resolve_chained_move_events(self.database_path, row["path"], source, destination)
                 if compatibility_candidate:
                     resolve_filesystem_event(self.database_path, "deleted", source)
                     resolve_filesystem_event(self.database_path, "created", destination)
@@ -1392,7 +1476,7 @@ class MoveWorker(threading.Thread):
 
                 # Automatically verify and resolve associated companion JPG warnings
                 try:
-                    resolve_associated_companion_moves(self.database_path, destination, source)
+                    resolve_associated_companion_moves(self.database_path, destination, row["path"])
                 except Exception as comp_res_err:
                     logger.debug("Failed to resolve associated companion moves for %s: %s", destination, comp_res_err)
             else:
