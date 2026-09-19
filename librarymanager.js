@@ -1853,6 +1853,8 @@
       let filteredStream = stream;
       if (terminalFilter === "problems") {
         filteredStream = stream.filter(r => r.severity === "error" || r.severity === "warning" || r.status === "failed" || r.status === "review");
+      } else if (terminalFilter === "attention") {
+        filteredStream = totalProblems === 0 ? [] : stream.filter(r => (r.severity === "error" || r.severity === "warning" || r.status === "failed" || r.status === "review"));
       } else if (terminalFilter === "added") {
         filteredStream = stream.filter(r => r.category === "incoming" && r.status === "imported");
       } else if (terminalFilter === "renamed") {
@@ -2223,9 +2225,14 @@
               }, `ALL (${stream.length})`),
               React.createElement("button", {
                 type: "button",
+                className: `lm-terminal-filter-pill ${terminalFilter === "attention" ? "active" : ""}`,
+                onClick: () => setTerminalFilter("attention")
+              }, `⚠️ Needs Attention (${totalProblems})`),
+              React.createElement("button", {
+                type: "button",
                 className: `lm-terminal-filter-pill ${terminalFilter === "problems" ? "active" : ""}`,
                 onClick: () => setTerminalFilter("problems")
-              }, `⚠️ PROBLEMS (${problemsCount})`),
+              }, `Warning History (${problemsCount})`),
               React.createElement("button", {
                 type: "button",
                 className: `lm-terminal-filter-pill ${terminalFilter === "added" ? "active" : ""}`,
@@ -2296,7 +2303,7 @@
                     row.old_path && React.createElement("div", { className: "lm-drawer-path" }, React.createElement("b", null, "BEFORE: "), React.createElement("code", null, row.old_path)),
                     row.new_path && React.createElement("div", { className: "lm-drawer-path" }, React.createElement("b", null, "AFTER: "), React.createElement("code", null, row.new_path)),
                     row.detail && React.createElement("div", { className: "lm-drawer-detail" }, React.createElement("b", null, "DETAIL: "), row.detail))));
-            }) : React.createElement("p", { className: "lm-terminal-empty" }, `No events match filter “${terminalFilter}”.`))),
+            }) : React.createElement("p", { className: "lm-terminal-empty" }, terminalFilter === "attention" ? "No items currently require attention. The watcher is listening." : `No events match filter “${terminalFilter}”.`))),
 
         React.createElement("footer", null,
           React.createElement("span", null, "Watchtower Live Terminal • Deep History Active • Full exports in Activity tab"),

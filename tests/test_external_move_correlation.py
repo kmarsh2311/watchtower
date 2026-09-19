@@ -301,3 +301,140 @@ def test_failed_companion_move_remains_unresolved():
 
         pending = pending_filesystem_events(db)
         assert len(pending) == 1
+
+
+from librarymanager_monitor import CompletedDownloadWorker, LibraryEventHandler
+
+
+class DummyEvent:
+    def __init__(self, src_path, dest_path=None, is_directory=False):
+        self.src_path = str(src_path)
+        self.dest_path = str(dest_path) if dest_path else None
+        self.is_directory = is_directory
+
+
+def test_existing_video_moved_to_incoming_folder_does_not_enter_download_queue():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        incoming_dir = tmp / "incoming"
+        incoming_dir.mkdir(parents=True)
+        library_dir = tmp / "library"
+        library_dir.mkdir(parents=True)
+
+        source = library_dir / "scene1.mp4"
+        source.write_bytes(b"EXISTING_VIDEO_" * 10000)
+        _insert_file(db, source, file_id="vid_orig", scene_id="400", exists=1)
+
+        dest = incoming_dir / "scene1.mp4"
+        dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-move-1"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {
+            "findScene": {"files": [{"id": "vid_orig", "path": str(dest), "basename": dest.name}]}
+        }
+
+        move_worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        incoming_worker = CompletedDownloadWorker(
+            db, stash, incoming_folder=str(incoming_dir), enabled=True,
+            settle_seconds=300, notifications=False, fallback_seconds=60,
+            incoming_folders=[str(incoming_dir)]
+        )
+
+        handler = LibraryEventHandler(
+            database_path=db,
+            worker=move_worker,
+            notifications=False,
+            incoming_worker=incoming_worker
+        )
+
+        # Emit on_moved from library into incoming folder
+        event = DummyEvent(src_path=source, dest_path=dest)
+        handler.on_moved(event)
+
+        # 1. Verify destination was NOT added to incoming_worker candidate queue
+        assert str(dest.resolve()) not in incoming_worker.candidates
+        assert len(incoming_worker.candidates) == 0
+
+        # 2. Verify MoveWorker received the move and successfully reconciled
+        move_worker.items.put((None, None))
+        move_worker.run()
+
+        # Stash scan was called only by MoveWorker (exactly 1 metadata_scan call)
+        assert stash.metadata_scan.call_count == 1
+        assert stash.metadata_scan.call_args[1]["paths"] == [str(dest)]
+
+        # No pending warnings remain
+        assert len(pending_filesystem_events(db)) == 0
+
+
+def test_genuinely_new_download_processes_normally():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        incoming_dir = tmp / "incoming"
+        incoming_dir.mkdir(parents=True)
+
+        new_download = incoming_dir / "brand_new_scene.mp4"
+        new_download.write_bytes(b"BRAND_NEW_DATA_" * 10000)
+
+        stash = MagicMock()
+        incoming_worker = CompletedDownloadWorker(
+            db, stash, incoming_folder=str(incoming_dir), enabled=True,
+            settle_seconds=300, notifications=False, fallback_seconds=60,
+            incoming_folders=[str(incoming_dir)]
+        )
+
+        # Submit new download
+        accepted = incoming_worker.submit(str(new_download))
+        assert accepted is True
+        assert str(new_download.resolve()) in incoming_worker.candidates
+        assert incoming_worker.candidates[str(new_download.resolve())]["last_saved_status"] == "waiting"
+
+
+def test_ambiguous_matches_do_not_reconnect_or_discard_new_download():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        incoming_dir = tmp / "incoming"
+        incoming_dir.mkdir(parents=True)
+
+        content = b"AMBIGUOUS_DATA_" * 10000
+        src1 = tmp / "lib1" / "dup1.mp4"
+        src1.parent.mkdir(parents=True)
+        src1.write_bytes(content)
+        _insert_file(db, src1, file_id="f_dup1", scene_id="1", exists=0)
+
+        src2 = tmp / "lib2" / "dup2.mp4"
+        src2.parent.mkdir(parents=True)
+        src2.write_bytes(content)
+        _insert_file(db, src2, file_id="f_dup2", scene_id="2", exists=0)
+
+        src1.unlink()
+        src2.unlink()
+
+        # A new download arrives in incoming with identical content
+        incoming_file = incoming_dir / "maybe_new.mp4"
+        incoming_file.write_bytes(content)
+
+        stash = MagicMock()
+        incoming_worker = CompletedDownloadWorker(
+            db, stash, incoming_folder=str(incoming_dir), enabled=True,
+            settle_seconds=300, notifications=False, fallback_seconds=60,
+            incoming_folders=[str(incoming_dir)]
+        )
+
+        # Because 2 missing library files match, it is ambiguous.
+        # It must NOT be rejected as a verified library move, and must NOT be discarded.
+        accepted = incoming_worker.submit(str(incoming_file))
+        assert accepted is True
+        assert str(incoming_file.resolve()) in incoming_worker.candidates
