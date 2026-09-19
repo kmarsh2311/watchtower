@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.11 — 2026-09-19
+
+- File-move reliability & transient retry: bounded retries with exponential backoff for transient filesystem permission and lock errors (EPERM, EACCES, EBUSY) during moved file verification, preserving moves for safe later retry rather than abandoning them.
+- Rapid chained move support: follow persistent move history and verify final destination identity for rapid chained/consecutive moves (A -> B -> C).
+- Safe NAS recovery: retain in-flight moves across network-share disconnects and recover unverified moves automatically on startup or root reconnection.
+- Automatic companion resolution: automatically verify and resolve companion image sidecars (.jpg, .png, etc.) alongside reconnected videos upon successful Stash reconciliation.
+- Monitor lifecycle logging: record MONITOR STARTED and MONITOR STOPPED events in activity history with timestamps, using process ownership and state transitions to prevent duplicate entries during plugin reloads.
+- Reconnecting status & attention accuracy: distinguish in-flight file moves actively being processed by MoveWorker as "Reconnecting" (or "Waiting for retry") in HAPPENING NOW, eliminating false "Needs Attention" warnings.
+- Early companion grace window: add a bounded 5-second grace period displaying "WAITING FOR VIDEO" for companion JPGs that arrive ahead of their video move.
+- Strict ambiguity & failure visibility: ambiguous companions matching multiple videos and standalone JPGs without video association remain visible and actionable under Needs Attention, never hidden.
+
 ## 1.0.10 — 2026-09-17
 
 - Non-blocking incoming scans: fallback checks, startup recovery, and network reconnect recovery never execute synchronous recursive `rglob()` on worker or caller threads.
