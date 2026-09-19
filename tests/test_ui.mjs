@@ -199,3 +199,15 @@ test("terminal filter bar displays Needs Attention and Warning History separatel
   assert.match(javascript, /Needs Attention \(\$\{totalProblems\}\)/);
   assert.match(javascript, /Warning History \(\$\{problemsCount\}\)/);
 });
+
+test("active moves appear as Reconnecting in HAPPENING NOW and are excluded from Needs Attention", () => {
+  assert.match(javascript, /reconnectingMoves = unresolved\.filter\(e => e\.processing_state === "reconnecting" \|\| e\.processing_state === "queued"\)/);
+  assert.match(javascript, /deferredMoves = unresolved\.filter\(e => e\.processing_state === "deferred"\)/);
+  assert.match(javascript, /attentionEvents = unresolved\.filter\(e => !e\.processing_state\)/);
+  assert.match(javascript, /badgeText = isCompanion \? "RECONNECTING \(COMPANION\)" : "RECONNECTING"/);
+  assert.match(javascript, /RECONNECTING IN STASH/);
+  assert.match(javascript, /RETRY WAITING/);
+  assert.match(javascript, /WAITING FOR FILE LOCK \(ATTEMPT \$\{attempts\}\/5\)/);
+  assert.match(css, /\.lm-terminal-line\.reconnecting/);
+  assert.match(css, /\.lm-terminal-line\.waiting_retry/);
+});

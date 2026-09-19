@@ -1246,6 +1246,40 @@ a.lm-activity-scene-pill:hover {
   opacity: 0.9;
 }
 
+.lm-terminal-line.reconnecting {
+  color: #00e5ff !important;
+  text-shadow: 0 0 5px rgba(0, 229, 255, 0.45);
+}
+.lm-terminal-line.reconnecting span {
+  color: #00e5ff !important;
+  font-weight: 700;
+  letter-spacing: .05em;
+}
+.lm-terminal-line.reconnecting strong {
+  color: #39ff64 !important;
+}
+.lm-terminal-line.reconnecting em {
+  color: #00e5ff !important;
+  opacity: 0.9;
+}
+
+.lm-terminal-line.waiting_retry {
+  color: #ffb52e !important;
+  text-shadow: 0 0 5px rgba(255, 181, 46, 0.45);
+}
+.lm-terminal-line.waiting_retry span {
+  color: #ffb52e !important;
+  font-weight: 700;
+  letter-spacing: .05em;
+}
+.lm-terminal-line.waiting_retry strong {
+  color: #ffc966 !important;
+}
+.lm-terminal-line.waiting_retry em {
+  color: #ffb52e !important;
+  opacity: 0.9;
+}
+
 .lm-terminal-line.running_job {
   color: #39ff64 !important;
   text-shadow: 0 0 5px rgba(57, 255, 100, 0.45);

@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS filesystem_monitor_status (
     heartbeat_at TEXT,
     roots_json TEXT NOT NULL DEFAULT '[]',
     unavailable_roots_json TEXT NOT NULL DEFAULT '[]',
+    active_moves_json TEXT NOT NULL DEFAULT '[]',
     auto_restart_attempted_at REAL,
     auto_restart_failures INTEGER NOT NULL DEFAULT 0
 );
@@ -431,6 +432,8 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
                     "ALTER TABLE rename_queue ADD COLUMN processing_started_at REAL")
         _safe_alter(connection, "filesystem_monitor_status", "auto_restart_attempted_at",
                     "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_attempted_at REAL")
+        _safe_alter(connection, "filesystem_monitor_status", "active_moves_json",
+                    "ALTER TABLE filesystem_monitor_status ADD COLUMN active_moves_json TEXT NOT NULL DEFAULT '[]'")
         _safe_alter(connection, "filesystem_monitor_status", "auto_restart_failures",
                     "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_failures INTEGER NOT NULL DEFAULT 0")
         connection.execute(
@@ -651,6 +654,71 @@ def consume_expected_create(database_path: Path, path: str) -> bool:
         connection.close()
 
 
+def annotate_pending_events_processing_state(pending_events: list[dict], active_moves: list[dict]) -> list[dict]:
+    """Annotate pending filesystem events with in-flight worker processing states.
+
+    If active_moves is empty (e.g. monitor is stopped, crashed, stale, or idle),
+    all pending events remain with processing_state=None so they appear in Needs Attention.
+    """
+    if not active_moves:
+        for ev in pending_events:
+            ev["processing_state"] = None
+        return pending_events
+
+    move_map = {}
+    video_destinations = []
+    for m in active_moves:
+        src = m.get("source_path")
+        dst = m.get("destination_path")
+        if src and dst:
+            move_map[(src, dst)] = m
+        if dst:
+            move_map[dst] = m
+            video_destinations.append(m)
+        if src:
+            move_map[src] = m
+
+    for ev in pending_events:
+        ev["processing_state"] = None
+        src = ev.get("source_path")
+        dst = ev.get("destination_path")
+
+        matched = None
+        if src and dst and (src, dst) in move_map:
+            matched = move_map[(src, dst)]
+        elif dst and dst in move_map:
+            matched = move_map[dst]
+        elif src and src in move_map:
+            matched = move_map[src]
+
+        if not matched and dst:
+            try:
+                cand = Path(dst)
+                if cand.suffix.lower() in COMPANION_EXTENSIONS:
+                    for vm in video_destinations:
+                        vid_dst = Path(vm["destination_path"])
+                        if cand.parent == vid_dst.parent:
+                            c_stem = cand.stem.lower()
+                            v_stem = vid_dst.stem.lower()
+                            c_name = cand.name.lower()
+                            v_name = vid_dst.name.lower()
+                            if c_stem == v_stem or c_name == v_name + cand.suffix.lower():
+                                matched = vm
+                                ev["companion_of"] = vid_dst.name
+                                break
+            except Exception:
+                pass
+
+        if matched:
+            ev["processing_state"] = matched.get("status", "reconnecting")
+            if "attempts" in matched:
+                ev["processing_attempts"] = matched["attempts"]
+            if "last_error" in matched:
+                ev["processing_error"] = matched["last_error"]
+
+    return pending_events
+
+
 def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
     """Return the small read-only snapshot used by the central dashboard."""
     connection = connect(database_path)
@@ -672,11 +740,13 @@ def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
                    ORDER BY CASE status WHEN 'conflict' THEN 0 ELSE 1 END,id LIMIT 200""",
                 (preview_run["id"],),
             )]
+        monitor = filesystem_monitor_summary(database_path)
         pending_events = pending_filesystem_events(database_path)
+        annotate_pending_events_processing_state(pending_events, monitor.get("active_moves", []))
         return {
             "inventory": dict(inventory_row) if inventory_row else None,
             "rename_queue": queue_counts,
-            "monitor": filesystem_monitor_summary(database_path),
+            "monitor": monitor,
             "activity": recent_activity(database_path, activity_limit),
             "filename_preview": {"run": dict(preview_run), "rows": preview_rows} if preview_run else None,
             "pending_events": pending_events,
@@ -1358,6 +1428,16 @@ def filesystem_monitor_summary(database_path: Path) -> dict:
                 effective_state = "stale"
                 stale_reason = "No heartbeat recorded since startup"
 
+        active_moves = []
+        if effective_state == "running" and not is_stale and pid_alive:
+            try:
+                active_moves = json.loads(status["active_moves_json"] or "[]")
+            except Exception:
+                active_moves = []
+
+        total_pending = sum(counts.values())
+        attention_events = max(0, total_pending - len(active_moves))
+
         return {
             "state": effective_state,
             "raw_state": raw_state,
@@ -1372,7 +1452,9 @@ def filesystem_monitor_summary(database_path: Path) -> dict:
             "heartbeat_at": heartbeat_at,
             "roots": json.loads(status["roots_json"] or "[]"),
             "unavailable_roots": json.loads(status["unavailable_roots_json"] or "[]"),
-            "pending_events": sum(counts.values()),
+            "active_moves": active_moves,
+            "pending_events": total_pending,
+            "attention_events": attention_events,
             "event_types": counts,
         }
     finally:

@@ -1221,6 +1221,7 @@ class MoveWorker(threading.Thread):
         self.initial_deferred_delay = float(initial_deferred_delay)
         self.max_deferred_backoff = float(max_deferred_backoff)
         self.queued_pairs = set()
+        self.active_move = None
         self.recover_pending_moves()
 
     @property
@@ -1231,12 +1232,55 @@ class MoveWorker(threading.Thread):
     def automatic_move_reconciliation(self, value):
         self.enabled = bool(value)
 
+    def active_moves_summary(self):
+        with self.lock:
+            results = []
+            if self.active_move:
+                src, dst = self.active_move
+                results.append({
+                    "source_path": src,
+                    "destination_path": dst,
+                    "status": "reconnecting",
+                })
+            for (src, dst), info in self.deferred_moves.items():
+                results.append({
+                    "source_path": src,
+                    "destination_path": dst,
+                    "status": "deferred",
+                    "attempts": info.get("attempts", 1),
+                    "last_error": info.get("last_error", ""),
+                })
+            for src, dst in self.queued_pairs:
+                if (src, dst) != self.active_move and (src, dst) not in self.deferred_moves:
+                    results.append({
+                        "source_path": src,
+                        "destination_path": dst,
+                        "status": "queued",
+                    })
+            return results
+
+    def _sync_active_moves(self):
+        try:
+            summary = self.active_moves_summary()
+            connection = connect(self.database_path)
+            try:
+                connection.execute(
+                    "UPDATE filesystem_monitor_status SET active_moves_json=? WHERE id=1",
+                    (json.dumps(summary),),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+        except Exception as exc:
+            logger.debug("_sync_active_moves failed: %s", exc)
+
     def submit(self, source, destination):
         with self.lock:
             if (source, destination) in self.queued_pairs:
                 return
             self.queued_pairs.add((source, destination))
         self.items.put((source, destination))
+        self._sync_active_moves()
 
     def stop(self):
         self.stopping = True
@@ -1304,6 +1348,8 @@ class MoveWorker(threading.Thread):
     def _process_move(self, source, destination):
         with self.lock:
             self.queued_pairs.discard((source, destination))
+            self.active_move = (source, destination)
+        self._sync_active_moves()
         compatibility_candidate = False
         try:
             row = None
@@ -1515,6 +1561,11 @@ class MoveWorker(threading.Thread):
             notify(self.notifications, f"Move reconciliation failed: {Path(destination).name}")
             if compatibility_candidate:
                 promote_transcoder_review(self.database_path, source, str(error))
+        finally:
+            with self.lock:
+                if self.active_move == (source, destination):
+                    self.active_move = None
+            self._sync_active_moves()
 
 
 class CompletedDownloadWorker(threading.Thread):
@@ -3276,15 +3327,22 @@ class LibraryEventHandler(FileSystemEventHandler):
                         con.close()
 
 
-def update_status(database_path, token, pid, state, roots, unavailable):
+def update_status(database_path, token, pid, state, roots, unavailable, active_moves=None):
     try:
         connection = connect(database_path)
         try:
-            connection.execute(
-                """UPDATE filesystem_monitor_status SET token=?,pid=?,state=?,started_at=COALESCE(started_at,?),
-                       heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1 AND token=?""",
-                (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable), token),
-            )
+            if active_moves is not None:
+                connection.execute(
+                    """UPDATE filesystem_monitor_status SET token=?,pid=?,state=?,started_at=COALESCE(started_at,?),
+                           heartbeat_at=?,roots_json=?,unavailable_roots_json=?,active_moves_json=? WHERE id=1 AND token=?""",
+                    (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable), json.dumps(active_moves), token),
+                )
+            else:
+                connection.execute(
+                    """UPDATE filesystem_monitor_status SET token=?,pid=?,state=?,started_at=COALESCE(started_at,?),
+                           heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1 AND token=?""",
+                    (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable), token),
+                )
             connection.commit()
         finally:
             connection.close()
@@ -3314,7 +3372,7 @@ def claim_monitor_ownership(database_path, token, pid, roots, unavailable):
                     pass
         connection.execute(
             """UPDATE filesystem_monitor_status SET token=?,pid=?,state='starting',started_at=?,
-                   heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1""",
+                   heartbeat_at=?,roots_json=?,unavailable_roots_json=?,active_moves_json='[]' WHERE id=1""",
             (token, pid, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable)),
         )
         connection.commit()
@@ -3398,7 +3456,7 @@ def main():
             watched_roots[root] = watch
         except Exception as exc:
             logger.warning("Failed scheduling observer on %s: %s", root, exc)
-    update_status(database_path, args.token, os.getpid(), "running", available, unavailable)
+    update_status(database_path, args.token, os.getpid(), "running", available, unavailable, active_moves=[])
     record_monitor_lifecycle(
         database_path, "MONITOR STARTED", "running",
         detail=f"MONITOR STARTED — watching {len(available)} library root(s) (PID {os.getpid()})",
@@ -3509,7 +3567,8 @@ def main():
                                 control_path.unlink(missing_ok=True)
                             except Exception:
                                 pass
-            update_status(database_path, args.token, os.getpid(), "running", available, unavailable)
+            active_moves = worker.active_moves_summary() if hasattr(worker, "active_moves_summary") else []
+            update_status(database_path, args.token, os.getpid(), "running", available, unavailable, active_moves=active_moves)
             time.sleep(2)
     except KeyboardInterrupt:
         pass
@@ -3529,7 +3588,7 @@ def main():
         worker.join(timeout=10)
         incoming_worker.stop()
         incoming_worker.join(timeout=10)
-        update_status(database_path, args.token, os.getpid(), "stopped", available, unavailable)
+        update_status(database_path, args.token, os.getpid(), "stopped", available, unavailable, active_moves=[])
         if "fatal_error" not in locals():
             try:
                 record_monitor_lifecycle(
