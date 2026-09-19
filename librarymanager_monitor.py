@@ -998,7 +998,7 @@ def correlate_created_destination(database_path, destination, candidate_sources=
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT * FROM files WHERE exists_on_disk = 0 AND size = ?",
+                "SELECT * FROM files WHERE size = ?",
                 (dest_size,)
             ).fetchall()
 
@@ -1685,6 +1685,11 @@ class CompletedDownloadWorker(threading.Thread):
             return False
         if self._is_in_inventory(normalized) or self._was_imported(normalized):
             return False
+        if Path(normalized).suffix.lower() in VIDEO_EXTENSIONS:
+            source_row, _ = correlate_created_destination(self.database_path, normalized)
+            if source_row:
+                # Positively verified as an existing library video relocated to this incoming folder
+                return False
         with self.lock:
             current = self.candidates.get(normalized)
         stable_since = time.time()
@@ -2931,9 +2936,17 @@ class LibraryEventHandler(FileSystemEventHandler):
             if src_is_temp and dest_is_temp:
                 return
 
-            incoming_candidate = bool(self.incoming_worker and self.incoming_worker.submit(event.dest_path))
-            if incoming_candidate and not (Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS and not src_is_temp):
-                return
+            # An existing inventoried library video must never be submitted to CompletedDownloadWorker.
+            # MoveWorker handles its relocation and Stash reconciliation cleanly.
+            src_is_inventoried = False
+            if dest_is_video and not src_is_temp:
+                src_is_inventoried = bool(inventoried_source(self.database_path, event.src_path))
+
+            incoming_candidate = False
+            if not src_is_inventoried:
+                incoming_candidate = bool(self.incoming_worker and self.incoming_worker.submit(event.dest_path))
+                if incoming_candidate and not (Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS and not src_is_temp):
+                    return
 
             candidate_source = None
             if (getattr(self.worker, "transcoder_compatibility", False) is True

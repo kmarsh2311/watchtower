@@ -194,3 +194,8 @@ test("inventory progress formatter reports preparation and bounded percentage", 
   assert.match(format({ status: "running", processed: 50, total: 200 }), /50 of 200 files checked \(25%\)/);
   assert.match(format({ status: "running", processed: 250, total: 200 }), /\(100%\)/);
 });
+
+test("terminal filter bar displays Needs Attention and Warning History separately", () => {
+  assert.match(javascript, /Needs Attention \(\$\{totalProblems\}\)/);
+  assert.match(javascript, /Warning History \(\$\{problemsCount\}\)/);
+});
