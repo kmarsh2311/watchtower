@@ -629,6 +629,19 @@ def stop_filesystem_monitor(database_path):
         time.sleep(0.15)
         status = filesystem_monitor_summary(database_path)
         if status.get("state") == "stopped":
+            connection = connect(database_path)
+            try:
+                last = connection.execute(
+                    "SELECT action FROM activity_log WHERE category='monitor' ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if not last or last["action"] != "MONITOR STOPPED":
+                    record_monitor_lifecycle(
+                        database_path, "MONITOR STOPPED", "stopped",
+                        detail=f"MONITOR STOPPED — filesystem watcher stopped (PID {status.get('pid')})",
+                        metadata={"pid": status.get("pid")}
+                    )
+            finally:
+                connection.close()
             return {**status, "message": "Filesystem monitor stopped"}
     return {**status, "message": "Stop requested; monitor is still shutting down"}
 
