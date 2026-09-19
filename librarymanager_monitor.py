@@ -354,6 +354,7 @@ import re
 import unicodedata
 from librarymanager_core import (
     generate_video_contact_sheet, connect, consume_expected_create, consume_expected_move,
+    is_verified_companion_destination,
     expect_filesystem_create, expect_filesystem_move, fingerprint_value,
     is_file_on_unavailable_root,
                                  opensubtitles_hash, record_activity, record_filesystem_event,
@@ -972,6 +973,96 @@ def tracked_move(database_path, source, destination):
         connection.close()
 
 
+def correlate_created_destination(database_path, destination, candidate_sources=None):
+    """Find the unambiguous inventoried source for a created file, or None if ambiguous / no match."""
+    target = Path(destination)
+    try:
+        if not target.is_file():
+            return None, "Destination is not a file"
+        dest_size = target.stat().st_size
+    except OSError:
+        return None, "Could not stat destination"
+    if dest_size <= 0:
+        return None, "Destination file is empty"
+    dest_hash = opensubtitles_hash(target)
+    if not dest_hash:
+        return None, "Could not compute destination hash"
+
+    connection = connect(database_path)
+    try:
+        if candidate_sources:
+            placeholders = ",".join("?" for _ in candidate_sources)
+            rows = connection.execute(
+                f"SELECT * FROM files WHERE path IN ({placeholders}) AND size = ?",
+                (*candidate_sources, dest_size)
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                "SELECT * FROM files WHERE exists_on_disk = 0 AND size = ?",
+                (dest_size,)
+            ).fetchall()
+
+        matched = []
+        for r in rows:
+            src_p = r["path"]
+            if src_p == destination:
+                continue
+            try:
+                if Path(src_p).exists():
+                    continue
+            except OSError:
+                pass
+            expected_hash = fingerprint_value(r["fingerprints_json"], "oshash")
+            if expected_hash and expected_hash == dest_hash:
+                matched.append(dict(r))
+
+        if len(matched) == 1:
+            return matched[0], "Unambiguous source match verified by size and oshash"
+        elif len(matched) > 1:
+            return None, f"Ambiguous match: {len(matched)} candidate sources matched size and oshash"
+        return None, "No matching source found"
+    finally:
+        connection.close()
+
+
+def correlate_deleted_source(database_path, source, candidate_destinations):
+    """Find the unambiguous destination for a deleted file from candidate destinations."""
+    if not candidate_destinations:
+        return None, "No candidate destinations"
+    connection = connect(database_path)
+    try:
+        row = connection.execute("SELECT * FROM files WHERE path=?", (source,)).fetchone()
+        if not row:
+            return None, "Source not in inventory"
+        source_size = row["size"]
+        if not source_size or source_size <= 0:
+            return None, "Source size unknown or 0"
+        expected_hash = fingerprint_value(row["fingerprints_json"], "oshash")
+        if not expected_hash:
+            return None, "Source oshash unknown"
+
+        matched = []
+        for dest in candidate_destinations:
+            if dest == source:
+                continue
+            t = Path(dest)
+            try:
+                if not t.is_file() or t.stat().st_size != source_size:
+                    continue
+                if opensubtitles_hash(t) == expected_hash:
+                    matched.append(dest)
+            except OSError:
+                continue
+
+        if len(matched) == 1:
+            return matched[0], "Unambiguous destination match verified by size and oshash"
+        elif len(matched) > 1:
+            return None, f"Ambiguous match: {len(matched)} candidate destinations matched size and oshash"
+        return None, "No matching destination found"
+    finally:
+        connection.close()
+
+
 class MoveWorker(threading.Thread):
     def __init__(self, database_path, stash, enabled, notifications, transcoder_compatibility=False):
         super().__init__(daemon=True)
@@ -1091,6 +1182,8 @@ class MoveWorker(threading.Thread):
                         resolve_filesystem_event(self.database_path, "created", destination)
                     else:
                         resolve_filesystem_event(self.database_path, "moved", source, destination)
+                        resolve_filesystem_event(self.database_path, "deleted", source)
+                        resolve_filesystem_event(self.database_path, "created", destination)
                     if compatibility_candidate:
                         resolve_filesystem_event(self.database_path, "deleted", source)
                         resolve_filesystem_event(self.database_path, "created", destination)
@@ -2550,6 +2643,17 @@ class LibraryEventHandler(FileSystemEventHandler):
                 self._recent_deleted_videos = {k: v for k, v in self._recent_deleted_videos.items() if v > cutoff}
                 video_cutoff = now - 600.0
                 self._recent_video_candidates = {k: v for k, v in self._recent_video_candidates.items() if v > video_cutoff}
+            correlated_source = None
+            if Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS and getattr(self, "worker", None):
+                with self._recent_creates_lock:
+                    recent_del = list(self._recent_deleted_videos.keys())
+                if recent_del:
+                    source_row, _ = correlate_created_destination(
+                        self.database_path, event.src_path, candidate_sources=recent_del
+                    )
+                    if source_row:
+                        correlated_source = source_row["path"]
+
             candidate_source = None
             if (getattr(self.worker, "transcoder_compatibility", False) is True
                     and Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS):
@@ -2558,6 +2662,8 @@ class LibraryEventHandler(FileSystemEventHandler):
                 self.database_path, "created", event.src_path, is_directory=event.is_directory,
                 initial_status="waiting" if candidate_source else "pending"
             )
+            if correlated_source:
+                self.worker.submit(correlated_source, event.src_path)
 
     def on_deleted(self, event):
         if event.is_directory:
@@ -2589,14 +2695,27 @@ class LibraryEventHandler(FileSystemEventHandler):
                         # yet. Always grant an inventoried video the short decision window;
                         # the callback enumerates the complete folder and fails closed.
                         should_decide = True
+                correlated_dest = None
+                if Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS and getattr(self, "worker", None):
+                    with self._recent_creates_lock:
+                        recent_cand = list(self._recent_video_candidates.keys())
+                    if recent_cand:
+                        dest_path, _ = correlate_deleted_source(
+                            self.database_path, event.src_path, recent_cand
+                        )
+                        if dest_path:
+                            correlated_dest = dest_path
+
                 record_filesystem_event(
                     self.database_path, "deleted", event.src_path,
                     is_directory=event.is_directory,
                     initial_status="waiting" if should_decide else "pending"
                 )
-                if should_decide:
+                if correlated_dest:
+                    self.worker.submit(event.src_path, correlated_dest)
+                elif should_decide:
                     self._schedule_transcoder_decision(event.src_path)
-                if (not should_decide and not event.is_directory
+                elif (not event.is_directory
                         and Path(event.src_path).suffix.lower() in WATCHED_EXTENSIONS):
                     # Single-flight centralized scheduling replaces per-event Timer(3, self._notify_if_still_missing)
                     self._schedule_deletion_check(event.src_path)
@@ -2708,6 +2827,19 @@ class LibraryEventHandler(FileSystemEventHandler):
                 if not exists:
                     if self._is_path_offline(path) or is_network_disconnect_error(OSError(errno.ENOENT, "No such file"), path):
                         continue
+                    correlated_dest = None
+                    if Path(path).suffix.lower() in VIDEO_EXTENSIONS and getattr(self, "worker", None):
+                        with self._recent_creates_lock:
+                            recent_cand = list(self._recent_video_candidates.keys())
+                        if recent_cand:
+                            dest_path, _ = correlate_deleted_source(
+                                self.database_path, path, recent_cand
+                            )
+                            if dest_path:
+                                correlated_dest = dest_path
+                    if correlated_dest:
+                        self.worker.submit(path, correlated_dest)
+                        continue
                     record_activity(self.database_path, "filesystem", "external deletion", "review", severity="warning",
                                     old_path=path, detail="File remained absent after the notification delay")
                     notify(self.notifications, f"File deleted or moved without a paired event: {Path(path).name}")
@@ -2732,6 +2864,19 @@ class LibraryEventHandler(FileSystemEventHandler):
             exists = False
         if not exists:
             if self._is_path_offline(path) or is_network_disconnect_error(OSError(errno.ENOENT, "No such file"), path):
+                return
+            correlated_dest = None
+            if Path(path).suffix.lower() in VIDEO_EXTENSIONS and getattr(self, "worker", None):
+                with self._recent_creates_lock:
+                    recent_cand = list(self._recent_video_candidates.keys())
+                if recent_cand:
+                    dest_path, _ = correlate_deleted_source(
+                        self.database_path, path, recent_cand
+                    )
+                    if dest_path:
+                        correlated_dest = dest_path
+            if correlated_dest:
+                self.worker.submit(path, correlated_dest)
                 return
             record_activity(self.database_path, "filesystem", "external deletion", "review", severity="warning",
                             old_path=path, detail="File remained absent after the notification delay")
@@ -2815,6 +2960,12 @@ class LibraryEventHandler(FileSystemEventHandler):
                     record_activity(self.database_path, "companion", "external companion move", "recorded",
                                     old_path=event.src_path, new_path=event.dest_path,
                                     detail="Companion move recorded; Stash does not maintain a separate path for this file")
+                    con = connect(self.database_path)
+                    try:
+                        if is_verified_companion_destination(con, event.dest_path, event.src_path):
+                            resolve_filesystem_event(self.database_path, "moved", event.src_path, event.dest_path)
+                    finally:
+                        con.close()
 
 
 def update_status(database_path, token, pid, state, roots, unavailable):

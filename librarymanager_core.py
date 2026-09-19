@@ -255,6 +255,58 @@ VIDEO_EXTENSIONS = {
 }
 ASSOCIATED_EXTENSIONS = {".funscript", ".srt", ".vtt", ".scc", ".ttml", ".dfxp", ".lrc", ".txt"}
 IMAGE_SIDECAR_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+COMPANION_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".gif",
+    ".vtt", ".srt", ".sub", ".idx", ".nfo", ".json",
+    ".csm.jpg", ".csm.png", ".csm.webp",
+}
+
+
+def is_verified_companion_destination(connection, destination_path: str, source_path: str | None = None) -> bool:
+    """Check if a moved companion file exists at destination and pairs with an active scene video."""
+    dest = Path(destination_path)
+    try:
+        if not dest.is_file():
+            return False
+    except OSError:
+        return False
+
+    if source_path:
+        try:
+            if Path(source_path).exists():
+                return False
+        except OSError:
+            pass
+
+    dest_suffix = dest.suffix.lower()
+    if dest_suffix not in COMPANION_EXTENSIONS:
+        return False
+
+    parent_dir = dest.parent
+
+    # Case 1: Compound video name, e.g. video.mp4.jpg -> video.mp4
+    stem_path = Path(dest.stem)
+    if stem_path.suffix.lower() in VIDEO_EXTENSIONS:
+        compound_video = parent_dir / dest.stem
+        row = connection.execute(
+            "SELECT 1 FROM files WHERE path=? AND exists_on_disk=1",
+            (str(compound_video),)
+        ).fetchone()
+        if row:
+            return True
+
+    # Case 2: Same stem name, e.g. video.jpg -> video.mp4, video.mkv, etc.
+    matched_videos = []
+    for v_ext in VIDEO_EXTENSIONS:
+        vid_cand = parent_dir / (dest.stem + v_ext)
+        row = connection.execute(
+            "SELECT 1 FROM files WHERE path=? AND exists_on_disk=1",
+            (str(vid_cand),)
+        ).fetchone()
+        if row:
+            matched_videos.append(str(vid_cand))
+
+    return len(matched_videos) == 1
 
 
 def _sidecar_match_key(name: str) -> str:
@@ -637,12 +689,81 @@ def pending_filesystem_events(database_path: Path, limit: int = 50) -> list[dict
         valid_rows = []
         to_resolve = []
         for r in rows:
-            # If a deleted event was recorded, but the file currently exists on disk,
-            # it was a transient download file replacement/atomic write. Auto-resolve it!
-            if r.get("event_type") == "deleted" and r.get("source_path") and Path(r["source_path"]).exists():
+            ev_type = r.get("event_type")
+            src = r.get("source_path")
+            dest = r.get("destination_path")
+            resolved = False
+
+            if ev_type == "deleted" and src:
+                # 1. File returned to original location on disk (transient replacement/swap)
+                try:
+                    if Path(src).exists():
+                        resolved = True
+                except OSError:
+                    pass
+
+                if not resolved:
+                    # 2. Reconnected to another location in Stash
+                    fid = r.get("file_id")
+                    if not fid:
+                        act = connection.execute(
+                            "SELECT file_id FROM activity_log WHERE old_path=? AND file_id IS NOT NULL ORDER BY recorded_at DESC LIMIT 1",
+                            (src,)
+                        ).fetchone()
+                        if act:
+                            fid = act["file_id"]
+                    if not fid:
+                        inv = connection.execute(
+                            "SELECT file_id FROM inventory_events WHERE old_path=? ORDER BY id DESC LIMIT 1",
+                            (src,)
+                        ).fetchone()
+                        if inv:
+                            fid = inv["file_id"]
+                    if fid:
+                        # Ensure ONLY this specific file_id is reconnected (a different file in a multi-file scene will NOT resolve this)
+                        f_row = connection.execute(
+                            "SELECT path, exists_on_disk FROM files WHERE file_id=?",
+                            (fid,)
+                        ).fetchone()
+                        if f_row and f_row["path"] != src and f_row["exists_on_disk"]:
+                            try:
+                                if Path(f_row["path"]).is_file():
+                                    resolved = True
+                            except OSError:
+                                pass
+
+            elif ev_type == "created" and src:
+                # Created file exists on disk and is cataloged in Stash's files inventory
+                try:
+                    if Path(src).is_file():
+                        known = connection.execute(
+                            "SELECT 1 FROM files WHERE path=? AND exists_on_disk=1",
+                            (src,)
+                        ).fetchone()
+                        if known:
+                            resolved = True
+                except OSError:
+                    pass
+
+            elif ev_type == "moved" and dest:
+                try:
+                    if Path(dest).is_file():
+                        known = connection.execute(
+                            "SELECT 1 FROM files WHERE path=? AND exists_on_disk=1",
+                            (dest,)
+                        ).fetchone()
+                        if known:
+                            resolved = True
+                        elif is_verified_companion_destination(connection, dest, src):
+                            resolved = True
+                except OSError:
+                    pass
+
+            if resolved:
                 to_resolve.append(r["event_key"])
             else:
                 valid_rows.append(r)
+
         if to_resolve:
             for k in to_resolve:
                 connection.execute("UPDATE filesystem_events SET status='resolved' WHERE event_key=?", (k,))

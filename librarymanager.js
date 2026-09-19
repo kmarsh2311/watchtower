@@ -2684,7 +2684,7 @@
             React.createElement("div", { style: { marginTop: "14px" } },
               React.createElement(ChoiceField, {
                 label: "Wait Before Adding a Video",
-                help: "The video must stay completely unchanged for this long before Watchtower asks Stash to add it.",
+                help: "The video must stay completely unchanged for this long before Watchtower asks Stash to add it (default: 5 minutes; 0 uses the default).",
                 value: Number(config.incomingSettleMinutes || 5),
                 choices: [[1, "1 minute"], [5, "5 minutes (recommended)"], [10, "10 minutes"], [15, "15 minutes"], [30, "30 minutes"]],
                 onChange: value => updateSetting("incomingSettleMinutes", Number(value))
@@ -3110,7 +3110,7 @@
             React.createElement("ul", { key: "ul1" },
               React.createElement("li", null, React.createElement("strong", null, "Automatically Add Completed Videos (automaticIncomingScan): "), "Master switch to enable incoming download monitoring across all configured staging folders."),
               React.createElement("li", null, React.createElement("strong", null, "Watched Incoming Folders (incomingFolders): "), "Configure up to 5 designated staging directories inside your Stash library roots where new downloads arrive."),
-              React.createElement("li", null, React.createElement("strong", null, "Wait Before Adding a Video (incomingSettleMinutes): "), "Minutes a completed video file must remain 100% unchanged before Watchtower asks Stash to scan and import it (default: 5 min)."),
+              React.createElement("li", null, React.createElement("strong", null, "Wait Before Adding a Video (incomingSettleMinutes): "), "Minutes a completed video file must remain 100% unchanged before Watchtower asks Stash to scan and import it (default: 5 min; a value of 0 uses the 5-minute default)."),
               React.createElement("li", null, React.createElement("strong", null, "Live Terminal Tracking: "), "Actively tracks in-flight download temporary files (.crdownload, .part, .download, .tmp). When downloading completes and the file settles, Stash adds it automatically.")
             )
           ]
@@ -3582,5 +3582,8 @@
   getConfig().then(config => {
     if (config.autoStartMonitor === true) operation("ensure_monitor").catch(error =>
       console.error("[LibraryManager] Could not auto-start filesystem monitor:", error));
+    if (config.incomingSettleMinutes === undefined || config.incomingSettleMinutes === 0) {
+      saveConfig({ ...config, incomingSettleMinutes: 5 }).catch(() => {});
+    }
   }).catch(error => console.error("[LibraryManager] Could not read auto-start setting:", error));
 })();
