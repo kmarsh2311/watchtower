@@ -31,6 +31,27 @@ def is_network_disconnect_error(err: BaseException, path=None) -> bool:
     return False
 
 
+TRANSIENT_FS_ERRNOS = {
+    getattr(errno, "EPERM", 1),         # Operation not permitted
+    getattr(errno, "EACCES", 13),       # Permission denied
+    getattr(errno, "EBUSY", 16),        # Resource busy
+    getattr(errno, "ETXTBSY", 26),      # Text file busy
+}
+
+
+def is_transient_fs_error(err: BaseException) -> bool:
+    if isinstance(err, OSError):
+        if err.errno in TRANSIENT_FS_ERRNOS:
+            return True
+        winerror = getattr(err, "winerror", None)
+        if winerror in (32, 33):  # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+            return True
+        err_msg = str(err).lower()
+        if any(msg in err_msg for msg in ("operation not permitted", "permission denied", "resource busy", "sharing violation", "lock violation")):
+            return True
+    return False
+
+
 def is_path_available(path, timeout=2.0) -> bool:
     if not path:
         return False
@@ -801,7 +822,7 @@ def destination_inventory_conflict(database_path, destination, source_row, conne
         conflicts = [row for row in rows
                      if _normalized_path(row["path"]) == destination_key
                      and (str(row["file_id"]) != str(source_row["file_id"])
-                          or str(row["scene_id"]) != str(source_row["scene_id"]))]
+                          or str(row['scene_id']) != str(source_row['scene_id']))]
         if not conflicts:
             return None
         owners = ", ".join(
@@ -1063,14 +1084,67 @@ def correlate_deleted_source(database_path, source, candidate_destinations):
         connection.close()
 
 
+def resolve_associated_companion_moves(database_path: Path, video_destination: str, video_source: str = None) -> list[str]:
+    """After a video is successfully reconnected, verify and resolve any associated pending companion moves."""
+    connection = connect(database_path)
+    resolved = []
+    try:
+        dest_video = Path(video_destination)
+        parent_dir = str(dest_video.parent)
+        rows = connection.execute(
+            "SELECT event_key, source_path, destination_path FROM filesystem_events WHERE event_type='moved' AND status='pending'"
+        ).fetchall()
+        for r in rows:
+            dest_p = r["destination_path"]
+            src_p = r["source_path"]
+            if not dest_p:
+                continue
+            cand_p = Path(dest_p)
+            if str(cand_p.parent) != parent_dir:
+                continue
+            cand_suffix = cand_p.suffix.lower()
+            if cand_suffix not in COMPANION_EXTENSIONS:
+                continue
+
+            matched, _ = match_companion_to_video(cand_p, dest_video)
+            if matched and is_verified_companion_destination(connection, dest_p, src_p):
+                connection.execute(
+                    "UPDATE filesystem_events SET status='resolved' WHERE event_key=?",
+                    (r["event_key"],)
+                )
+                resolved.append((r["event_key"], src_p, dest_p))
+        connection.commit()
+    finally:
+        connection.close()
+
+    for event_key, src_p, dest_p in resolved:
+        record_activity(
+            database_path, "companion", "external companion move", "resolved",
+            old_path=src_p, new_path=dest_p,
+            detail=f"Companion move verified and resolved alongside reconnected video {Path(video_destination).name}"
+        )
+    return [r[0] for r in resolved]
+
+
 class MoveWorker(threading.Thread):
-    def __init__(self, database_path, stash, enabled, notifications, transcoder_compatibility=False):
+    def __init__(self, database_path, stash, enabled, notifications, transcoder_compatibility=False,
+                 max_immediate_retries=3, immediate_retry_delays=(0.1, 0.25, 0.5),
+                 max_deferred_attempts=5, initial_deferred_delay=2.0, max_deferred_backoff=30.0):
         super().__init__(daemon=True)
         self.database_path, self.stash = database_path, stash
         self.enabled, self.notifications = enabled, notifications
         self.transcoder_compatibility = bool(transcoder_compatibility)
         self.items = queue.Queue()
         self.stopping = False
+        self.lock = threading.RLock()
+        self.deferred_moves = {}
+        self.max_immediate_retries = int(max_immediate_retries)
+        self.immediate_retry_delays = list(immediate_retry_delays)
+        self.max_deferred_attempts = int(max_deferred_attempts)
+        self.initial_deferred_delay = float(initial_deferred_delay)
+        self.max_deferred_backoff = float(max_deferred_backoff)
+        self.queued_pairs = set()
+        self.recover_pending_moves()
 
     @property
     def automatic_move_reconciliation(self):
@@ -1081,145 +1155,262 @@ class MoveWorker(threading.Thread):
         self.enabled = bool(value)
 
     def submit(self, source, destination):
+        with self.lock:
+            if (source, destination) in self.queued_pairs:
+                return
+            self.queued_pairs.add((source, destination))
         self.items.put((source, destination))
 
     def stop(self):
         self.stopping = True
         self.items.put((None, None))
 
+    def _next_timeout(self):
+        with self.lock:
+            if not self.deferred_moves:
+                return 1.0
+            mono = time.monotonic()
+            earliest = min(info["next_retry_mono"] for info in self.deferred_moves.values())
+            return max(0.05, min(1.0, earliest - mono))
+
+    def _evaluate_deferred_moves(self, force=False):
+        mono = time.monotonic()
+        with self.lock:
+            due = [
+                (src, dst) for (src, dst), info in list(self.deferred_moves.items())
+                if force or mono >= info["next_retry_mono"]
+            ]
+        for src, dst in due:
+            self._process_move(src, dst)
+
+    def evaluate_deferred(self, force=True):
+        self._evaluate_deferred_moves(force=force)
+
+    def recover_pending_moves(self):
+        """Recover pending unverified/deferred moves from persistent database records on startup/restart."""
+        connection = connect(self.database_path)
+        try:
+            rows = connection.execute(
+                "SELECT source_path, destination_path FROM filesystem_events WHERE event_type='moved' AND status='pending'"
+            ).fetchall()
+            for r in rows:
+                src, dst = r["source_path"], r["destination_path"]
+                if src and dst and Path(dst).suffix.lower() in VIDEO_EXTENSIONS:
+                    with self.lock:
+                        already = (src, dst) in self.deferred_moves or (src, dst) in self.queued_pairs
+                    if not already:
+                        self.submit(src, dst)
+        except Exception as exc:
+            logger.debug("recover_pending_moves failed: %s", exc)
+        finally:
+            connection.close()
+
     def run(self):
         while not self.stopping:
-            source, destination = self.items.get()
-            if source is None:
-                break
-            compatibility_candidate = False
+            timeout = self._next_timeout()
             try:
-                row, reason = tracked_move(self.database_path, source, destination)
-                transcode_replacement = False
-                if not row and self.transcoder_compatibility and likely_transcoder_replacement(source, destination):
-                    row = inventoried_source(self.database_path, source)
-                    if row:
-                        transcode_replacement = True
-                        reason = "Likely same-folder transcoder replacement accepted by explicit compatibility setting"
-                if not row:
-                    record_activity(self.database_path, "filesystem", "external move", "review",
-                                    severity="warning", old_path=source, new_path=destination, detail=reason)
-                    notify(self.notifications, f"File move needs review: {Path(destination).name}")
-                    continue
-                compatibility_candidate = (self.transcoder_compatibility
-                                           and likely_transcoder_replacement(source, destination))
+                item = self.items.get(timeout=timeout)
+                if item is not None:
+                    source, destination = item
+                    if source is None and destination is None:
+                        break
+                    self._process_move(source, destination)
+            except queue.Empty:
+                pass
+            self._evaluate_deferred_moves()
+
+    def _process_move(self, source, destination):
+        with self.lock:
+            self.queued_pairs.discard((source, destination))
+        compatibility_candidate = False
+        try:
+            row = None
+            reason = None
+            last_transient_error = None
+
+            # Bounded retries with backoff for transient filesystem errors (EPERM, EACCES, EBUSY)
+            for attempt in range(self.max_immediate_retries + 1):
+                try:
+                    row, reason = tracked_move(self.database_path, source, destination)
+                    last_transient_error = None
+                    break
+                except OSError as err:
+                    if is_transient_fs_error(err):
+                        last_transient_error = err
+                        if attempt < self.max_immediate_retries:
+                            delay = self.immediate_retry_delays[min(attempt, len(self.immediate_retry_delays) - 1)]
+                            time.sleep(delay)
+                            continue
+                    else:
+                        raise
+
+            if last_transient_error is not None:
+                with self.lock:
+                    current = self.deferred_moves.get((source, destination), {})
+                    attempts = current.get("attempts", 0) + 1
+                    if attempts < self.max_deferred_attempts:
+                        delay = min(self.max_deferred_backoff, self.initial_deferred_delay * (2 ** (attempts - 1)))
+                        self.deferred_moves[(source, destination)] = {
+                            "attempts": attempts,
+                            "next_retry_mono": time.monotonic() + delay,
+                            "last_error": str(last_transient_error),
+                        }
+                        logger.info(
+                            "Transient filesystem error verifying %s -> %s: %s; scheduled retry in %.1fs (attempt %d/%d)",
+                            source, destination, last_transient_error, delay, attempts, self.max_deferred_attempts
+                        )
+                        record_activity(
+                            self.database_path, "reconciliation", "external move", "waiting",
+                            severity="warning", old_path=source, new_path=destination,
+                            detail=f"File temporarily locked ({last_transient_error}); retained for retry"
+                        )
+                        return
+                    else:
+                        self.deferred_moves.pop((source, destination), None)
+                        record_activity(
+                            self.database_path, "reconciliation", "external move", "failed",
+                            severity="error", old_path=source, new_path=destination,
+                            detail=f"Verification failed after {attempts} attempts: {last_transient_error}"
+                        )
+                        notify(self.notifications, f"Move reconciliation failed: {Path(destination).name}")
+                        return
+
+            with self.lock:
+                self.deferred_moves.pop((source, destination), None)
+
+            transcode_replacement = False
+            if not row and self.transcoder_compatibility and likely_transcoder_replacement(source, destination):
+                row = inventoried_source(self.database_path, source)
+                if row:
+                    transcode_replacement = True
+                    reason = "Likely same-folder transcoder replacement accepted by explicit compatibility setting"
+            if not row:
+                record_activity(self.database_path, "filesystem", "external move", "review",
+                                severity="warning", old_path=source, new_path=destination, detail=reason)
+                notify(self.notifications, f"File move needs review: {Path(destination).name}")
+                return
+            compatibility_candidate = (self.transcoder_compatibility
+                                       and likely_transcoder_replacement(source, destination))
+            if compatibility_candidate:
+                selected, safety_reason = transcoder_replacement_decision(
+                    self.database_path, source, row
+                )
+                if not selected or _normalized_path(selected) != _normalized_path(destination):
+                    detail = safety_reason if not selected else (
+                        f"Queued destination is no longer the sole safe replacement; selected {selected}"
+                    )
+                    record_activity(self.database_path, "filesystem", "transcoder replacement", "review",
+                                    severity="warning", scene_id=row['scene_id'], file_id=row["file_id"],
+                                    old_path=source, new_path=destination, detail=detail)
+                    notify(self.notifications, f"Transcoder replacement needs review: {Path(destination).name}")
+                    promote_transcoder_review(self.database_path, source, detail)
+                    return
+            record_activity(self.database_path, "filesystem",
+                            "transcoder replacement" if transcode_replacement else "external move",
+                            "accepted" if transcode_replacement else "verified",
+                            scene_id=row['scene_id'], file_id=row["file_id"], old_path=source,
+                            new_path=destination, detail=reason)
+            notify(self.notifications, f"File moved: {Path(source).name} → {Path(destination).parent.name}")
+            if not self.enabled:
+                return
+            job_id = self.stash.metadata_scan(paths=[destination])
+            completed = self.stash.wait_for_job(job_id, timeout=180)
+            result = self.stash.call_GQL(
+                "query SceneFiles($id: ID!) { findScene(id: $id) { files { id path basename } } }",
+                {"id": str(row['scene_id'])})
+            paths = {item.get("path") for item in ((result or {}).get("findScene") or {}).get("files") or []}
+            if completed and destination in paths:
                 if compatibility_candidate:
                     selected, safety_reason = transcoder_replacement_decision(
                         self.database_path, source, row
                     )
-                    if not selected or _normalized_path(selected) != _normalized_path(destination):
-                        detail = safety_reason if not selected else (
-                            f"Queued destination is no longer the sole safe replacement; selected {selected}"
-                        )
-                        record_activity(self.database_path, "filesystem", "transcoder replacement", "review",
-                                        severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
+                    stash_safe, stash_reason = stash_destination_is_exclusive(
+                        self.stash, destination, row['scene_id']
+                    )
+                    if (not selected or _normalized_path(selected) != _normalized_path(destination)
+                            or not stash_safe):
+                        detail = safety_reason if not selected else stash_reason
+                        record_activity(self.database_path, "reconciliation", "transcoder replacement", "review",
+                                        severity="warning", scene_id=row['scene_id'], file_id=row["file_id"],
                                         old_path=source, new_path=destination, detail=detail)
-                        notify(self.notifications, f"Transcoder replacement needs review: {Path(destination).name}")
+                        notify(self.notifications, f"Transcoder replacement changed during scan; review scene {row['scene_id']}")
                         promote_transcoder_review(self.database_path, source, detail)
-                        continue
-                record_activity(self.database_path, "filesystem",
-                                "transcoder replacement" if transcode_replacement else "external move",
-                                "accepted" if transcode_replacement else "verified",
-                                scene_id=row["scene_id"], file_id=row["file_id"], old_path=source,
-                                new_path=destination, detail=reason)
-                notify(self.notifications, f"File moved: {Path(source).name} → {Path(destination).parent.name}")
-                if not self.enabled:
-                    continue
-                job_id = self.stash.metadata_scan(paths=[destination])
-                completed = self.stash.wait_for_job(job_id, timeout=180)
-                result = self.stash.call_GQL(
-                    "query SceneFiles($id: ID!) { findScene(id: $id) { files { id path basename } } }",
-                    {"id": str(row["scene_id"])})
-                paths = {item.get("path") for item in ((result or {}).get("findScene") or {}).get("files") or []}
-                if completed and destination in paths:
+                        return
+                connection = connect(self.database_path)
+                try:
+                    conflict = None
                     if compatibility_candidate:
-                        selected, safety_reason = transcoder_replacement_decision(
-                            self.database_path, source, row
+                        connection.execute("BEGIN IMMEDIATE")
+                        conflict = destination_inventory_conflict(
+                            self.database_path, destination, row, connection=connection
                         )
-                        stash_safe, stash_reason = stash_destination_is_exclusive(
-                            self.stash, destination, row["scene_id"]
-                        )
-                        if (not selected or _normalized_path(selected) != _normalized_path(destination)
-                                or not stash_safe):
-                            detail = safety_reason if not selected else stash_reason
-                            record_activity(self.database_path, "reconciliation", "transcoder replacement", "review",
-                                            severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
-                                            old_path=source, new_path=destination, detail=detail)
-                            notify(self.notifications, f"Transcoder replacement changed during scan; review scene {row['scene_id']}")
-                            promote_transcoder_review(self.database_path, source, detail)
-                            continue
-                    connection = connect(self.database_path)
-                    try:
-                        conflict = None
-                        if compatibility_candidate:
-                            connection.execute("BEGIN IMMEDIATE")
-                            conflict = destination_inventory_conflict(
-                                self.database_path, destination, row, connection=connection
-                            )
-                        if conflict:
-                            connection.rollback()
-                            record_activity(self.database_path, "reconciliation", "transcoder replacement", "review",
-                                            severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
-                                            old_path=source, new_path=destination, detail=conflict)
-                            notify(self.notifications, f"Transcoder replacement ownership changed; review scene {row['scene_id']}")
-                            promote_transcoder_review(self.database_path, source, conflict)
-                            continue
-                        connection.execute("UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=?,missing_since=NULL WHERE file_id=?",
-                                           (destination, Path(destination).name, utc_now(), row["file_id"]))
-                        connection.commit()
-                    finally:
-                        connection.close()
-                    record_activity(self.database_path, "reconciliation", "targeted Stash scan", "updated",
-                                    scene_id=row["scene_id"], file_id=row["file_id"], old_path=source,
-                                    new_path=destination, detail=f"Stash scan job {job_id} confirmed the new path")
-                    if transcode_replacement:
-                        resolve_filesystem_event(self.database_path, "deleted", source)
-                        resolve_filesystem_event(self.database_path, "created", destination)
-                    else:
-                        resolve_filesystem_event(self.database_path, "moved", source, destination)
-                        resolve_filesystem_event(self.database_path, "deleted", source)
-                        resolve_filesystem_event(self.database_path, "created", destination)
-                    if compatibility_candidate:
-                        resolve_filesystem_event(self.database_path, "deleted", source)
-                        resolve_filesystem_event(self.database_path, "created", destination)
-                        clear_transcoder_candidates(self.database_path, source)
-                    notify(self.notifications, f"Stash updated: {Path(destination).name}")
-
-                    # Companion relocation is all-or-nothing: a partial failure restores
-                    # every companion already moved and leaves a clear review warning.
-                    try:
-                        moved_companions = relocate_companions_transactionally(
-                            self.database_path, source, destination
-                        )
-                        for old_companion, new_companion in moved_companions:
-                            record_activity(self.database_path, "companion", "moved companion", "recorded",
-                                            scene_id=row["scene_id"], old_path=str(old_companion),
-                                            new_path=str(new_companion),
-                                            detail=f"Moved companion file alongside {Path(destination).name}")
-                    except Exception as companion_error:
-                        record_activity(self.database_path, "companion", "external move companions", "review",
-                                        severity="warning", scene_id=row["scene_id"], old_path=source,
-                                        new_path=destination, detail=str(companion_error))
-                        notify(self.notifications, f"Companion files need review: {Path(destination).name}")
+                    if conflict:
+                        connection.rollback()
+                        record_activity(self.database_path, "reconciliation", "transcoder replacement", "review",
+                                        severity="warning", scene_id=row['scene_id'], file_id=row["file_id"],
+                                        old_path=source, new_path=destination, detail=conflict)
+                        notify(self.notifications, f"Transcoder replacement ownership changed; review scene {row['scene_id']}")
+                        promote_transcoder_review(self.database_path, source, conflict)
+                        return
+                    connection.execute("UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=?,missing_since=NULL WHERE file_id=?",
+                                       (destination, Path(destination).name, utc_now(), row["file_id"]))
+                    connection.commit()
+                finally:
+                    connection.close()
+                record_activity(self.database_path, "reconciliation", "targeted Stash scan", "updated",
+                                scene_id=row['scene_id'], file_id=row["file_id"], old_path=source,
+                                new_path=destination, detail=f"Stash scan job {job_id} confirmed the new path")
+                if transcode_replacement:
+                    resolve_filesystem_event(self.database_path, "deleted", source)
+                    resolve_filesystem_event(self.database_path, "created", destination)
                 else:
-                    detail = f"Stash scan job {job_id} did not attach the destination to the original scene"
-                    record_activity(self.database_path, "reconciliation", "targeted Stash scan", "review",
-                                    severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
-                                    old_path=source, new_path=destination, detail=detail)
-                    notify(self.notifications, f"Stash did not adopt moved file; review scene {row['scene_id']}")
-                    if compatibility_candidate:
-                        promote_transcoder_review(self.database_path, source, detail)
-            except Exception as error:
-                record_activity(self.database_path, "reconciliation", "external move", "failed",
-                                severity="error", old_path=source, new_path=destination, detail=str(error))
-                notify(self.notifications, f"Move reconciliation failed: {Path(destination).name}")
+                    resolve_filesystem_event(self.database_path, "moved", source, destination)
+                    resolve_filesystem_event(self.database_path, "deleted", source)
+                    resolve_filesystem_event(self.database_path, "created", destination)
                 if compatibility_candidate:
-                    promote_transcoder_review(self.database_path, source, str(error))
+                    resolve_filesystem_event(self.database_path, "deleted", source)
+                    resolve_filesystem_event(self.database_path, "created", destination)
+                    clear_transcoder_candidates(self.database_path, source)
+                notify(self.notifications, f"Stash updated: {Path(destination).name}")
+
+                # Companion relocation is all-or-nothing: a partial failure restores
+                # every companion already moved and leaves a clear review warning.
+                try:
+                    moved_companions = relocate_companions_transactionally(
+                        self.database_path, source, destination
+                    )
+                    for old_companion, new_companion in moved_companions:
+                        record_activity(self.database_path, "companion", "moved companion", "recorded",
+                                        scene_id=row['scene_id'], old_path=str(old_companion),
+                                        new_path=str(new_companion),
+                                        detail=f"Moved companion file alongside {Path(destination).name}")
+                except Exception as companion_error:
+                    record_activity(self.database_path, "companion", "external move companions", "review",
+                                    severity="warning", scene_id=row['scene_id'], old_path=source,
+                                    new_path=destination, detail=str(companion_error))
+                    notify(self.notifications, f"Companion files need review: {Path(destination).name}")
+
+                # Automatically verify and resolve associated companion JPG warnings
+                try:
+                    resolve_associated_companion_moves(self.database_path, destination, source)
+                except Exception as comp_res_err:
+                    logger.debug("Failed to resolve associated companion moves for %s: %s", destination, comp_res_err)
+            else:
+                detail = f"Stash scan job {job_id} did not attach the destination to the original scene"
+                record_activity(self.database_path, "reconciliation", "targeted Stash scan", "review",
+                                severity="warning", scene_id=row['scene_id'], file_id=row["file_id"],
+                                old_path=source, new_path=destination, detail=detail)
+                notify(self.notifications, f"Stash did not adopt moved file; review scene {row['scene_id']}")
+                if compatibility_candidate:
+                    promote_transcoder_review(self.database_path, source, detail)
+        except Exception as error:
+            with self.lock:
+                self.deferred_moves.pop((source, destination), None)
+            record_activity(self.database_path, "reconciliation", "external move", "failed",
+                            severity="error", old_path=source, new_path=destination, detail=str(error))
+            notify(self.notifications, f"Move reconciliation failed: {Path(destination).name}")
+            if compatibility_candidate:
+                promote_transcoder_review(self.database_path, source, str(error))
 
 
 class CompletedDownloadWorker(threading.Thread):
@@ -2275,7 +2466,7 @@ class CompletedDownloadWorker(threading.Thread):
                     if target_path.exists():
                         self._save_companion_waiting(path, candidate, f"Companion destination already exists: {target_path}")
                         record_activity(self.database_path, "companion", "companion collision", "review",
-                                        severity="warning", scene_id=row["scene_id"], old_path=str(cand_path),
+                                        severity="warning", scene_id=row['scene_id'], old_path=str(cand_path),
                                         new_path=str(target_path),
                                         detail="Companion not moved because destination already exists")
                         return
@@ -2296,7 +2487,7 @@ class CompletedDownloadWorker(threading.Thread):
 
                 self._save_state(path, "paired", detail=f"Paired with scene {row['scene_id']} at {target_path.name}")
                 record_activity(self.database_path, "companion", "auto-paired late companion", "recorded",
-                                scene_id=row["scene_id"], old_path=path, new_path=str(target_path),
+                                scene_id=row['scene_id'], old_path=path, new_path=str(target_path),
                                 detail=f"Companion automatically relocated and paired with scene {row['scene_id']}")
                 resolve_filesystem_event(self.database_path, "created", path)
                 notify(self.notifications, f"Companion paired: {cand_path.name} → Scene {row['scene_id']}")
@@ -2570,7 +2761,7 @@ class LibraryEventHandler(FileSystemEventHandler):
                 else:
                     promote_transcoder_review(self.database_path, source, reason)
                     record_activity(self.database_path, "filesystem", "transcoder replacement", "review",
-                                    severity="warning", scene_id=row["scene_id"], file_id=row["file_id"],
+                                    severity="warning", scene_id=row['scene_id'], file_id=row["file_id"],
                                     old_path=source, detail=reason)
                     notify(self.notifications, f"Transcoder replacement needs review: {Path(source).name}")
             except Exception as exc:

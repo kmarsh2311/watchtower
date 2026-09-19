@@ -438,3 +438,293 @@ def test_ambiguous_matches_do_not_reconnect_or_discard_new_download():
         accepted = incoming_worker.submit(str(incoming_file))
         assert accepted is True
         assert str(incoming_file.resolve()) in incoming_worker.candidates
+
+
+def test_move_worker_retries_transient_permission_error_and_succeeds(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "source" / "scene.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"VIDEO_DATA_" * 15000)
+        _insert_file(db, source, file_id="f1", scene_id="s1", exists=1)
+
+        dest = tmp / "dest" / "scene.mp4"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        record_filesystem_event(db, "moved", str(source), str(dest), initial_status="pending")
+
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-retry-1"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {
+            "findScene": {"files": [{"id": "f1", "path": str(dest), "basename": dest.name}]}
+        }
+
+        # Simulate transient PermissionError on first attempt only
+        original_tracked_move = tracked_move
+        attempts = [0]
+
+        def fake_tracked_move(database_path, src, dst):
+            attempts[0] += 1
+            if attempts[0] == 1:
+                raise PermissionError(1, f"Operation not permitted: {dst}")
+            return original_tracked_move(database_path, src, dst)
+
+        monkeypatch.setattr("librarymanager_monitor.tracked_move", fake_tracked_move)
+
+        worker = MoveWorker(
+            db, stash, enabled=True, notifications=False,
+            max_immediate_retries=2, immediate_retry_delays=[0.01, 0.02]
+        )
+        worker.submit(str(source), str(dest))
+        worker.items.put((None, None))
+        worker.run()
+
+        # Confirmed: retried, succeeded, scan called once, event resolved
+        assert attempts[0] == 2
+        assert stash.metadata_scan.call_count == 1
+        assert stash.metadata_scan.call_args[1]["paths"] == [str(dest)]
+        pending = pending_filesystem_events(db)
+        assert len(pending) == 0
+
+
+def test_move_worker_permanent_permission_error_exhausts_retries_and_retains_for_later(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "source" / "scene.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"VIDEO_DATA_" * 15000)
+        _insert_file(db, source, file_id="f1", scene_id="s1", exists=1)
+
+        dest = tmp / "dest" / "scene.mp4"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        record_filesystem_event(db, "moved", str(source), str(dest), initial_status="pending")
+
+        stash = MagicMock()
+
+        # Always raise PermissionError
+        def fake_tracked_move(database_path, src, dst):
+            raise PermissionError(1, f"Operation not permitted: {dst}")
+
+        monkeypatch.setattr("librarymanager_monitor.tracked_move", fake_tracked_move)
+
+        worker = MoveWorker(
+            db, stash, enabled=True, notifications=False,
+            max_immediate_retries=2, immediate_retry_delays=[0.01, 0.02],
+            max_deferred_attempts=3, initial_deferred_delay=100.0
+        )
+        worker.submit(str(source), str(dest))
+        worker.items.put((None, None))
+        worker.run()
+
+        # Identity was NOT verified: Stash scan was NEVER called
+        assert stash.metadata_scan.call_count == 0
+
+        # Move is retained in deferred_moves for safe later retry
+        assert (str(source), str(dest)) in worker.deferred_moves
+        assert worker.deferred_moves[(str(source), str(dest))]["attempts"] == 1
+
+        # Event remains pending (needs attention/retry), not discarded
+        pending = pending_filesystem_events(db)
+        assert len(pending) == 1
+
+
+def test_move_worker_deferred_recovery_when_file_lock_clears(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "source" / "scene.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"VIDEO_DATA_" * 15000)
+        _insert_file(db, source, file_id="f1", scene_id="s1", exists=1)
+
+        dest = tmp / "dest" / "scene.mp4"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        record_filesystem_event(db, "moved", str(source), str(dest), initial_status="pending")
+
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-rec-1"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {
+            "findScene": {"files": [{"id": "f1", "path": str(dest), "basename": dest.name}]}
+        }
+
+        original_tracked_move = tracked_move
+        locked = [True]
+
+        def fake_tracked_move(database_path, src, dst):
+            if locked[0]:
+                raise PermissionError(1, f"Operation not permitted: {dst}")
+            return original_tracked_move(database_path, src, dst)
+
+        monkeypatch.setattr("librarymanager_monitor.tracked_move", fake_tracked_move)
+
+        worker = MoveWorker(
+            db, stash, enabled=True, notifications=False,
+            max_immediate_retries=1, immediate_retry_delays=[0.01],
+            max_deferred_attempts=3, initial_deferred_delay=100.0
+        )
+        worker.submit(str(source), str(dest))
+        worker.items.put((None, None))
+        worker.run()
+
+        # Initially locked and deferred
+        assert (str(source), str(dest)) in worker.deferred_moves
+        assert stash.metadata_scan.call_count == 0
+
+        # Now simulate file lock clearing (e.g. AFP/Finder finishes flush)
+        locked[0] = False
+        worker.evaluate_deferred(force=True)
+
+        # Successfully reconnected and removed from deferred moves
+        assert (str(source), str(dest)) not in worker.deferred_moves
+        assert stash.metadata_scan.call_count == 1
+        pending = pending_filesystem_events(db)
+        assert len(pending) == 0
+
+
+def test_video_move_reconnection_automatically_resolves_companion_jpg_warnings():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        src_dir = tmp / "source"
+        src_dir.mkdir(parents=True)
+        dst_dir = tmp / "dest"
+        dst_dir.mkdir(parents=True)
+
+        vid_src = src_dir / "movie.mp4"
+        vid_src.write_bytes(b"VIDEO_CONTENT_" * 10000)
+        _insert_file(db, vid_src, file_id="f_mov", scene_id="s_mov", exists=1)
+
+        comp_src = src_dir / "movie.mp4.jpg"
+        comp_src.write_bytes(b"JPG_CONTENT_" * 100)
+
+        vid_dst = dst_dir / "movie.mp4"
+        vid_dst.write_bytes(vid_src.read_bytes())
+        comp_dst = dst_dir / "movie.mp4.jpg"
+        comp_dst.write_bytes(comp_src.read_bytes())
+
+        vid_src.unlink()
+        comp_src.unlink()
+
+        # Record companion move first as pending (e.g. companion event was received before video was reconnected)
+        record_filesystem_event(db, "moved", str(comp_src), str(comp_dst), initial_status="pending")
+        record_filesystem_event(db, "moved", str(vid_src), str(vid_dst), initial_status="pending")
+
+        # Also add an unrelated orphan companion to verify it remains unresolved!
+        orphan_src = src_dir / "orphan.mp4.jpg"
+        orphan_dst = dst_dir / "orphan.mp4.jpg"
+        orphan_dst.write_bytes(b"ORPHAN_JPG")
+        record_filesystem_event(db, "moved", str(orphan_src), str(orphan_dst), initial_status="pending")
+
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-comp-1"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {
+            "findScene": {"files": [{"id": "f_mov", "path": str(vid_dst), "basename": vid_dst.name}]}
+        }
+
+        worker = MoveWorker(db, stash, enabled=True, notifications=False)
+        worker.submit(str(vid_src), str(vid_dst))
+        worker.items.put((None, None))
+        worker.run()
+
+        # Video move resolved
+        # Paired companion movie.mp4.jpg automatically resolved
+        # Orphan companion remains pending
+        pending = pending_filesystem_events(db)
+        assert len(pending) == 1
+        assert pending[0]["source_path"] == str(orphan_src)
+
+
+def test_move_worker_recovers_deferred_move_on_restart(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        db = tmp / "inventory.sqlite3"
+        _init_db(db)
+
+        source = tmp / "source" / "scene.mp4"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"VIDEO_DATA_" * 15000)
+        _insert_file(db, source, file_id="f_rst", scene_id="s_rst", exists=1)
+
+        dest = tmp / "dest" / "scene.mp4"
+        dest.parent.mkdir(parents=True)
+        dest.write_bytes(source.read_bytes())
+        source.unlink()
+
+        record_filesystem_event(db, "moved", str(source), str(dest), initial_status="pending")
+
+        stash = MagicMock()
+        stash.metadata_scan.return_value = "job-rst-1"
+        stash.wait_for_job.return_value = True
+        stash.call_GQL.return_value = {
+            "findScene": {"files": [{"id": "f_rst", "path": str(dest), "basename": dest.name}]}
+        }
+
+        # 1. First worker session: file is locked by transient PermissionError
+        locked = [True]
+        original_tracked_move = tracked_move
+
+        def fake_tracked_move(database_path, src, dst):
+            if locked[0]:
+                raise PermissionError(1, f"Operation not permitted: {dst}")
+            return original_tracked_move(database_path, src, dst)
+
+        monkeypatch.setattr("librarymanager_monitor.tracked_move", fake_tracked_move)
+
+        worker1 = MoveWorker(
+            db, stash, enabled=True, notifications=False,
+            max_immediate_retries=1, immediate_retry_delays=[0.01],
+            max_deferred_attempts=3, initial_deferred_delay=100.0
+        )
+        worker1.submit(str(source), str(dest))
+        worker1.items.put((None, None))
+        worker1.run()
+
+        # Before restart: worker1 deferred the move, scan not called
+        assert (str(source), str(dest)) in worker1.deferred_moves
+        assert stash.metadata_scan.call_count == 0
+        assert len(pending_filesystem_events(db)) == 1
+
+        # 2. Watchtower restarts: worker1 is stopped, in-memory state is discarded
+        # File lock now clears on disk
+        locked[0] = False
+
+        worker2 = MoveWorker(db, stash, enabled=True, notifications=False)
+        # worker2 starts with empty in-memory deferred_moves, but recover_pending_moves
+        # recovers the pending move from persistent database records
+        worker2.items.put((None, None))
+        worker2.run()
+
+        # Confirmed: worker2 recovered the move from database, verified identity,
+        # called Stash scan, updated files, and resolved the event
+        assert stash.metadata_scan.call_count == 1
+        assert stash.metadata_scan.call_args[1]["paths"] == [str(dest)]
+        pending = pending_filesystem_events(db)
+        assert len(pending) == 0
+
+        # Files table was updated
+        con = connect(db)
+        f_row = con.execute("SELECT path, exists_on_disk FROM files WHERE file_id='f_rst'").fetchone()
+        con.close()
+        assert f_row["path"] == str(dest)
+        assert f_row["exists_on_disk"] == 1
