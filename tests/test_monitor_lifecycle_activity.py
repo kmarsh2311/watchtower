@@ -1,4 +1,3 @@
-import json
 import tempfile
 import time
 from pathlib import Path
@@ -22,62 +21,51 @@ def _init_db(database_path):
     connection.close()
 
 
-def test_record_monitor_lifecycle_informational_and_deduplication():
-    """Verify that monitor lifecycle events are recorded with info severity and deduplicated."""
+def test_rapid_restart_produces_both_stop_and_start_events():
+    """Verify that a genuine rapid stop/start within milliseconds produces both events."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "test.sqlite3"
         _init_db(db)
 
-        # 1. Record monitor started
-        recorded = record_monitor_lifecycle(
+        # 1. Monitor starts initially
+        record_monitor_lifecycle(
             db, "MONITOR STARTED", "running",
-            detail="MONITOR STARTED — watching 2 library root(s) (PID 12345)",
-            metadata={"pid": 12345, "roots": ["/vol1", "/vol2"]}
+            detail="MONITOR STARTED — watching 2 library root(s) (PID 1001)",
+            metadata={"pid": 1001, "roots": ["/vol1", "/vol2"]}
         )
-        assert recorded is True
 
-        # Check recorded fields
+        # 2. Rapid genuine restart (STOP then START immediately, with no sleep delay)
+        record_monitor_lifecycle(
+            db, "MONITOR STOPPED", "stopped",
+            detail="MONITOR STOPPED — filesystem watcher stopped (PID 1001)",
+            metadata={"pid": 1001}
+        )
+        record_monitor_lifecycle(
+            db, "MONITOR STARTED", "running",
+            detail="MONITOR STARTED — watching 2 library root(s) (PID 1002)",
+            metadata={"pid": 1002, "roots": ["/vol1", "/vol2"]}
+        )
+
+        # Both events must be recorded regardless of elapsed time
         activities = recent_activity(db)
-        assert len(activities) == 1
-        entry = activities[0]
-        assert entry["category"] == "monitor"
-        assert entry["action"] == "MONITOR STARTED"
-        assert entry["status"] == "running"
-        assert entry["severity"] == "info"
-        assert "2026-" in entry["recorded_at"]
-        assert entry["metadata"]["pid"] == 12345
-        assert "MONITOR STARTED" in entry["detail"]
+        assert len(activities) == 3
+        actions = [a["action"] for a in activities]
+        assert actions == ["MONITOR STARTED", "MONITOR STOPPED", "MONITOR STARTED"]
 
-        # Informational only: Needs Attention and problems must be zero
+        # All events are informational only (no warnings, no Needs Attention)
         assert len(pending_filesystem_events(db)) == 0
         dash = dashboard_data(db)
         problems = [r for r in dash.get("activity", []) if r.get("severity") in ("error", "warning")]
         assert len(problems) == 0
 
-        # 2. Duplicate call within 3 seconds must be skipped
-        dup = record_monitor_lifecycle(
-            db, "MONITOR STARTED", "running",
-            detail="MONITOR STARTED — duplicate call",
-            metadata={"pid": 12345}
-        )
-        assert dup is False
-        assert len(recent_activity(db)) == 1
-
-        # 3. Different action (STOPPED) records immediately
-        stopped = record_monitor_lifecycle(
-            db, "MONITOR STOPPED", "stopped",
-            detail="MONITOR STOPPED — filesystem watcher stopped (PID 12345)",
-            metadata={"pid": 12345}
-        )
-        assert stopped is True
-        activities = recent_activity(db)
-        assert len(activities) == 2
-        assert activities[0]["action"] == "MONITOR STOPPED"
-        assert activities[1]["action"] == "MONITOR STARTED"
+        for a in activities:
+            assert a["category"] == "monitor"
+            assert a["severity"] == "info"
+            assert a["recorded_at"] is not None
 
 
-def test_plugin_reload_and_ensure_monitor_avoids_duplicate_events():
-    """Verify that plugin reloads (ensure_monitor on already running daemon) do not add duplicates."""
+def test_plugin_reload_while_monitor_already_running_creates_no_duplicate_startup():
+    """Verify that reloading the plugin while the monitor is already running creates NO duplicate event."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "test.sqlite3"
         _init_db(db)
@@ -91,8 +79,8 @@ def test_plugin_reload_and_ensure_monitor_avoids_duplicate_events():
         )
         assert len(recent_activity(db)) == 2
 
-        # Simulate plugin reload / Stash UI loading ensure_monitor:
-        # Monitor is already running with PID 9999
+        # Simulate plugin reload: Stash loads plugin and invokes ensure_monitor / start_filesystem_monitor.
+        # The monitor process is already alive and running with PID 9999.
         stash = MagicMock()
         stash.find_plugin_config.return_value = {"autoStartMonitor": True}
         running_summary = {"state": "running", "pid": 9999, "is_stale": False, "raw_state": "running"}
@@ -101,6 +89,7 @@ def test_plugin_reload_and_ensure_monitor_avoids_duplicate_events():
              patch("librarymanager.os.kill"):
             res = start_filesystem_monitor(stash, db)
 
+        # Probing confirms process is alive; no new process spawned
         assert res.get("message") == "Filesystem monitor is already running or starting"
 
         # Activity log must still have exactly 2 rows (no duplicate start event added)
@@ -111,7 +100,7 @@ def test_plugin_reload_and_ensure_monitor_avoids_duplicate_events():
 
 
 def test_full_restart_lifecycle_preserves_history():
-    """Verify full restart sequence: START -> STOP -> RESTART preserves prior history."""
+    """Verify full restart sequence preserves prior history intact."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db = Path(tmpdir) / "test.sqlite3"
         _init_db(db)
