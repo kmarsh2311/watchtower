@@ -375,7 +375,8 @@ from stashapi.stashapp import StashInterface
 import re
 import unicodedata
 from librarymanager_core import (
-    generate_video_contact_sheet, connect, consume_expected_create, consume_expected_move,
+    generate_video_contact_sheet, connect, consume_expected_create, consume_expected_move, consume_expected_move_source, consume_expected_move_destination,
+    evaluate_filing_proposal, snapshot_incoming_baseline, is_filing_baseline_established, invalidate_stale_filing_proposals,
     is_verified_companion_destination,
     expect_filesystem_create, expect_filesystem_move, fingerprint_value,
     is_file_on_unavailable_root,
@@ -1634,6 +1635,15 @@ class CompletedDownloadWorker(threading.Thread):
         if self.enabled:
             self._restore_candidates()
             self._recover_recent_files()
+            try:
+                config = self.stash.find_plugin_config("librarymanager") or {}
+                if config.get("autoFilingEnabled"):
+                    folders = [str(f) for f in self.incoming_folders]
+                    baseline_ok, _ = is_filing_baseline_established(self.database_path, folders)
+                    if not baseline_ok and self.incoming_folders:
+                        snapshot_incoming_baseline(self.database_path, folders)
+            except Exception as b_err:
+                logger.warning("Failed establishing automatic filing baseline: %s", b_err)
 
     def _is_inside_incoming(self, candidate_path):
         if not self.incoming_folders or not candidate_path:
@@ -2333,6 +2343,15 @@ class CompletedDownloadWorker(threading.Thread):
                             detail=f"Stash scan job {job_id} added the completed video")
             notify(self.notifications, f"Added to Stash: {Path(path).name}")
 
+            try:
+                config = self.stash.find_plugin_config("librarymanager") or {}
+                if config.get("autoFilingEnabled"):
+                    trigger = (config.get("autoFilingTrigger") or "import").strip().lower()
+                    if trigger == "import":
+                        evaluate_filing_proposal(self.database_path, self.stash, path, scene, config)
+            except Exception as filing_err:
+                logger.warning("Automatic filing evaluation failed for %s: %s", path, filing_err)
+
             if self.generate_contact_sheets:
                 sheet_p = f"{path}.jpg"
                 try:
@@ -2741,6 +2760,18 @@ class CompletedDownloadWorker(threading.Thread):
 
             is_comp = candidate.get("is_companion") or Path(path).suffix.lower() in COMPANION_EXTENSIONS
             settle_needed = min(3, self.settle_seconds) if is_comp else self.settle_seconds
+
+            # If in-memory candidate is still waiting, check if database was made due via Process Now
+            if now - candidate["stable_since"] < settle_needed:
+                try:
+                    conn = connect(self.database_path)
+                    r = conn.execute("SELECT stable_since FROM incoming_files WHERE path=?", (path,)).fetchone()
+                    conn.close()
+                    if r and r["stable_since"] is not None and float(r["stable_since"]) < candidate["stable_since"]:
+                        candidate["stable_since"] = float(r["stable_since"])
+                except Exception:
+                    pass
+
             if now - candidate["stable_since"] >= settle_needed:
                 if is_comp:
                     self._process_companion(path, candidate)
@@ -2947,7 +2978,7 @@ class LibraryEventHandler(FileSystemEventHandler):
             return
         # Resolve any transient delete event if the file is recreated/present
         resolve_filesystem_event(self.database_path, "deleted", event.src_path)
-        if consume_expected_create(self.database_path, event.src_path):
+        if consume_expected_create(self.database_path, event.src_path) or consume_expected_move_destination(self.database_path, event.src_path):
             return
         is_temp = is_temporary_download(event.src_path)
         incoming_candidate = bool(not event.is_directory and self.incoming_worker and self.incoming_worker.submit(event.src_path))
@@ -3019,6 +3050,8 @@ class LibraryEventHandler(FileSystemEventHandler):
     def on_deleted(self, event):
         if event.is_directory:
             return
+        if consume_expected_move_source(self.database_path, event.src_path):
+            return
         if self._relevant(event.src_path, event.is_directory):
             removed_candidate_source = remove_transcoder_candidate(self.database_path, event.src_path)
             if removed_candidate_source:
@@ -3030,6 +3063,10 @@ class LibraryEventHandler(FileSystemEventHandler):
                     was_candidate = bool(self.incoming_worker.candidates.pop(event.src_path, None))
                 if was_candidate or self.incoming_worker._is_inside_incoming(event.src_path):
                     self.incoming_worker._save_state(event.src_path, "gone", detail="File removed from disk")
+                    try:
+                        invalidate_stale_filing_proposals(self.database_path, stash=self.stash)
+                    except Exception as exc:
+                        logger.debug("Failed invalidating filing proposals on file deletion: %s", exc)
             if not is_temporary_download(event.src_path):
                 if Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS:
                     with self._recent_creates_lock:

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+logger = logging.getLogger("librarymanager.core")
+
 import json
 import os
 import sqlite3
@@ -100,6 +103,7 @@ CREATE TABLE IF NOT EXISTS filename_state (
     manual_studio TEXT,
     manual_performers_json TEXT NOT NULL DEFAULT '[]',
     managed_date TEXT,
+    rename_protected INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -218,7 +222,8 @@ CREATE TABLE IF NOT EXISTS incoming_files (
     status TEXT NOT NULL DEFAULT 'waiting',
     attempts INTEGER NOT NULL DEFAULT 0,
     scan_job_id TEXT,
-    detail TEXT
+    detail TEXT,
+    filing_diagnostic TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_incoming_status ON incoming_files(status);
 CREATE TABLE IF NOT EXISTS filesystem_reconciliation_runs (
@@ -247,6 +252,92 @@ CREATE TABLE IF NOT EXISTS filesystem_reconciliation_proposals (
     recorded_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_fs_proposals_run ON filesystem_reconciliation_proposals(run_id);
+CREATE TABLE IF NOT EXISTS filing_incoming_baseline (
+    path TEXT PRIMARY KEY,
+    size INTEGER,
+    modified_ns INTEGER,
+    oshash TEXT,
+    seen_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_filing_baseline_hash ON filing_incoming_baseline(oshash, size);
+CREATE TABLE IF NOT EXISTS filing_baseline_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    established_at TEXT NOT NULL,
+    completed_at TEXT,
+    incoming_folders_json TEXT NOT NULL DEFAULT '[]',
+    file_count INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'in_progress',
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_filing_baseline_status ON filing_baseline_state(status);
+CREATE TABLE IF NOT EXISTS filing_destination_dir_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_path TEXT NOT NULL,
+    dir_path TEXT NOT NULL,
+    norm_name TEXT NOT NULL,
+    depth INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_filing_dest_cache_root ON filing_destination_dir_cache(root_path);
+CREATE INDEX IF NOT EXISTS idx_filing_dest_cache_norm ON filing_destination_dir_cache(norm_name);
+CREATE TABLE IF NOT EXISTS filing_destination_cache_meta (
+    root_path TEXT PRIMARY KEY,
+    max_depth INTEGER NOT NULL,
+    scanned_at TEXT NOT NULL,
+    entry_count INTEGER NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS filing_folder_mappings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    entity_name TEXT NOT NULL,
+    folder_path TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(entity_type, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_filing_mappings_entity ON filing_folder_mappings(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_filing_mappings_folder ON filing_folder_mappings(folder_path);
+CREATE TABLE IF NOT EXISTS active_filing_transfers (
+    proposal_id INTEGER PRIMARY KEY,
+    scene_id TEXT,
+    file_id TEXT,
+    source_path TEXT NOT NULL,
+    destination_path TEXT NOT NULL,
+    destination_folder TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    stage_label TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    total_bytes INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS filing_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    file_id TEXT NOT NULL,
+    scene_id TEXT NOT NULL,
+    source_path TEXT NOT NULL,
+    proposed_path TEXT NOT NULL,
+    destination_folder TEXT NOT NULL,
+    destination_filename TEXT NOT NULL,
+    organize_by TEXT NOT NULL,
+    matched_entity_id TEXT NOT NULL,
+    matched_entity_name TEXT NOT NULL,
+    matched_alias TEXT,
+    match_source TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    companions_json TEXT NOT NULL DEFAULT '[]',
+    candidate_destinations_json TEXT NOT NULL DEFAULT '[]',
+    is_custom_mapped INTEGER NOT NULL DEFAULT 0,
+    in_nested_folder INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'pending',
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_filing_status ON filing_proposals(status);
+CREATE INDEX IF NOT EXISTS idx_filing_file_id ON filing_proposals(file_id);
+CREATE INDEX IF NOT EXISTS idx_filing_source_path ON filing_proposals(source_path);
 """
 
 VIDEO_EXTENSIONS = {
@@ -436,6 +527,16 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
                     "ALTER TABLE filesystem_monitor_status ADD COLUMN active_moves_json TEXT NOT NULL DEFAULT '[]'")
         _safe_alter(connection, "filesystem_monitor_status", "auto_restart_failures",
                     "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_failures INTEGER NOT NULL DEFAULT 0")
+        _safe_alter(connection, "filing_proposals", "candidate_destinations_json",
+                    "ALTER TABLE filing_proposals ADD COLUMN candidate_destinations_json TEXT NOT NULL DEFAULT '[]'")
+        _safe_alter(connection, "filing_proposals", "is_custom_mapped",
+                    "ALTER TABLE filing_proposals ADD COLUMN is_custom_mapped INTEGER NOT NULL DEFAULT 0")
+        _safe_alter(connection, "filing_proposals", "in_nested_folder",
+                    "ALTER TABLE filing_proposals ADD COLUMN in_nested_folder INTEGER NOT NULL DEFAULT 0")
+        _safe_alter(connection, "filename_state", "rename_protected",
+                    "ALTER TABLE filename_state ADD COLUMN rename_protected INTEGER NOT NULL DEFAULT 0")
+        _safe_alter(connection, "incoming_files", "filing_diagnostic",
+                    "ALTER TABLE incoming_files ADD COLUMN filing_diagnostic TEXT")
         connection.execute(
             """UPDATE inventory_runs SET stash_scene_count=(SELECT COUNT(DISTINCT scene_id) FROM files)
                WHERE status='complete' AND stash_scene_count=0"""
@@ -510,7 +611,35 @@ def recent_activity(database_path: Path, limit: int = 250) -> list[dict]:
         connection.close()
 
 
-def incoming_summary(database_path: Path) -> dict:
+def _is_subpath_of(path: Path, parent: Path) -> bool:
+    """Return True if path is equal to or inside parent directory."""
+    try:
+        p_res = path.resolve()
+        parent_res = parent.resolve()
+        if p_res == parent_res:
+            return True
+        p_res.relative_to(parent_res)
+        return True
+    except (ValueError, RuntimeError, Exception):
+        return False
+
+
+def get_configured_incoming_folders(config: dict | None) -> list[str]:
+    """Return a cleaned list of configured incoming folder paths."""
+    if not config or not isinstance(config, dict):
+        return []
+    raw = config.get("incomingFolders") or ([config.get("incomingFolder")] if config.get("incomingFolder") else [])
+    folders = []
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            if isinstance(item, (str, Path)) and str(item).strip():
+                folders.append(str(item).strip())
+    elif isinstance(raw, str) and raw.strip():
+        folders.append(raw.strip())
+    return folders
+
+
+def incoming_summary(database_path: Path, config: dict = None) -> dict:
     connection = connect(database_path)
     try:
         counts = {row["status"]: row["count"] for row in connection.execute(
@@ -521,9 +650,29 @@ def incoming_summary(database_path: Path) -> dict:
         ).fetchone()
         active = []
         now = datetime.now().timestamp()
+        baseline_count_row = connection.execute("SELECT COUNT(*) AS count FROM filing_incoming_baseline").fetchone()
+        baseline_count = baseline_count_row["count"] if baseline_count_row else 0
+        backlog_eligible_count = 0
+        if baseline_count > 0:
+            b_rows = connection.execute("SELECT path FROM filing_incoming_baseline").fetchall()
+            active_props = {
+                p["source_path"]: p["status"]
+                for p in connection.execute("SELECT source_path, status FROM filing_proposals").fetchall()
+            }
+            for b_row in b_rows:
+                b_path_str = b_row["path"]
+                b_p = Path(b_path_str)
+                if b_p.suffix.lower() in VIDEO_EXTENSIONS:
+                    p_st = active_props.get(b_path_str)
+                    if p_st in ("completed", "pending", "needs_recovery"):
+                        continue
+                    if b_p.is_file():
+                        backlog_eligible_count += 1
+        incoming_folders = get_configured_incoming_folders(config)
+
         for row in connection.execute(
-            """SELECT path,status,size,stable_since,settle_seconds,attempts,scan_job_id,detail,last_checked_at
-               FROM incoming_files WHERE status IN ('waiting','scanning','failed','downloading','generating_sheet','unmatched','ignored')
+            """SELECT path,status,size,stable_since,settle_seconds,attempts,scan_job_id,detail,filing_diagnostic,last_checked_at
+               FROM incoming_files WHERE status IN ('waiting','scanning','failed','downloading','generating_sheet','unmatched','ignored','imported')
                ORDER BY CASE status
                    WHEN 'failed' THEN 0
                    WHEN 'unmatched' THEN 1
@@ -532,12 +681,63 @@ def incoming_summary(database_path: Path) -> dict:
                    WHEN 'generating_sheet' THEN 4
                    WHEN 'scanning' THEN 5
                    WHEN 'ignored' THEN 6
-                   ELSE 7
+                   WHEN 'imported' THEN 7
+                   ELSE 8
                END, last_checked_at DESC LIMIT 50"""
         ):
             item = dict(row)
-            item["remaining_seconds"] = max(0, int((item["stable_since"] or now) + (item["settle_seconds"] or 300) - now)) \
-                if item["status"] == "waiting" else 0
+            p_obj = Path(item["path"])
+            is_file = p_obj.is_file()
+            item["exists_on_disk"] = is_file
+
+            # Check if physically located inside a configured incoming folder
+            is_inside_incoming = True
+            if incoming_folders:
+                is_inside_incoming = any(
+                    _is_subpath_of(p_obj.resolve(), Path(f).resolve())
+                    for f in incoming_folders
+                )
+            item["is_in_incoming_folder"] = is_inside_incoming
+
+            f_row = connection.execute(
+                "SELECT scene_id, file_id, path FROM files WHERE path=? OR basename=?",
+                (item["path"], p_obj.name)
+            ).fetchone()
+            item_scene_id = str(f_row["scene_id"]) if f_row and f_row["scene_id"] else None
+
+            prop_row = connection.execute(
+                """SELECT status, proposed_path, destination_folder FROM filing_proposals
+                   WHERE source_path=? OR proposed_path=? OR (scene_id IS NOT NULL AND scene_id=?)
+                   ORDER BY id DESC LIMIT 1""",
+                (item["path"], item["path"], item_scene_id or "")
+            ).fetchone()
+            if prop_row:
+                item["filing_status"] = prop_row["status"]
+                item["filed"] = (prop_row["status"] == "completed")
+                item["needs_recovery"] = (prop_row["status"] == "needs_recovery")
+                item["has_pending_proposal"] = (prop_row["status"] == "pending")
+            else:
+                item["filing_status"] = None
+                item["filed"] = False
+                item["needs_recovery"] = False
+                item["has_pending_proposal"] = False
+
+            is_bl = connection.execute("SELECT 1 FROM filing_incoming_baseline WHERE path=?", (item["path"],)).fetchone() is not None
+            item["is_baseline"] = is_bl
+
+            ext = p_obj.suffix.lower()
+            item["is_video"] = ext in {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".webm", ".flv", ".ts", ".m2ts"}
+
+            # If imported and already filed, or outside incoming folders, or not on disk, exclude from active pending list
+            if item["status"] == "imported":
+                if item["filed"] or not is_inside_incoming or not is_file:
+                    continue
+
+            stable_ts = float(item["stable_since"] or now)
+            settle_dur = int(item["settle_seconds"] or 300)
+            deadline = stable_ts + settle_dur
+            item["settling_deadline"] = deadline if item["status"] == "waiting" else None
+            item["remaining_seconds"] = max(0, int(deadline - now)) if item["status"] == "waiting" else 0
             active.append(item)
 
         for r_row in connection.execute(
@@ -590,6 +790,8 @@ def incoming_summary(database_path: Path) -> dict:
             "imported": counts.get("imported", 0),
             "failed": counts.get("failed", 0),
             "downloading": counts.get("downloading", 0),
+            "baseline_count": baseline_count,
+            "backlog_eligible_count": backlog_eligible_count,
             "latest": dict(latest) if latest else None,
             "active": active,
         }
@@ -600,14 +802,16 @@ def incoming_summary(database_path: Path) -> dict:
 def expect_filesystem_move(database_path: Path, source: str, destination: str, ttl_seconds: float = 60):
     connection = connect(database_path)
     try:
-        connection.execute("DELETE FROM expected_moves WHERE expires_at < ?", (datetime.now().timestamp(),))
+        now = datetime.now().timestamp()
+        connection.execute("DELETE FROM expected_moves WHERE expires_at < ?", (now,))
         connection.execute(
             "INSERT OR REPLACE INTO expected_moves(source_path,destination_path,expires_at) VALUES (?,?,?)",
-            (str(source), str(destination), datetime.now().timestamp() + ttl_seconds),
+            (str(source), str(destination), now + ttl_seconds),
         )
         connection.commit()
     finally:
         connection.close()
+    expect_filesystem_create(database_path, destination, ttl_seconds=ttl_seconds)
 
 
 def consume_expected_move(database_path: Path, source: str, destination: str) -> bool:
@@ -623,6 +827,25 @@ def consume_expected_move(database_path: Path, source: str, destination: str) ->
         return cursor.rowcount > 0
     finally:
         connection.close()
+
+
+def consume_expected_move_source(database_path: Path, source: str) -> bool:
+    connection = connect(database_path)
+    try:
+        now = datetime.now().timestamp()
+        connection.execute("DELETE FROM expected_moves WHERE expires_at < ?", (now,))
+        cursor = connection.execute(
+            "DELETE FROM expected_moves WHERE source_path=? AND expires_at>=?",
+            (str(source), now),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+    finally:
+        connection.close()
+
+
+def consume_expected_move_destination(database_path: Path, destination: str) -> bool:
+    return consume_expected_create(database_path, destination)
 
 
 def expect_filesystem_create(database_path: Path, path: str, ttl_seconds: float = 120):
@@ -877,7 +1100,7 @@ def annotate_pending_events_processing_state(
 
 
 
-def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
+def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, config: dict = None) -> dict:
     """Return the small read-only snapshot used by the central dashboard."""
     connection = connect(database_path)
     try:
@@ -910,7 +1133,10 @@ def dashboard_data(database_path: Path, activity_limit: int = 100) -> dict:
             "filename_preview": {"run": dict(preview_run), "rows": preview_rows} if preview_run else None,
             "pending_events": pending_events,
             "transcoder_candidates": pending_transcoder_candidates(database_path),
-            "incoming": incoming_summary(database_path),
+            "incoming": incoming_summary(database_path, config=config),
+            "filing_proposals": get_pending_filing_proposals(database_path, stash=stash),
+            "active_filing_transfers": get_active_filing_transfers(database_path),
+            "filing_folder_mappings": get_filing_folder_mappings(database_path),
         }
     finally:
         connection.close()
@@ -2454,6 +2680,14 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
             else:
                 state = _sync_filename_state(connection, state, row, current, performers, filename_options)
 
+            if state and (dict(state).get("rename_protected") or False):
+                base = str(state["base_stem"] or current.stem)
+                proposed = current
+                normalized_target = os.path.normcase(os.path.abspath(current))
+                target_counts[normalized_target] = target_counts.get(normalized_target, 0) + 1
+                provisional.append((row, current, proposed, base, normalized_target))
+                continue
+
             base = str(state["base_stem"] or "").strip()
             proposed_stem = _proposed_stem(base, row["studio"], performers, filename_options,
                                             _row_scene_date(row), state["managed_date"])
@@ -2469,7 +2703,11 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
         report = []
         summary = {"examined": len(provisional), "proposed": 0, "unchanged": 0, "conflicts": 0}
         for row, current, proposed, base, normalized_target in provisional:
-            if len(proposed.name.encode("utf-8")) > 255:
+            st = connection.execute("SELECT rename_protected FROM filename_state WHERE file_id=?", (row["file_id"],)).fetchone()
+            is_prot = st and st["rename_protected"]
+            if is_prot:
+                status, reason = "unchanged", "Filename is protected from automatic renaming by Automatic Filing"
+            elif len(proposed.name.encode("utf-8")) > 255:
                 status, reason = "conflict", "Proposed filename exceeds 255 UTF-8 bytes"
             elif target_counts[normalized_target] > 1:
                 status, reason = "conflict", "Safely skipped: Multiple files share the same filename target (collision protected)"
@@ -2520,6 +2758,20 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
         else:
             state = _sync_filename_state(connection, state, row, current, performers, filename_options)
         connection.commit()
+
+        if state and (dict(state).get("rename_protected") or False):
+            return {
+                "scene_id": str(scene_id),
+                "file_id": row["file_id"],
+                "current_path": str(current),
+                "proposed_path": str(current),
+                "base_stem": state["base_stem"],
+                "status": "unchanged",
+                "reason": "Filename is protected from automatic renaming by Automatic Filing",
+                "associated_files": [],
+                "scene_date": _row_scene_date(row),
+                "action_performed": False
+            }
 
         proposed_stem = _proposed_stem(state["base_stem"], row["studio"], performers, filename_options,
                                         _row_scene_date(row), state["managed_date"])
@@ -3160,4 +3412,2940 @@ def generate_video_contact_sheet(
         "resolution": f"{width}x{height}",
         "elapsed_seconds": round(elapsed, 2),
         "renderer": "imagemagick",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Automatic Filing (Phase 1)
+# ---------------------------------------------------------------------------
+
+NOISE_ALIASES = {
+    "the", "and", "or", "in", "on", "at", "to", "for", "of", "with", "by",
+    "a", "an", "all", "is", "it", "this", "that", "from", "into",
+    "hd", "4k", "1080p", "720p", "2160p", "uhd", "sd", "dvd", "bluray", "rip",
+    "scene", "part", "video", "clip", "movie", "film", "show", "series", "episode",
+    "star", "stars", "girl", "girls", "boy", "boys", "man", "men", "guy", "guys",
+    "top", "best", "hot", "live", "club", "vip", "pro", "new", "raw", "cut",
+    "xxx", "porn", "sex", "action", "vr", "bonus", "extra", "trailer"
+}
+
+
+def _build_token_regex(phrase: str) -> re.Pattern | None:
+    tokens = [re.escape(t) for t in re.split(r'[\s_\-\.]+', phrase.strip()) if t]
+    if not tokens:
+        return None
+    pattern_str = r'(?<![a-zA-Z0-9])' + r'[\s_\-\.]+'.join(tokens) + r'(?![a-zA-Z0-9])'
+    return re.compile(pattern_str, re.IGNORECASE)
+
+
+def _normalize_name_for_folder_match(s: str) -> str:
+    return re.sub(r'[\s_\-\.]+', ' ', str(s or "")).strip().lower()
+
+
+def _strip_conservative_folder_descriptors(norm_name: str) -> str:
+    """Conservatively strip known prefix/suffix descriptors ('The ', ' Collection', 'The ... Collection')
+    to support folder patterns like 'The Cole Bentley Collection' without arbitrary fuzzy matching."""
+    s = norm_name.strip()
+    if s.startswith("the "):
+        s = s[4:].strip()
+    if s.endswith(" collection"):
+        s = s[:-11].strip()
+    return s
+
+
+def _filter_subsumed_matches(raw_matches: list[dict]) -> dict[str, dict]:
+    """Prune matches that are strictly subsumed by longer canonical matches,
+    or where a canonical name match shares the exact same span as an alias.
+    Preserves ambiguity when genuinely separate entities match, or when conflicting
+    identities match the same span."""
+    surviving = []
+    for m in raw_matches:
+        s, e = m["span"]
+        subsumed = False
+        for other in raw_matches:
+            if other["entity"]["id"] == m["entity"]["id"]:
+                continue
+            os, oe = other["span"]
+
+            # If other is a canonical-name match strictly enclosing m (e.g. shorter alias or subtoken)
+            if other["is_name"] and os <= s and oe >= e and (oe - os) > (e - s):
+                subsumed = True
+                break
+
+            # If both are aliases and other strictly encloses m
+            if not m["is_name"] and os <= s and oe >= e and (oe - os) > (e - s):
+                subsumed = True
+                break
+
+            # Exact same span: prefer complete canonical name over alias
+            if os == s and oe == e and other["is_name"] and not m["is_name"]:
+                subsumed = True
+                break
+
+        if not subsumed:
+            surviving.append(m)
+
+    unique = {}
+    for m in surviving:
+        ent_id = m["entity"]["id"]
+        if ent_id not in unique or (m["is_name"] and not unique[ent_id]["is_name"]):
+            unique[ent_id] = m
+    return unique
+
+
+def match_performer_for_filing(scene: dict, filename: str, all_performers: list[dict], match_source: str = "metadata_first") -> dict:
+    """Conservatively match performers for automatic filing.
+    - An uncertain entity match must NEVER produce a proposal.
+    - Reliably parses single or multiple distinct co-starring performers.
+    - Prefer complete canonical-name matches over shorter aliases contained within the same span.
+    - Preserves ambiguity when conflicting identities match the exact same or overlapping text span."""
+    if match_source in ("metadata_first", "metadata_only"):
+        scene_performers = scene.get("performers") or []
+        if len(scene_performers) >= 1:
+            p_list = [{"id": str(p["id"]), "name": p["name"]} for p in scene_performers if p.get("id") and p.get("name")]
+            if p_list:
+                return {
+                    "matched": True,
+                    "entities": p_list,
+                    "entity": p_list[0],
+                    "matched_alias": None,
+                    "source": "metadata"
+                }
+        elif match_source == "metadata_only":
+            return {"matched": False, "reason": "No performer tagged in scene metadata"}
+
+    target_str = f"{Path(filename).stem} {scene.get('title') or ''}".strip()
+    if not target_str:
+        return {"matched": False, "reason": "No filename or title to match"}
+
+    alias_owner = {}
+    ambiguous_aliases = set()
+    for p in all_performers:
+        p_id = str(p.get("id"))
+        aliases = p.get("alias_list") or []
+        for alias in aliases:
+            a_norm = alias.strip().lower()
+            if not a_norm:
+                continue
+            if a_norm in alias_owner and alias_owner[a_norm] != p_id:
+                ambiguous_aliases.add(a_norm)
+            else:
+                alias_owner[a_norm] = p_id
+
+    raw_matches = []
+    for p in all_performers:
+        p_id = str(p.get("id"))
+        p_name = (p.get("name") or "").strip()
+        if not p_name:
+            continue
+
+        name_norm = p_name.lower()
+        if len(name_norm) >= 3 and name_norm not in NOISE_ALIASES:
+            rx = _build_token_regex(p_name)
+            if rx:
+                for m in rx.finditer(target_str):
+                    raw_matches.append({
+                        "entity": {"id": p_id, "name": p_name},
+                        "matched_alias": None,
+                        "span": (m.start(), m.end()),
+                        "is_name": True
+                    })
+
+        aliases = p.get("alias_list") or []
+        for alias in aliases:
+            a_norm = alias.strip().lower()
+            if len(a_norm) < 3 or a_norm in NOISE_ALIASES or a_norm in ambiguous_aliases:
+                continue
+            rx = _build_token_regex(alias)
+            if rx:
+                for m in rx.finditer(target_str):
+                    raw_matches.append({
+                        "entity": {"id": p_id, "name": p_name},
+                        "matched_alias": alias.strip(),
+                        "span": (m.start(), m.end()),
+                        "is_name": False
+                    })
+
+    matched_performers = _filter_subsumed_matches(raw_matches)
+
+    if len(matched_performers) == 0:
+        return {"matched": False, "reason": "No matching performer found in filename"}
+
+    # Check for genuine overlapping span collisions between different performers
+    matches_list = list(matched_performers.values())
+    for i in range(len(matches_list)):
+        for j in range(i + 1, len(matches_list)):
+            m1, m2 = matches_list[i], matches_list[j]
+            s1, e1 = m1["span"]
+            s2, e2 = m2["span"]
+            if max(s1, s2) < min(e1, e2):
+                return {
+                    "matched": False,
+                    "reason": f"Ambiguous performer match in filename ({m1['entity']['name']} vs {m2['entity']['name']})"
+                }
+
+    entities = [m["entity"] for m in matches_list]
+    return {
+        "matched": True,
+        "entities": entities,
+        "entity": entities[0],
+        "matches": matches_list,
+        "matched_alias": matches_list[0]["matched_alias"] if len(entities) == 1 else None,
+        "source": "filename"
+    }
+
+
+def match_studio_for_filing(scene: dict, filename: str, all_studios: list[dict], match_source: str = "metadata_first") -> dict:
+    """Conservatively match a studio for automatic filing.
+    - Prefer complete canonical-name matches over shorter aliases contained within the same span.
+    - Preserve ambiguity when genuinely separate studios match, or when conflicting identities match the same span."""
+    if match_source in ("metadata_first", "metadata_only"):
+        scene_studio = scene.get("studio")
+        if scene_studio and scene_studio.get("id") and scene_studio.get("name"):
+            return {
+                "matched": True,
+                "entity": {"id": str(scene_studio["id"]), "name": scene_studio["name"]},
+                "matched_alias": None,
+                "source": "metadata"
+            }
+        elif match_source == "metadata_only":
+            return {"matched": False, "reason": "No studio tagged in scene metadata"}
+
+    target_str = f"{Path(filename).stem} {scene.get('title') or ''}".strip()
+    if not target_str:
+        return {"matched": False, "reason": "No filename or title to match"}
+
+    alias_owner = {}
+    ambiguous_aliases = set()
+    for s in all_studios:
+        s_id = str(s.get("id"))
+        aliases = s.get("aliases") or []
+        for alias in aliases:
+            a_norm = alias.strip().lower()
+            if not a_norm:
+                continue
+            if a_norm in alias_owner and alias_owner[a_norm] != s_id:
+                ambiguous_aliases.add(a_norm)
+            else:
+                alias_owner[a_norm] = s_id
+
+    raw_matches = []
+    for s in all_studios:
+        s_id = str(s.get("id"))
+        s_name = (s.get("name") or "").strip()
+        if not s_name:
+            continue
+
+        name_norm = s_name.lower()
+        if len(name_norm) >= 3 and name_norm not in NOISE_ALIASES:
+            rx = _build_token_regex(s_name)
+            if rx:
+                for m in rx.finditer(target_str):
+                    raw_matches.append({
+                        "entity": {"id": s_id, "name": s_name},
+                        "matched_alias": None,
+                        "span": (m.start(), m.end()),
+                        "is_name": True
+                    })
+
+        aliases = s.get("aliases") or []
+        for alias in aliases:
+            a_norm = alias.strip().lower()
+            if len(a_norm) < 3 or a_norm in NOISE_ALIASES or a_norm in ambiguous_aliases:
+                continue
+            rx = _build_token_regex(alias)
+            if rx:
+                for m in rx.finditer(target_str):
+                    raw_matches.append({
+                        "entity": {"id": s_id, "name": s_name},
+                        "matched_alias": alias.strip(),
+                        "span": (m.start(), m.end()),
+                        "is_name": False
+                    })
+
+    matched_studios = _filter_subsumed_matches(raw_matches)
+
+    if len(matched_studios) == 0:
+        return {"matched": False, "reason": "No matching studio found in filename"}
+    elif len(matched_studios) > 1:
+        names = [m["entity"]["name"] for m in matched_studios.values()]
+        return {"matched": False, "reason": f"Multiple studios matched in filename ({', '.join(names[:3])}); ambiguous destination"}
+    else:
+        match = list(matched_studios.values())[0]
+        return {
+            "matched": True,
+            "entity": match["entity"],
+            "matched_alias": match["matched_alias"],
+            "source": "filename"
+        }
+
+
+def get_configured_filing_destination_roots(config: dict | None) -> list[str]:
+    """Return a cleaned, deduplicated list of configured destination roots for automatic filing."""
+    if not config or not isinstance(config, dict):
+        return []
+    raw = config.get("autoFilingDestinationRoots")
+    roots = []
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, (str, Path)) and str(item).strip():
+                roots.append(str(item).strip())
+    elif isinstance(raw, str) and raw.strip():
+        for chunk in raw.splitlines():
+            for part in chunk.split(","):
+                part_str = part.strip()
+                if part_str:
+                    roots.append(part_str)
+
+    # Fallback to legacy single root setting if roots is empty
+    if not roots:
+        legacy = str(config.get("autoFilingDestinationRoot") or "").strip()
+        if legacy:
+            roots.append(legacy)
+
+    # Deduplicate while preserving order
+    seen = set()
+    deduped = []
+    for r in roots:
+        norm = os.path.normpath(r)
+        if norm not in seen:
+            seen.add(norm)
+            deduped.append(r)
+    return deduped
+
+
+def get_filing_folder_mappings(database_path: Path) -> list[dict]:
+    """Return all custom entity-to-folder mappings."""
+    connection = connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT * FROM filing_folder_mappings ORDER BY entity_type, entity_name COLLATE NOCASE"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        connection.close()
+
+
+def save_filing_folder_mapping(
+    database_path: Path,
+    entity_type: str,
+    entity_id: str,
+    entity_name: str,
+    folder_path: str,
+    configured_roots: list[str] | None = None
+) -> tuple[bool, str]:
+    """Validate and save a custom folder mapping for a Stash performer or studio.
+    Enforces:
+    - Entity type must be 'performer' or 'studio'.
+    - Entity ID and name must be non-empty.
+    - Folder path must exist on disk as a directory.
+    - Folder path must be located inside one of configured destination roots (if roots provided).
+    - Multiple performers and studios can share the same destination folder, including cross-type mappings.
+    - Never creates or renames folders automatically.
+    """
+    etype = (entity_type or "").strip().lower()
+    if etype not in ("performer", "studio"):
+        return False, f"Invalid entity type: '{entity_type}'. Must be 'performer' or 'studio'."
+    eid = str(entity_id or "").strip()
+    if not eid:
+        return False, "Entity ID is required."
+    ename = str(entity_name or "").strip()
+    if not ename:
+        return False, "Entity name is required."
+    fstr = str(folder_path or "").strip()
+    if not fstr:
+        return False, "Folder path is required."
+
+    try:
+        fpath = Path(fstr).expanduser().resolve()
+    except Exception as exc:
+        return False, f"Invalid folder path '{fstr}': {exc}"
+
+    if not fpath.is_dir():
+        return False, f"Mapped folder does not exist on disk: '{fstr}'. Watchtower never creates folders automatically."
+
+    # Validate that folder is within one of the configured destination roots
+    if configured_roots:
+        is_inside_root = False
+        resolved_folder_str = str(fpath)
+        for root in configured_roots:
+            if not root or not str(root).strip():
+                continue
+            try:
+                root_res = str(Path(root).expanduser().resolve())
+                if resolved_folder_str == root_res or resolved_folder_str.startswith(root_res + os.sep):
+                    is_inside_root = True
+                    break
+            except Exception:
+                continue
+        if not is_inside_root:
+            roots_str = ", ".join(f"'{r}'" for r in configured_roots if str(r).strip())
+            return False, f"Mapped folder '{fstr}' is outside configured destination roots ({roots_str})."
+
+    connection = connect(database_path)
+    try:
+        now = utc_now()
+        existing = connection.execute(
+            "SELECT id FROM filing_folder_mappings WHERE entity_type=? AND entity_id=?",
+            (etype, eid)
+        ).fetchone()
+
+        if existing:
+            connection.execute(
+                "UPDATE filing_folder_mappings SET entity_name=?, folder_path=?, updated_at=? WHERE id=?",
+                (ename, str(fpath), now, existing["id"])
+            )
+        else:
+            connection.execute(
+                """INSERT INTO filing_folder_mappings
+                   (entity_type, entity_id, entity_name, folder_path, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (etype, eid, ename, str(fpath), now, now)
+            )
+        connection.commit()
+        invalidate_destination_dir_cache()
+        record_activity(
+            database_path, "config", "folder mapping saved", "complete",
+            detail=f"Saved custom folder mapping for {etype} '{ename}' -> {fpath.name}"
+        )
+        return True, "Mapping saved successfully."
+    finally:
+        connection.close()
+
+
+def delete_filing_folder_mapping(database_path: Path, mapping_id: int) -> bool:
+    """Delete a custom folder mapping."""
+    connection = connect(database_path)
+    try:
+        row = connection.execute("SELECT * FROM filing_folder_mappings WHERE id=?", (mapping_id,)).fetchone()
+        if not row:
+            return False
+        connection.execute("DELETE FROM filing_folder_mappings WHERE id=?", (mapping_id,))
+        connection.commit()
+        invalidate_destination_dir_cache()
+        record_activity(
+            database_path, "config", "folder mapping deleted", "complete",
+            detail=f"Deleted custom folder mapping for {row['entity_type']} '{row['entity_name']}'"
+        )
+        return True
+    finally:
+        connection.close()
+
+
+_DESTINATION_DIR_CACHE: dict[tuple[str, int], tuple[float, list[tuple[Path, str]]]] = {}
+_DESTINATION_DIR_CACHE_LOCK = threading.Lock()
+_DESTINATION_DIR_CACHE_TTL = 300.0  # 5 minutes default TTL across processes
+_CACHE_GENERATION: int = 0
+
+
+def invalidate_destination_dir_cache(root_path: str | Path | None = None, database_path: Path | None = None) -> None:
+    """Invalidate cached destination directories in memory and persistent database cache."""
+    global _CACHE_GENERATION
+    with _DESTINATION_DIR_CACHE_LOCK:
+        _CACHE_GENERATION += 1
+        if root_path is None:
+            _DESTINATION_DIR_CACHE.clear()
+        else:
+            try:
+                norm_key = str(Path(root_path).expanduser().resolve())
+                keys_to_remove = [k for k in _DESTINATION_DIR_CACHE if k[0] == norm_key]
+                for k in keys_to_remove:
+                    _DESTINATION_DIR_CACHE.pop(k, None)
+            except Exception:
+                pass
+
+    if database_path:
+        try:
+            conn = connect(database_path)
+            try:
+                if root_path is None:
+                    conn.execute("DELETE FROM filing_destination_dir_cache")
+                    conn.execute("DELETE FROM filing_destination_cache_meta")
+                else:
+                    norm_key = str(Path(root_path).expanduser().resolve())
+                    conn.execute("DELETE FROM filing_destination_dir_cache WHERE root_path=?", (norm_key,))
+                    conn.execute("DELETE FROM filing_destination_cache_meta WHERE root_path=?", (norm_key,))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("Failed invalidating database destination cache: %s", exc)
+
+
+def refresh_destination_dir_cache(
+    database_path: Path,
+    roots: list[str],
+    max_depth: int = 4
+) -> dict:
+    """Explicitly rescan destination roots on disk and store a fresh snapshot in SQLite database."""
+    safe_depth = max(1, min(8, int(max_depth)))
+    total_folders = 0
+    scanned_roots = []
+
+    invalidate_destination_dir_cache(database_path=database_path)
+
+    conn = connect(database_path)
+    try:
+        now_str = utc_now()
+        now_mono = time.monotonic()
+        for root_str in roots:
+            if not root_str or not str(root_str).strip():
+                continue
+            try:
+                root_path = Path(root_str).expanduser().resolve()
+            except Exception:
+                continue
+            if not root_path.is_dir():
+                continue
+
+            root_key = str(root_path)
+            entries = _scan_destination_subdirectories(root_path, safe_depth)
+
+            with _DESTINATION_DIR_CACHE_LOCK:
+                _DESTINATION_DIR_CACHE[(root_key, safe_depth)] = (now_mono, entries)
+
+            conn.execute("DELETE FROM filing_destination_dir_cache WHERE root_path=?", (root_key,))
+            conn.execute("DELETE FROM filing_destination_cache_meta WHERE root_path=?", (root_key,))
+
+            rows = [
+                (root_key, str(p), norm, len(p.parts) - len(root_path.parts))
+                for p, norm in entries
+            ]
+            if rows:
+                conn.executemany(
+                    "INSERT INTO filing_destination_dir_cache (root_path, dir_path, norm_name, depth) VALUES (?, ?, ?, ?)",
+                    rows
+                )
+            conn.execute(
+                "INSERT INTO filing_destination_cache_meta (root_path, max_depth, scanned_at, entry_count, generation) VALUES (?, ?, ?, ?, ?)",
+                (root_key, safe_depth, now_str, len(entries), _CACHE_GENERATION)
+            )
+            conn.commit()
+            total_folders += len(entries)
+            scanned_roots.append(root_key)
+
+        record_activity(
+            database_path, "config", "folders refreshed", "complete",
+            detail=f"Refreshed destination folders snapshot: found {total_folders} directories across {len(scanned_roots)} root(s)"
+        )
+        return {
+            "success": True,
+            "total_folders": total_folders,
+            "scanned_roots": scanned_roots,
+            "scanned_at": now_str
+        }
+    finally:
+        conn.close()
+
+
+_EXCLUDED_DESTINATION_DISCOVERY_NAMES = {
+    ".ds_store", ".git", ".stfolder", ".stash", ".thumbnails",
+    "@eadir", "lost+found", ".bin", ".trashes", ".temporaryitems",
+    ".bin", ".recycle", "recycle.bin",
+    "_orphaned_covers", "orphaned_covers",
+    "deleted_mismatched_covers",
+    "_recovery", "recovery",
+    "_watchtower", "watchtower",
+}
+
+
+def _is_excluded_destination_discovery_dir(dirname: str) -> bool:
+    d_lower = dirname.strip().lower()
+    if not d_lower:
+        return True
+    if d_lower.startswith((".", "_orphaned", "orphaned_", "_recovery", "_watchtower", "deleted_mismatched", "$", "@")):
+        return True
+    if d_lower in _EXCLUDED_DESTINATION_DISCOVERY_NAMES:
+        return True
+    return False
+
+
+def _scan_destination_subdirectories(
+    root_path: Path,
+    max_depth: int = 4
+) -> list[tuple[Path, str]]:
+    """Recursively scan a destination root up to a bounded depth for existing subdirectories.
+    Skips hidden/system directories, maintenance, recovery, and orphaned-cover directories.
+    In-place filtering of dirnames ensures all descendants of excluded directories are skipped.
+    Returns list of (resolved_path, normalized_name) tuples."""
+    results: list[tuple[Path, str]] = []
+    try:
+        root_resolved = root_path.expanduser().resolve()
+        if not root_resolved.is_dir():
+            return []
+        base_depth = len(root_resolved.parts)
+
+        for dirpath, dirnames, _ in os.walk(str(root_resolved), topdown=True, followlinks=False):
+            curr_path = Path(dirpath)
+            current_depth = len(curr_path.parts) - base_depth
+            if current_depth >= max_depth:
+                dirnames.clear()
+                continue
+
+            # Safely filter out excluded directories and all their descendants in-place
+            dirnames[:] = [
+                d for d in dirnames
+                if not _is_excluded_destination_discovery_dir(d)
+            ]
+
+            for d in dirnames:
+                p = curr_path / d
+                norm_name = _normalize_name_for_folder_match(d)
+                results.append((p.resolve(), norm_name))
+    except Exception as exc:
+        logger.debug("Failed scanning destination subdirectories in %s: %s", root_path, exc)
+
+    return results
+
+
+def _get_cached_destination_subdirectories(
+    root_path: Path,
+    max_depth: int = 4,
+    ttl: float = _DESTINATION_DIR_CACHE_TTL,
+    database_path: Path | None = None
+) -> list[tuple[Path, str]]:
+    """Retrieve subdirectories for a root from memory cache or persistent SQLite cache,
+    or scan and store if missing/expired."""
+    safe_depth = max(1, min(8, int(max_depth)))
+    try:
+        root_resolved = root_path.expanduser().resolve()
+        if not root_resolved.is_dir():
+            return []
+        root_key = str(root_resolved)
+    except Exception:
+        return _scan_destination_subdirectories(root_path, safe_depth)
+
+    cache_key = (root_key, safe_depth)
+    now_mono = time.monotonic()
+
+    # 1. Fast in-memory check
+    with _DESTINATION_DIR_CACHE_LOCK:
+        cached = _DESTINATION_DIR_CACHE.get(cache_key)
+        if cached is not None:
+            cached_time, entries = cached
+            if now_mono - cached_time < ttl:
+                return entries
+
+    # 2. Check persistent SQLite cache across process boundaries
+    if database_path:
+        try:
+            conn = connect(database_path)
+            try:
+                meta = conn.execute(
+                    "SELECT max_depth, scanned_at, entry_count, generation FROM filing_destination_cache_meta WHERE root_path=?",
+                    (root_key,)
+                ).fetchone()
+                if meta and meta["max_depth"] >= safe_depth and meta["generation"] >= _CACHE_GENERATION:
+                    try:
+                        scanned_dt = datetime.fromisoformat(meta["scanned_at"])
+                        age_sec = (datetime.now(timezone.utc) - scanned_dt).total_seconds()
+                    except Exception:
+                        age_sec = 0
+                    if age_sec < ttl:
+                        rows = conn.execute(
+                            "SELECT dir_path, norm_name FROM filing_destination_dir_cache WHERE root_path=? AND depth <= ?",
+                            (root_key, safe_depth)
+                        ).fetchall()
+                        entries = [(Path(r["dir_path"]), r["norm_name"]) for r in rows]
+                        with _DESTINATION_DIR_CACHE_LOCK:
+                            _DESTINATION_DIR_CACHE[cache_key] = (now_mono, entries)
+                        return entries
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("Error reading SQLite destination cache: %s", exc)
+
+    # 3. Cache miss or expired: scan destination root on disk
+    fresh_entries = _scan_destination_subdirectories(root_resolved, safe_depth)
+    with _DESTINATION_DIR_CACHE_LOCK:
+        _DESTINATION_DIR_CACHE[cache_key] = (now_mono, fresh_entries)
+
+    # Populate SQLite persistent cache
+    if database_path:
+        try:
+            conn = connect(database_path)
+            try:
+                now_str = utc_now()
+                conn.execute("DELETE FROM filing_destination_dir_cache WHERE root_path=?", (root_key,))
+                conn.execute("DELETE FROM filing_destination_cache_meta WHERE root_path=?", (root_key,))
+                rows = [
+                    (root_key, str(p), norm, len(p.parts) - len(root_resolved.parts))
+                    for p, norm in fresh_entries
+                ]
+                if rows:
+                    conn.executemany(
+                        "INSERT INTO filing_destination_dir_cache (root_path, dir_path, norm_name, depth) VALUES (?, ?, ?, ?)",
+                        rows
+                    )
+                conn.execute(
+                    "INSERT INTO filing_destination_cache_meta (root_path, max_depth, scanned_at, entry_count, generation) VALUES (?, ?, ?, ?, ?)",
+                    (root_key, safe_depth, now_str, len(fresh_entries), _CACHE_GENERATION)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug("Error updating SQLite destination cache: %s", exc)
+
+    return fresh_entries
+
+
+def resolve_filing_destinations(
+    destination_roots: list[str],
+    entity_name: str,
+    entity_id: str | None = None,
+    entity_type: str | None = None,
+    database_path: Path | None = None,
+    max_depth: int = 4
+) -> tuple[list[Path], str]:
+    """Find eligible existing destination subfolders across all configured destination roots.
+    1. First checks for a custom folder mapping in database if provided.
+       - Validates mapped folder exists on disk and is inside one of destination_roots (at any depth).
+       - If valid, returns ([mapped_folder], 'custom_mapping').
+    2. Otherwise scans all configured destination roots for nested child directories matching entity_name (cached).
+    Returns:
+    - ([], 'no_destination_roots') if no roots configured
+    - ([], 'no_match') if 0 folders match
+    - ([path], 'ok') if exactly 1 folder matches
+    - ([path1, path2, ...], 'multiple_destinations') if >1 folders match
+    """
+    if not destination_roots:
+        return [], "Destination root folder is not configured"
+
+    # 1. Custom folder mapping check (supports any depth under destination roots)
+    if database_path and entity_id and entity_type:
+        connection = connect(database_path)
+        try:
+            row = connection.execute(
+                "SELECT folder_path FROM filing_folder_mappings WHERE entity_type=? AND entity_id=?",
+                (entity_type.lower(), str(entity_id))
+            ).fetchone()
+            if row:
+                mapped_path = Path(row["folder_path"])
+                if mapped_path.is_dir():
+                    # Verify inside one of destination roots at any depth
+                    res_mapped = str(mapped_path.resolve())
+                    for r in destination_roots:
+                        if not r:
+                            continue
+                        try:
+                            r_res = str(Path(r).expanduser().resolve())
+                            if res_mapped == r_res or res_mapped.startswith(r_res + os.sep):
+                                return [mapped_path.resolve()], "custom_mapping"
+                        except Exception:
+                            continue
+        finally:
+            connection.close()
+
+    # 2. Search all configured destination roots (bounded recursive discovery with cache)
+    target_norm = _normalize_name_for_folder_match(entity_name)
+    if not target_norm:
+        return [], "Entity name is empty"
+
+    matched_folders = []
+    seen_paths = set()
+    for root_str in destination_roots:
+        if not root_str or not str(root_str).strip():
+            continue
+        try:
+            root_path = Path(root_str).expanduser().resolve()
+        except Exception:
+            continue
+        if not root_path.is_dir():
+            continue
+
+        entries = _get_cached_destination_subdirectories(root_path, max_depth=max_depth, database_path=database_path)
+        for dir_path, norm_name in entries:
+            # Check exact normalized match or conservative descriptor match (e.g. 'The Cole Bentley Collection')
+            stripped = _strip_conservative_folder_descriptors(norm_name)
+            if norm_name == target_norm or stripped == target_norm:
+                res_str = str(dir_path)
+                if res_str not in seen_paths:
+                    seen_paths.add(res_str)
+                    matched_folders.append(dir_path)
+
+    if len(matched_folders) == 0:
+        return [], f"Destination folder for '{entity_name}' does not exist under configured destination roots"
+    elif len(matched_folders) == 1:
+        return matched_folders, "ok"
+    else:
+        return matched_folders, "multiple_destinations"
+
+
+def resolve_filing_destination_folder(destination_root: str, entity_name: str) -> tuple[Path | None, str]:
+    """Legacy single-root compatibility wrapper for resolve_filing_destinations."""
+    paths, status = resolve_filing_destinations([destination_root] if destination_root else [], entity_name)
+    if status in ("ok", "custom_mapping") and len(paths) == 1:
+        return paths[0], "ok"
+    elif status == "multiple_destinations":
+        match_names = [m.name for m in paths]
+        return None, f"Ambiguous destination: multiple folders match '{entity_name}' ({', '.join(match_names)})"
+    else:
+        return None, status
+
+
+def _is_in_nested_incoming_folder(file_path: Path, incoming_folders: list[str]) -> bool:
+    """Check if a video file is located in a nested subdirectory inside an incoming folder
+    (e.g., inside a multi-video torrent subfolder)."""
+    try:
+        resolved_parent = file_path.parent.resolve()
+        for inf in incoming_folders:
+            if not inf:
+                continue
+            inf_path = Path(inf).expanduser().resolve()
+            if resolved_parent == inf_path:
+                return False  # Directly in incoming folder root
+            if str(resolved_parent).startswith(str(inf_path) + os.sep):
+                return True   # In a subdirectory inside incoming
+    except Exception:
+        pass
+    return False
+
+
+
+def is_filing_baseline_established(database_path: Path, incoming_folders: list[str] | None = None) -> tuple[bool, str]:
+    """Verify that a complete, successful baseline has been established.
+    If baseline is missing, failed, in_progress, or does not cover all configured incoming folders,
+    returns (False, reason) so automatic filing fails safely."""
+    connection = connect(database_path)
+    try:
+        row = connection.execute(
+            "SELECT * FROM filing_baseline_state WHERE status='complete' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            latest = connection.execute(
+                "SELECT * FROM filing_baseline_state ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if latest and latest["status"] == "failed":
+                return False, f"Automatic filing baseline initialization failed: {latest['last_error'] or 'unknown error'}"
+            elif latest and latest["status"] == "in_progress":
+                return False, "Automatic filing baseline is still in progress"
+            return False, "Automatic filing baseline has not been established"
+
+        if incoming_folders:
+            snapshotted_folders = set(json.loads(row["incoming_folders_json"] or "[]"))
+            snap_norm = set()
+            for f in snapshotted_folders:
+                if f:
+                    try:
+                        snap_norm.add(os.path.normpath(str(Path(f).expanduser().resolve())))
+                    except Exception:
+                        snap_norm.add(os.path.normpath(str(f)))
+
+            for inf in incoming_folders:
+                if not inf:
+                    continue
+                try:
+                    inf_norm = os.path.normpath(str(Path(inf).expanduser().resolve()))
+                except Exception:
+                    inf_norm = os.path.normpath(str(inf))
+                if inf_norm not in snap_norm:
+                    return False, f"Incoming folder '{inf}' is not covered by the current baseline snapshot"
+
+        return True, "ok"
+    finally:
+        connection.close()
+
+
+def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str]) -> int:
+    """Snapshot all files currently present across incoming folders to establish an activation baseline.
+    Files present in this snapshot will never be proposed for automatic filing.
+    Fails safely: records status='failed' on error so un-baselined files can never be filed."""
+    now = utc_now()
+    count = 0
+    cleaned_folders = [str(f).strip() for f in (incoming_folders or []) if str(f).strip()]
+    connection = connect(database_path)
+    run_id = None
+    try:
+        cur = connection.execute(
+            """INSERT INTO filing_baseline_state (established_at, incoming_folders_json, status)
+               VALUES (?, ?, 'in_progress')""",
+            (now, json.dumps(cleaned_folders))
+        )
+        run_id = cur.lastrowid
+        connection.commit()
+
+        for folder_str in cleaned_folders:
+            try:
+                folder = Path(folder_str).expanduser().resolve()
+            except Exception as exc:
+                raise RuntimeError(f"Could not resolve incoming folder '{folder_str}': {exc}")
+            if not folder.is_dir():
+                raise RuntimeError(f"Incoming folder is not an accessible directory: '{folder_str}'")
+
+            for root, dirs, files in os.walk(folder):
+                for fname in files:
+                    fpath = Path(root) / fname
+                    try:
+                        st = fpath.stat()
+                        size = st.st_size
+                        modified_ns = st.st_mtime_ns
+                        oshash = opensubtitles_hash(fpath) if fpath.suffix.lower() in VIDEO_EXTENSIONS else None
+                        connection.execute(
+                            """INSERT OR REPLACE INTO filing_incoming_baseline
+                               (path, size, modified_ns, oshash, seen_at)
+                               VALUES (?, ?, ?, ?, ?)""",
+                            (str(fpath), size, modified_ns, oshash, now)
+                        )
+                        count += 1
+                    except OSError as os_err:
+                        raise RuntimeError(f"Failed reading incoming file '{fpath}': {os_err}")
+
+        connection.execute(
+            """UPDATE filing_baseline_state
+               SET status='complete', completed_at=?, file_count=?
+               WHERE id=?""",
+            (utc_now(), count, run_id)
+        )
+        connection.commit()
+    except Exception as exc:
+        if run_id:
+            try:
+                connection.execute(
+                    """UPDATE filing_baseline_state
+                       SET status='failed', last_error=?
+                       WHERE id=?""",
+                    (str(exc), run_id)
+                )
+                connection.commit()
+            except Exception:
+                pass
+        raise
+    finally:
+        connection.close()
+    return count
+
+
+def is_disqualified_from_filing(database_path: Path, file_path: str, file_size: int, oshash: str | None, file_id: str | None, scene_id: str | None, allow_baseline: bool = False, allow_refresh: bool = False) -> tuple[bool, str]:
+    """Check whether a video is disqualified from automatic filing.
+    Automatic Filing is strictly for genuinely new incoming files, never for pre-existing,
+    rediscovered, or relocated files. Fails safely if baseline is missing, incomplete, or failed."""
+    baseline_ok, baseline_err = is_filing_baseline_established(database_path)
+    if not baseline_ok:
+        return True, f"Baseline not established ({baseline_err}); automatic filing failing safely"
+
+    connection = connect(database_path)
+    try:
+        # 1. Exact path in baseline snapshot (checked unless explicitly evaluating backlog selection)
+        if not allow_baseline:
+            row = connection.execute("SELECT 1 FROM filing_incoming_baseline WHERE path=?", (file_path,)).fetchone()
+            if row:
+                return True, "File was already present in incoming folder baseline snapshot when automatic filing was enabled"
+
+            # 2. Size and oshash in baseline snapshot (e.g. file was moved/renamed within incoming)
+            if oshash and file_size:
+                row = connection.execute("SELECT 1 FROM filing_incoming_baseline WHERE oshash=? AND size=?", (oshash, file_size)).fetchone()
+                if row:
+                    return True, "File contents match a file present in incoming baseline snapshot"
+
+        # 3. Already evaluated or ignored or completed in filing_proposals
+        if (file_id or scene_id or file_path) and not allow_refresh:
+            row = connection.execute(
+                "SELECT status FROM filing_proposals WHERE file_id=? OR scene_id=? OR source_path=?",
+                (str(file_id or ""), str(scene_id or ""), file_path)
+            ).fetchone()
+            if row:
+                return True, f"File was already evaluated for automatic filing (status: {row['status']})"
+
+        # 4. Check if this file/scene was already known in library files (relocation)
+        if file_id or scene_id:
+            row = connection.execute(
+                "SELECT path FROM files WHERE (file_id=? OR scene_id=?) AND path != ? AND exists_on_disk=1",
+                (str(file_id or ""), str(scene_id or ""), file_path)
+            ).fetchone()
+            if row:
+                return True, f"File is an existing library file relocated from {row['path']}"
+
+        # 5. Check if size + oshash matches any existing file in the library
+        if oshash and file_size:
+            rows = connection.execute("SELECT path, fingerprints_json FROM files WHERE size=? AND path != ?", (file_size, file_path)).fetchall()
+            for r in rows:
+                existing_oshash = fingerprint_value(r["fingerprints_json"], "oshash")
+                if existing_oshash and existing_oshash.lower() == oshash.lower():
+                    return True, f"Video contents match existing library scene at {r['path']}"
+
+        return False, ""
+    finally:
+        connection.close()
+
+
+def find_filing_companions(source_video: Path, dest_folder: Path, dest_video_name: str) -> tuple[list[tuple[Path, Path]], str | None]:
+    """Discover all sidecars/companions associated with source_video using Watchtower's proven companion-matching safeguards.
+    Never uses broad filename startswith() checks.
+    Returns ([(source_companion, target_companion)], error_message_if_blocked)"""
+    companions = []
+    current = source_video
+    proposed = dest_folder / dest_video_name
+    all_companion_exts = COMPANION_EXTENSIONS | ASSOCIATED_EXTENSIONS | IMAGE_SIDECAR_EXTENSIONS
+    try:
+        if current.parent.exists():
+            for candidate in current.parent.iterdir():
+                if not candidate.is_file() or candidate == current:
+                    continue
+                cand_suffix = candidate.suffix.lower()
+                if cand_suffix not in all_companion_exts:
+                    continue
+
+                # Match by exact or normalized stem equality
+                key_cand = _sidecar_match_key(candidate.stem)
+                key_curr = _sidecar_match_key(current.stem)
+                stems_match = (candidate.stem.lower() == current.stem.lower()) or (
+                    bool(key_cand) and key_cand == key_curr
+                )
+
+                # Match by Stash-style compound name (e.g. video.mp4.jpg or video.mp4.nfo)
+                compound_base = candidate.name[:-len(candidate.suffix)]
+                key_comp = _sidecar_match_key(compound_base)
+                key_curr_name = _sidecar_match_key(current.name)
+                compound_match = (compound_base.lower() == current.name.lower()) or (
+                    bool(key_comp) and key_comp == key_curr_name
+                )
+
+                if stems_match:
+                    dest_target = dest_folder / (proposed.stem + candidate.suffix)
+                elif compound_match:
+                    dest_target = dest_folder / (proposed.name + candidate.suffix)
+                else:
+                    continue
+
+                if dest_target.exists():
+                    return [], f"Target companion already exists at destination: {dest_target.name}"
+                companions.append((candidate, dest_target))
+    except OSError as exc:
+        return [], f"Failed reading source folder for companions: {exc}"
+    return companions, None
+
+
+def _update_proposal_status(database_path: Path, proposal_id: int, status: str, last_error: str | None = None) -> None:
+    now = utc_now()
+    connection = connect(database_path)
+    try:
+        connection.execute(
+            "UPDATE filing_proposals SET status=?, last_error=?, updated_at=? WHERE id=?",
+            (status, last_error, now, proposal_id)
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def record_incoming_filing_diagnostic(database_path: Path, file_path: str, diagnostic: str):
+    """Persist a structured diagnostic for an incoming file without altering import detail."""
+    try:
+        connection = connect(database_path)
+        try:
+            row = connection.execute("SELECT path FROM incoming_files WHERE path=?", (str(file_path),)).fetchone()
+            if row:
+                connection.execute("UPDATE incoming_files SET filing_diagnostic=? WHERE path=?", (diagnostic, str(file_path)))
+            else:
+                now_str = datetime.now().isoformat()
+                connection.execute(
+                    "INSERT OR IGNORE INTO incoming_files (path, first_seen_at, last_checked_at, status, detail, filing_diagnostic) VALUES (?, ?, ?, 'imported', 'Stash scene', ?)",
+                    (str(file_path), now_str, now_str, diagnostic)
+                )
+            connection.commit()
+        finally:
+            connection.close()
+    except Exception as exc:
+        logger.debug("Failed recording filing diagnostic for %s: %s", file_path, exc)
+
+
+def evaluate_filing_proposal(database_path: Path, stash, file_path: str, scene: dict, config: dict, allow_baseline: bool = False, allow_refresh: bool = False) -> dict | None:
+    """Evaluate an imported scene or incoming file for an automatic filing proposal.
+    - Persists structured diagnostics in incoming_files table for every outcome.
+    - Matches performer or studio based on autoFilingOrganizeBy ('performer', 'studio', or 'both').
+    - When 'both' is selected:
+      * Evaluates performer and studio independently.
+      * If both match different folders, collects all candidate destinations.
+      * If both match the same physical folder, merges explanations into a single candidate.
+      * If one is ambiguous and the other reliable, uses the reliable one.
+      * If neither matches or both are ambiguous, persists clear diagnostic and returns None.
+    - If exactly 1 destination folder is found across all matches, creates a standard proposal.
+    - If multiple destination folders are found, creates a multi-candidate proposal requiring user selection.
+    """
+    if not config.get("autoFilingEnabled"):
+        record_incoming_filing_diagnostic(database_path, file_path, "Automatic filing is disabled in settings.")
+        return None
+
+    src = Path(file_path)
+    if not src.is_file():
+        record_incoming_filing_diagnostic(database_path, file_path, "File no longer exists on disk.")
+        return None
+
+    file_id = None
+    scene_id = None
+    if scene:
+        scene_id = str(scene.get("id"))
+        files = scene.get("files") or []
+        for f in files:
+            if f.get("path") and str(Path(f.get("path", "")).resolve()) == str(src.resolve()):
+                file_id = str(f.get("id"))
+                break
+        if not file_id and len(files) == 1 and files[0].get("id"):
+            file_id = str(files[0]["id"])
+
+    if not file_id or not scene_id:
+        conn = connect(database_path)
+        try:
+            row = conn.execute("SELECT file_id, scene_id FROM files WHERE path=? AND exists_on_disk=1", (str(src),)).fetchone()
+            if row:
+                file_id = str(row["file_id"])
+                scene_id = str(row["scene_id"])
+        finally:
+            conn.close()
+
+    if not file_id or not scene_id:
+        record_incoming_filing_diagnostic(database_path, file_path, "Filing skipped: File has not been linked to a Stash scene.")
+        return None
+
+    raw_incoming = config.get("incomingFolders") or ([config.get("incomingFolder")] if config.get("incomingFolder") else [])
+    if isinstance(raw_incoming, (list, tuple)):
+        incoming_folders = [str(f).strip() for f in raw_incoming if isinstance(f, (str, Path)) and str(f).strip()]
+    else:
+        incoming_folders = []
+
+    file_size = src.stat().st_size
+    oshash = opensubtitles_hash(src)
+    disqualified, disq_reason = is_disqualified_from_filing(database_path, str(src), file_size, oshash, file_id, scene_id, allow_baseline=allow_baseline, allow_refresh=allow_refresh)
+    if disqualified:
+        record_incoming_filing_diagnostic(database_path, file_path, f"Filing skipped: {disq_reason}")
+        return None
+
+    trigger = (config.get("autoFilingTrigger") or "import").strip().lower()
+    if trigger == "metadata":
+        scene_performers = (scene or {}).get("performers") or []
+        scene_studio = (scene or {}).get("studio")
+        if not scene_performers and not scene_studio:
+            record_incoming_filing_diagnostic(database_path, file_path, "Waiting for performer or studio metadata to be added in Stash.")
+            return None
+
+    organize_by = (config.get("autoFilingOrganizeBy") or "performer").strip().lower()
+    dest_roots = get_configured_filing_destination_roots(config)
+    if not dest_roots:
+        record_incoming_filing_diagnostic(database_path, file_path, "No destination roots configured in Automatic Filing settings.")
+        return None
+
+    match_source = config.get("autoFilingMatchSource") or "metadata_first"
+
+    try:
+        max_depth = int((config or {}).get("autoFilingMaxDiscoveryDepth", 4))
+    except (ValueError, TypeError):
+        max_depth = 4
+    max_depth = max(1, min(8, max_depth))
+
+    matched_candidates_by_folder = {}
+
+    if organize_by == "studio":
+        all_studios = []
+        try:
+            gql_res = stash.call_GQL('{ allStudios { id name aliases } }')
+            all_studios = (gql_res or {}).get("allStudios") or []
+        except Exception:
+            pass
+        s_match = match_studio_for_filing(scene, src.name, all_studios, match_source=match_source)
+        if not s_match.get("matched"):
+            s_reason = s_match.get("reason") or "No matching studio found in filename or Stash metadata."
+            record_incoming_filing_diagnostic(database_path, file_path, s_reason)
+            return None
+        s_entity = s_match["entity"]
+        s_paths, s_status = resolve_filing_destinations(
+            dest_roots, s_entity["name"], entity_id=str(s_entity["id"]), entity_type="studio",
+            database_path=database_path, max_depth=max_depth
+        )
+        if not s_paths:
+            record_incoming_filing_diagnostic(database_path, file_path, f"Studio '{s_entity['name']}' identified, but no destination folder found.")
+            return None
+        for p in s_paths:
+            p_res = str(p.resolve())
+            matched_candidates_by_folder[p_res] = {
+                "destination_folder": str(p),
+                "entity_type": "studio",
+                "entity_name": s_entity["name"],
+                "entity_id": str(s_entity["id"]),
+                "is_custom_mapped": (s_status == "custom_mapping"),
+                "match_source": s_match.get("source", "filename"),
+                "matched_alias": s_match.get("matched_alias"),
+                "label": f"[Studio] {s_entity['name']} → {p}" + (" (Custom Mapped)" if s_status == "custom_mapping" else "")
+            }
+        primary_match = s_match
+        primary_entity = s_entity
+        effective_organize_by = "studio"
+
+    elif organize_by == "both":
+        all_performers = []
+        all_studios = []
+        try:
+            gql_p = stash.call_GQL('{ allPerformers { id name disambiguation alias_list } }')
+            all_performers = (gql_p or {}).get("allPerformers") or []
+        except Exception:
+            pass
+        try:
+            gql_s = stash.call_GQL('{ allStudios { id name aliases } }')
+            all_studios = (gql_s or {}).get("allStudios") or []
+        except Exception:
+            pass
+
+        p_match = match_performer_for_filing(scene, src.name, all_performers, match_source=match_source)
+        s_match = match_studio_for_filing(scene, src.name, all_studios, match_source=match_source)
+
+        p_valid = bool(p_match.get("matched"))
+        s_valid = bool(s_match.get("matched"))
+
+        p_entities = p_match.get("entities") or ([p_match["entity"]] if p_match.get("entity") else [])
+        p_matched_paths_by_ent = {}
+        for p_ent in p_entities:
+            p_paths_curr, p_status_curr = resolve_filing_destinations(
+                dest_roots, p_ent["name"], entity_id=str(p_ent["id"]), entity_type="performer",
+                database_path=database_path, max_depth=max_depth
+            )
+            p_matched_paths_by_ent[p_ent["id"]] = (p_paths_curr, p_status_curr)
+            for p in p_paths_curr:
+                p_res = str(p.resolve())
+                if p_res in matched_candidates_by_folder:
+                    existing = matched_candidates_by_folder[p_res]
+                    if "matched_entities" not in existing:
+                        existing["matched_entities"] = [
+                            {
+                                "entity_type": existing["entity_type"],
+                                "entity_name": existing["entity_name"],
+                                "entity_id": str(existing["entity_id"]),
+                                "is_custom_mapped": existing.get("is_custom_mapped", False),
+                                "match_source": existing.get("match_source", "filename"),
+                                "matched_alias": existing.get("matched_alias")
+                            }
+                        ]
+                    if not any(e["entity_id"] == str(p_ent["id"]) and e["entity_type"] == "performer" for e in existing["matched_entities"]):
+                        existing["matched_entities"].append({
+                            "entity_type": "performer",
+                            "entity_name": p_ent["name"],
+                            "entity_id": str(p_ent["id"]),
+                            "is_custom_mapped": (p_status_curr == "custom_mapping"),
+                            "match_source": p_match.get("source", "filename"),
+                            "matched_alias": p_match.get("matched_alias") if len(p_entities) == 1 else None
+                        })
+                    all_names = " & ".join(e["entity_name"] for e in existing["matched_entities"])
+                    all_ids = ",".join(e["entity_id"] for e in existing["matched_entities"])
+                    existing["entity_type"] = "both" if any(e["entity_type"] == "studio" for e in existing["matched_entities"]) else "performer"
+                    existing["entity_name"] = all_names
+                    existing["entity_id"] = all_ids
+                    existing["label"] = f"[{' & '.join(e['entity_type'].capitalize() for e in existing['matched_entities'])}: {all_names}] → {p}"
+                    if any(e.get("is_custom_mapped") for e in existing["matched_entities"]):
+                        existing["is_custom_mapped"] = True
+                        existing["label"] += " (Custom Mapped)"
+                else:
+                    matched_candidates_by_folder[p_res] = {
+                        "destination_folder": str(p),
+                        "entity_type": "performer",
+                        "entity_name": p_ent["name"],
+                        "entity_id": str(p_ent["id"]),
+                        "is_custom_mapped": (p_status_curr == "custom_mapping"),
+                        "match_source": p_match.get("source", "filename"),
+                        "matched_alias": p_match.get("matched_alias") if len(p_entities) == 1 else None,
+                        "label": f"[Performer] {p_ent['name']} → {p}" + (" (Custom Mapped)" if p_status_curr == "custom_mapping" else "")
+                    }
+
+        s_paths = []
+        s_status = None
+        if s_valid:
+            s_entity = s_match["entity"]
+            s_paths, s_status = resolve_filing_destinations(
+                dest_roots, s_entity["name"], entity_id=str(s_entity["id"]), entity_type="studio",
+                database_path=database_path, max_depth=max_depth
+            )
+            for p in s_paths:
+                p_res = str(p.resolve())
+                if p_res in matched_candidates_by_folder:
+                    existing = matched_candidates_by_folder[p_res]
+                    if "matched_entities" not in existing:
+                        existing["matched_entities"] = [
+                            {
+                                "entity_type": existing["entity_type"],
+                                "entity_name": existing["entity_name"],
+                                "entity_id": str(existing["entity_id"]),
+                                "is_custom_mapped": existing.get("is_custom_mapped", False),
+                                "match_source": existing.get("match_source", "filename"),
+                                "matched_alias": existing.get("matched_alias")
+                            }
+                        ]
+                    if not any(e["entity_id"] == str(s_entity["id"]) and e["entity_type"] == "studio" for e in existing["matched_entities"]):
+                        existing["matched_entities"].append({
+                            "entity_type": "studio",
+                            "entity_name": s_entity["name"],
+                            "entity_id": str(s_entity["id"]),
+                            "is_custom_mapped": (s_status == "custom_mapping"),
+                            "match_source": s_match.get("source", "filename"),
+                            "matched_alias": s_match.get("matched_alias")
+                        })
+                    all_names = " & ".join(e["entity_name"] for e in existing["matched_entities"])
+                    all_ids = ",".join(e["entity_id"] for e in existing["matched_entities"])
+                    existing["entity_type"] = "both"
+                    existing["entity_name"] = all_names
+                    existing["entity_id"] = all_ids
+                    existing["label"] = f"[{' & '.join(e['entity_type'].capitalize() for e in existing['matched_entities'])}: {all_names}] → {p}"
+                    if any(e.get("is_custom_mapped") for e in existing["matched_entities"]):
+                        existing["is_custom_mapped"] = True
+                        existing["label"] += " (Custom Mapped)"
+                else:
+                    matched_candidates_by_folder[p_res] = {
+                        "destination_folder": str(p),
+                        "entity_type": "studio",
+                        "entity_name": s_entity["name"],
+                        "entity_id": str(s_entity["id"]),
+                        "is_custom_mapped": (s_status == "custom_mapping"),
+                        "match_source": s_match.get("source", "filename"),
+                        "matched_alias": s_match.get("matched_alias"),
+                        "label": f"[Studio] {s_entity['name']} → {p}" + (" (Custom Mapped)" if s_status == "custom_mapping" else "")
+                    }
+
+        # Build detailed diagnostics for Both mode
+        p_matched_count = sum(1 for (paths, _) in p_matched_paths_by_ent.values() if paths)
+        if p_valid:
+            if len(p_entities) == 1:
+                p_name = p_entities[0]["name"]
+                p_diag = f"Performer '{p_name}' matched" if p_matched_count > 0 else f"Performer '{p_name}' identified, but no destination folder found"
+            else:
+                p_names = ", ".join(e["name"] for e in p_entities)
+                p_diag = f"Multiple performers matched ({p_names})" if p_matched_count > 0 else f"Multiple performers identified ({p_names}), but no destination folders found"
+        else:
+            p_diag = p_match.get("reason", "No matching performer found")
+
+        if s_valid:
+            s_diag = f"Studio '{s_match['entity']['name']}' matched" if s_paths else f"Studio '{s_match['entity']['name']}' identified, but no destination folder found"
+        else:
+            s_diag = s_match.get("reason", "No matching studio found")
+
+        if not p_valid and not s_valid:
+            if "No matching performer found" in p_diag and "No matching studio found" in s_diag:
+                record_incoming_filing_diagnostic(database_path, file_path, "No matching performer or studio found.")
+            else:
+                record_incoming_filing_diagnostic(database_path, file_path, f"Performer: {p_diag} | Studio: {s_diag}")
+            return None
+
+        if not matched_candidates_by_folder:
+            record_incoming_filing_diagnostic(database_path, file_path, f"Performer: {p_diag} | Studio: {s_diag}")
+            return None
+
+        primary_match = p_match if (p_valid and p_matched_count > 0) else s_match
+        primary_entity = p_entities[0] if (p_valid and p_matched_count > 0) else s_match.get("entity", {})
+        effective_organize_by = "both"
+
+    else:
+        all_performers = []
+        try:
+            gql_res = stash.call_GQL('{ allPerformers { id name disambiguation alias_list } }')
+            all_performers = (gql_res or {}).get("allPerformers") or []
+        except Exception:
+            pass
+        p_match = match_performer_for_filing(scene, src.name, all_performers, match_source=match_source)
+        if not p_match.get("matched"):
+            p_reason = p_match.get("reason") or "No matching performer found in filename or Stash metadata."
+            record_incoming_filing_diagnostic(database_path, file_path, p_reason)
+            return None
+        p_entities = p_match.get("entities") or ([p_match["entity"]] if p_match.get("entity") else [])
+        for p_ent in p_entities:
+            p_paths, p_status = resolve_filing_destinations(
+                dest_roots, p_ent["name"], entity_id=str(p_ent["id"]), entity_type="performer",
+                database_path=database_path, max_depth=max_depth
+            )
+            for p in p_paths:
+                p_res = str(p.resolve())
+                if p_res in matched_candidates_by_folder:
+                    existing = matched_candidates_by_folder[p_res]
+                    if "matched_entities" not in existing:
+                        existing["matched_entities"] = [
+                            {
+                                "entity_type": existing["entity_type"],
+                                "entity_name": existing["entity_name"],
+                                "entity_id": str(existing["entity_id"]),
+                                "is_custom_mapped": existing.get("is_custom_mapped", False),
+                                "match_source": existing.get("match_source", "filename"),
+                                "matched_alias": existing.get("matched_alias")
+                            }
+                        ]
+                    if not any(e["entity_id"] == str(p_ent["id"]) and e["entity_type"] == "performer" for e in existing["matched_entities"]):
+                        existing["matched_entities"].append({
+                            "entity_type": "performer",
+                            "entity_name": p_ent["name"],
+                            "entity_id": str(p_ent["id"]),
+                            "is_custom_mapped": (p_status == "custom_mapping"),
+                            "match_source": p_match.get("source", "filename"),
+                            "matched_alias": p_match.get("matched_alias") if len(p_entities) == 1 else None
+                        })
+                    all_names = " & ".join(e["entity_name"] for e in existing["matched_entities"])
+                    all_ids = ",".join(e["entity_id"] for e in existing["matched_entities"])
+                    existing["entity_name"] = all_names
+                    existing["entity_id"] = all_ids
+                    existing["label"] = f"[Performer: {all_names}] → {p}"
+                    if any(e.get("is_custom_mapped") for e in existing["matched_entities"]):
+                        existing["is_custom_mapped"] = True
+                        existing["label"] += " (Custom Mapped)"
+                else:
+                    matched_candidates_by_folder[p_res] = {
+                        "destination_folder": str(p),
+                        "entity_type": "performer",
+                        "entity_name": p_ent["name"],
+                        "entity_id": str(p_ent["id"]),
+                        "is_custom_mapped": (p_status == "custom_mapping"),
+                        "match_source": p_match.get("source", "filename"),
+                        "matched_alias": p_match.get("matched_alias") if len(p_entities) == 1 else None,
+                        "label": f"[Performer] {p_ent['name']} → {p}" + (" (Custom Mapped)" if p_status == "custom_mapping" else "")
+                    }
+
+        if not matched_candidates_by_folder:
+            if len(p_entities) == 1:
+                record_incoming_filing_diagnostic(database_path, file_path, f"Performer '{p_entities[0]['name']}' identified, but no destination folder found.")
+            else:
+                names = ", ".join(e["name"] for e in p_entities)
+                record_incoming_filing_diagnostic(database_path, file_path, f"Multiple performers identified ({names}), but no destination folders found.")
+            return None
+
+        primary_match = p_match
+        primary_entity = p_entities[0]
+        effective_organize_by = "performer"
+
+    if not matched_candidates_by_folder:
+        record_incoming_filing_diagnostic(database_path, file_path, "No destination folder found for matched entity.")
+        return None
+
+    raw_candidates_list = list(matched_candidates_by_folder.values())
+    proposed_name = src.name
+    in_nested_folder = 1 if _is_in_nested_incoming_folder(src, incoming_folders) else 0
+
+    if len(raw_candidates_list) == 1:
+        single_cand = raw_candidates_list[0]
+        dest_folder = Path(single_cand["destination_folder"])
+        proposed_path = dest_folder / proposed_name
+        is_custom_mapped = 1 if single_cand.get("is_custom_mapped") else 0
+        matched_entity_id = single_cand.get("entity_id", primary_entity.get("id"))
+        matched_entity_name = single_cand.get("entity_name", primary_entity.get("name"))
+        matched_alias = single_cand.get("matched_alias")
+        match_source_val = single_cand.get("match_source", primary_match.get("source", "filename"))
+        cand_organize_by = single_cand.get("entity_type", effective_organize_by)
+
+        if proposed_path.exists():
+            record_incoming_filing_diagnostic(database_path, file_path, f"Destination conflict: target file '{proposed_path.name}' already exists in destination folder.")
+            return None
+
+        # Check inventory conflict in database
+        conn = connect(database_path)
+        try:
+            conflict = conn.execute("SELECT 1 FROM files WHERE path=? AND exists_on_disk=1", (str(proposed_path),)).fetchone() is not None
+            if conflict:
+                record_incoming_filing_diagnostic(database_path, file_path, f"Destination conflict: target path already registered in Stash library.")
+                return None
+        finally:
+            conn.close()
+
+        companions, comp_err = find_filing_companions(src, dest_folder, proposed_name)
+        if comp_err:
+            record_incoming_filing_diagnostic(database_path, file_path, f"Filing skipped: companion file collision ({comp_err})")
+            return None
+
+        # If merged both candidate, retain it in candidate_destinations so metadata choice is available
+        if single_cand.get("entity_type") == "both":
+            candidate_destinations = raw_candidates_list
+        else:
+            candidate_destinations = []
+    else:
+        dest_folder = ""
+        proposed_path = ""
+        companions = []
+        is_custom_mapped = 1 if any(c.get("is_custom_mapped") for c in raw_candidates_list) else 0
+        matched_entity_id = "multiple"
+        matched_entity_name = "Multiple Candidates"
+        matched_alias = None
+        match_source_val = "multiple"
+        cand_organize_by = effective_organize_by
+        candidate_destinations = raw_candidates_list
+
+    companions_json = json.dumps([{"source": str(s), "target": str(t)} for s, t in companions])
+    candidate_destinations_json = json.dumps(candidate_destinations)
+    now = utc_now()
+    connection = connect(database_path)
+    proposal_id = None
+    try:
+        existing_p = connection.execute(
+            "SELECT id FROM filing_proposals WHERE (file_id=? OR scene_id=? OR source_path=?) AND status IN ('pending', 'blocked')",
+            (str(file_id or ""), str(scene_id or ""), str(src))
+        ).fetchone()
+
+        if existing_p:
+            proposal_id = existing_p["id"]
+            connection.execute(
+                """UPDATE filing_proposals SET
+                    file_id=?, scene_id=?, source_path=?, proposed_path=?, destination_folder=?, destination_filename=?,
+                    organize_by=?, matched_entity_id=?, matched_entity_name=?, matched_alias=?, match_source=?,
+                    reason=?, companions_json=?, candidate_destinations_json=?, is_custom_mapped=?, in_nested_folder=?,
+                    status='pending', last_error=NULL, updated_at=?
+                WHERE id=?""",
+                (
+                    file_id, scene_id, str(src), str(proposed_path), str(dest_folder), proposed_name,
+                    cand_organize_by, str(matched_entity_id), str(matched_entity_name), matched_alias,
+                    match_source_val, f"Matched {cand_organize_by} '{matched_entity_name}' ({match_source_val})",
+                    companions_json, candidate_destinations_json, is_custom_mapped, in_nested_folder,
+                    now, proposal_id
+                )
+            )
+        else:
+            cur = connection.execute(
+                """INSERT INTO filing_proposals (
+                    file_id, scene_id, source_path, proposed_path, destination_folder, destination_filename,
+                    organize_by, matched_entity_id, matched_entity_name, matched_alias, match_source,
+                    reason, companions_json, candidate_destinations_json, is_custom_mapped, in_nested_folder,
+                    status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                (
+                    file_id, scene_id, str(src), str(proposed_path), str(dest_folder), proposed_name,
+                    cand_organize_by, str(matched_entity_id), str(matched_entity_name), matched_alias,
+                    match_source_val, f"Matched {cand_organize_by} '{matched_entity_name}' ({match_source_val})",
+                    companions_json, candidate_destinations_json, is_custom_mapped, in_nested_folder,
+                    now, now
+                )
+            )
+            proposal_id = cur.lastrowid
+        connection.commit()
+    finally:
+        connection.close()
+
+    dest_name = dest_folder.name if hasattr(dest_folder, "name") and dest_folder.name else (str(dest_folder) if dest_folder else "multiple candidate destinations")
+    record_activity(
+        database_path, "filing", "proposal created", "pending",
+        scene_id=scene_id, file_id=file_id, old_path=str(src), new_path=str(proposed_path),
+        detail=f"Proposed filing to {dest_name} for {cand_organize_by} '{matched_entity_name}'"
+    )
+
+    if len(raw_candidates_list) == 1:
+        record_incoming_filing_diagnostic(database_path, file_path, f"Proposal ready: {cand_organize_by} '{matched_entity_name}' → {dest_folder}")
+    else:
+        record_incoming_filing_diagnostic(database_path, file_path, f"Proposal ready: Multiple candidate destinations ({len(raw_candidates_list)}) requiring selection.")
+
+    return {
+        "id": proposal_id,
+        "file_id": file_id,
+        "scene_id": scene_id,
+        "source_path": str(src),
+        "proposed_path": str(proposed_path),
+        "destination_folder": str(dest_folder),
+        "destination_filename": proposed_name,
+        "organize_by": cand_organize_by,
+        "matched_entity_id": matched_entity_id,
+        "matched_entity_name": matched_entity_name,
+        "matched_alias": matched_alias,
+        "match_source": match_source_val,
+        "candidate_destinations": candidate_destinations,
+        "is_custom_mapped": bool(is_custom_mapped),
+        "in_nested_folder": bool(in_nested_folder),
+        "companions": [{"source": str(s), "target": str(t)} for s, t in companions],
+        "companions_count": len(companions),
+        "status": "pending",
+    }
+
+
+def retry_filing_proposal(
+    database_path: Path,
+    stash,
+    file_path: str,
+    config: dict = None,
+    allow_baseline: bool = False,
+    allow_refresh: bool = False,
+    proposal_id: int | None = None
+) -> dict:
+    """Re-evaluate an eligible, already-imported incoming scene for automatic filing.
+    - Evaluates current Stash metadata, aliases, custom mappings, and destination folders.
+    - Preserves scene ID and file identity without rescanning, reimporting, or resetting baseline.
+    - Prevents duplicate proposals and rejects retries for ineligible items or active/recovery states.
+    """
+    if not file_path:
+        return {"success": False, "error": "No file path provided."}
+
+    src = Path(file_path).resolve()
+    if not src.is_file():
+        return {"success": False, "error": f"File does not exist on disk: {file_path}"}
+
+    if config is None:
+        config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
+
+    if not config.get("autoFilingEnabled"):
+        return {"success": False, "error": "Automatic filing is disabled in settings."}
+
+    # 1. Prevent duplicate proposals, check unresolved recovery states, and reject already-filed scenes
+    conn = connect(database_path)
+    try:
+        query_id = int(proposal_id) if proposal_id else -1
+        active_prop = conn.execute(
+            """SELECT id, status, proposed_path, destination_folder FROM filing_proposals
+               WHERE (source_path = ? OR proposed_path = ? OR id = ?) AND status IN ('pending', 'blocked', 'needs_recovery', 'completed')""",
+            (str(src), str(src), query_id)
+        ).fetchone()
+        if active_prop:
+            if active_prop["status"] == "needs_recovery":
+                return {
+                    "success": False,
+                    "error": "This file has an unresolved filing recovery in progress. Resolve or recover it first."
+                }
+            elif active_prop["status"] == "completed":
+                return {
+                    "success": False,
+                    "error": "This scene has already been successfully filed to its destination."
+                }
+            if active_prop["status"] in ("pending", "blocked") and not allow_refresh:
+                return {
+                    "success": False,
+                    "error": "An active filing proposal already exists for this scene."
+                }
+            if allow_refresh:
+                allow_baseline = True
+    finally:
+        conn.close()
+
+    # Verify file is inside configured incoming folders
+    incoming_folders = get_configured_incoming_folders(config)
+    if incoming_folders:
+        is_inside_incoming = any(
+            _is_subpath_of(src, Path(f).resolve())
+            for f in incoming_folders
+        )
+        if not is_inside_incoming:
+            return {
+                "success": False,
+                "error": "This file is not located inside any configured Incoming folder."
+            }
+
+    # 2. Check scene linkage in files table or Stash
+    file_id = None
+    scene_id = None
+    conn = connect(database_path)
+    try:
+        f_row = conn.execute(
+            "SELECT file_id, scene_id FROM files WHERE path=? AND exists_on_disk=1",
+            (str(src),)
+        ).fetchone()
+        if f_row:
+            file_id = str(f_row["file_id"])
+            scene_id = str(f_row["scene_id"])
+    finally:
+        conn.close()
+
+    scene_data = None
+    if scene_id:
+        try:
+            gql_res = stash.call_GQL(
+                "query FindSceneForFiling($id: ID!) { findScene(id: $id) { id title files { id path } performers { id name disambiguation alias_list } studio { id name aliases } } }",
+                {"id": str(scene_id)}
+            )
+            scene_data = (gql_res or {}).get("findScene")
+        except Exception as exc:
+            logger.debug("Failed querying Stash findScene for scene %s: %s", scene_id, exc)
+    else:
+        try:
+            gql_res = stash.call_GQL(
+                "query FindSceneByPath($filter: FindFilterType, $scene_filter: SceneFilterType) { findScenes(filter: $filter, scene_filter: $scene_filter) { scenes { id title files { id path } performers { id name disambiguation alias_list } studio { id name aliases } } } }",
+                {"scene_filter": {"path": {"value": str(src), "modifier": "EQUALS"}}}
+            )
+            scenes = ((gql_res or {}).get("findScenes") or {}).get("scenes") or []
+            if scenes:
+                scene_data = scenes[0]
+                scene_id = str(scene_data["id"])
+                for f in (scene_data.get("files") or []):
+                    if f.get("path") and str(Path(f["path"]).resolve()) == str(src):
+                        file_id = str(f.get("id"))
+                        break
+        except Exception:
+            pass
+
+    if not scene_id or not scene_data:
+        return {"success": False, "error": "Could not locate linked Stash scene for this file."}
+
+    # 3. Eligibility check / Disqualification
+    file_size = src.stat().st_size
+    oshash = opensubtitles_hash(src)
+    disqualified, disq_reason = is_disqualified_from_filing(database_path, str(src), file_size, oshash, file_id, scene_id, allow_baseline=allow_baseline, allow_refresh=allow_refresh)
+    if disqualified:
+        record_incoming_filing_diagnostic(database_path, str(src), f"Filing skipped: {disq_reason}")
+        return {"success": False, "error": f"Filing ineligible: {disq_reason}", "diagnostic": f"Filing skipped: {disq_reason}"}
+
+    # 4. Evaluate proposal (reuses destination roots directory cache within its TTL)
+    prop = evaluate_filing_proposal(database_path, stash, str(src), scene_data, config, allow_baseline=allow_baseline, allow_refresh=allow_refresh)
+
+    # 6. Read persisted diagnostic
+    conn = connect(database_path)
+    try:
+        diag_row = conn.execute("SELECT filing_diagnostic FROM incoming_files WHERE path=?", (str(src),)).fetchone()
+        diag = diag_row["filing_diagnostic"] if diag_row else None
+    finally:
+        conn.close()
+
+    if prop:
+        return {
+            "success": True,
+            "proposal": prop,
+            "diagnostic": diag,
+            "message": f"Filing proposal created for '{prop.get('matched_entity_name')}'."
+        }
+    else:
+        return {
+            "success": False,
+            "diagnostic": diag,
+            "message": diag or "No matching performer, studio, or destination folder found."
+        }
+
+
+def _move_file(source: Path | str, target: Path | str):
+    """Move a file safely, supporting cross-device moves across different volumes."""
+    src_p = Path(source)
+    tgt_p = Path(target)
+    try:
+        src_p.rename(tgt_p)
+    except OSError as e:
+        if e.errno == 18 or getattr(e, "winerror", None) == 17:
+            shutil.move(str(src_p), str(tgt_p))
+        else:
+            raise
+
+
+
+def _format_bytes(num_bytes: int | float) -> str:
+    if num_bytes is None:
+        return "0 B"
+    num = float(num_bytes)
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if abs(num) < 1024.0:
+            return f"{num:.1f} {unit}" if unit in ["MB", "GB", "TB"] else f"{int(num)} {unit}"
+        num /= 1024.0
+    return f"{num:.1f} PB"
+
+
+def _update_active_transfer(database_path: Path, proposal_id: int, scene_id: str, file_id: str, source_path: str, destination_path: str, destination_folder: str, stage: str, stage_label: str, detail: str, total_bytes: int = 0):
+    now = utc_now()
+    connection = connect(database_path)
+    try:
+        connection.execute(
+            """INSERT OR REPLACE INTO active_filing_transfers (
+                proposal_id, scene_id, file_id, source_path, destination_path, destination_folder,
+                stage, stage_label, detail, total_bytes, started_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                COALESCE((SELECT started_at FROM active_filing_transfers WHERE proposal_id=?), ?),
+                ?
+            )""",
+            (
+                proposal_id, str(scene_id or ""), str(file_id or ""), str(source_path), str(destination_path), str(destination_folder),
+                stage, stage_label, detail, int(total_bytes or 0),
+                proposal_id, now, now
+            )
+        )
+        connection.commit()
+    except Exception as e:
+        logger.debug("Error recording active filing transfer: %s", e)
+    finally:
+        connection.close()
+
+
+def _clear_active_transfer(database_path: Path, proposal_id: int):
+    connection = connect(database_path)
+    try:
+        connection.execute("DELETE FROM active_filing_transfers WHERE proposal_id=?", (proposal_id,))
+        connection.commit()
+    except Exception as e:
+        logger.debug("Error clearing active filing transfer: %s", e)
+    finally:
+        connection.close()
+
+
+def get_active_filing_transfers(database_path: Path) -> list[dict]:
+    connection = connect(database_path)
+    try:
+        # Prune transfers that died over 1 hour ago
+        now = datetime.now().timestamp()
+        rows = connection.execute("SELECT * FROM active_filing_transfers ORDER BY started_at ASC").fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+    finally:
+        connection.close()
+
+
+def apply_filing_proposal(
+    database_path: Path,
+    stash,
+    proposal_id: int,
+    config: dict = None,
+    update_metadata: bool = False,
+    target_destination_folder: str = None,
+    target_entity_type: str = None,
+    target_entity_id: str = None
+) -> dict:
+    """Applies an approved automatic filing proposal with strict safety verification.
+    - Locks the database for renaming operations.
+    - Limits active transfers to 1 at a time to prevent concurrency collisions.
+    - Updates real-time transfer stages in active_filing_transfers table.
+    - Validates source file, destination root, and baseline integrity before any move.
+    - Verifies chosen candidate destination against stored proposal candidate destinations.
+    - Applies file move via Stash move_files.
+    - Moves companions with rollback if anything fails.
+    - Performs safe, targeted metadata updates for the selected entity only.
+    """
+    with rename_lock(database_path):
+        active_transfers = get_active_filing_transfers(database_path)
+        if active_transfers and any(t.get("proposal_id") != proposal_id for t in active_transfers):
+            return {
+                "id": proposal_id,
+                "status": "blocked",
+                "reason": "Another filing transfer is currently in progress. Transfers are serialized for safety."
+            }
+
+        connection = connect(database_path)
+        try:
+            row = connection.execute("SELECT * FROM filing_proposals WHERE id=?", (proposal_id,)).fetchone()
+            if not row:
+                return {"id": proposal_id, "status": "blocked", "reason": "Proposal not found"}
+            proposal = dict(row)
+        finally:
+            connection.close()
+
+        if proposal["status"] != "pending":
+            return {"id": proposal_id, "status": "blocked", "reason": f"Proposal is already '{proposal['status']}'"}
+
+        if config is None:
+            config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
+
+        src = Path(proposal["source_path"])
+        file_id = proposal["file_id"]
+        scene_id = proposal["scene_id"]
+        file_size = src.stat().st_size if src.is_file() else 0
+
+        raw_candidates = json.loads(proposal.get("candidate_destinations_json") or "[]")
+        selected_candidate = None
+
+        if target_destination_folder:
+            target_norm = str(Path(target_destination_folder).resolve())
+            for c in raw_candidates:
+                c_path = c.get("destination_folder") if isinstance(c, dict) else str(c)
+                if c_path and str(Path(c_path).resolve()) == target_norm:
+                    selected_candidate = c if isinstance(c, dict) else {"destination_folder": c_path}
+                    break
+            else:
+                if raw_candidates:
+                    reason = "Approval blocked: Selected destination folder is not an eligible candidate for this proposal"
+                    _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                    return {"id": proposal_id, "status": "blocked", "reason": reason}
+                else:
+                    selected_candidate = {"destination_folder": target_destination_folder}
+            dest_folder = Path(target_destination_folder)
+            dest_video = dest_folder / proposal["destination_filename"]
+        else:
+            if not proposal["destination_folder"] or not proposal["proposed_path"]:
+                reason = "Approval blocked: Proposal has multiple candidates; destination selection is required"
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+            dest_folder = Path(proposal["destination_folder"])
+            dest_video = Path(proposal["proposed_path"])
+            if raw_candidates and isinstance(raw_candidates[0], dict):
+                selected_candidate = raw_candidates[0]
+
+        _update_active_transfer(
+            database_path, proposal_id, str(scene_id or ""), str(file_id or ""), str(src), str(dest_video), str(dest_folder),
+            stage="validating", stage_label="Preflight Verification",
+            detail=f"Validating source, destination and companion paths ({_format_bytes(file_size)})...",
+            total_bytes=file_size
+        )
+
+        try:
+            # REQUIREMENT 2: Fail closed on Incoming configuration & destination root
+            raw_incoming = config.get("incomingFolders") or ([config.get("incomingFolder")] if config.get("incomingFolder") else [])
+            if isinstance(raw_incoming, (list, tuple)):
+                incoming_folders = [str(f).strip() for f in raw_incoming if isinstance(f, (str, Path)) and str(f).strip()]
+            else:
+                incoming_folders = []
+
+            if not incoming_folders:
+                reason = "Approval blocked: Incoming configuration is missing or empty; cannot verify source eligibility"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            is_inside_incoming = False
+            resolved_src = str(src.resolve())
+            for inc_root in incoming_folders:
+                try:
+                    inc_res = str(Path(inc_root).expanduser().resolve())
+                    if resolved_src == inc_res or resolved_src.startswith(inc_res + os.sep):
+                        is_inside_incoming = True
+                        break
+                except Exception:
+                    continue
+
+            if not is_inside_incoming:
+                reason = f"Approval blocked: source file {src} is not located in any currently configured Incoming folder"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            conn = connect(database_path)
+            try:
+                relocated = conn.execute(
+                    "SELECT path FROM files WHERE (file_id=? OR scene_id=?) AND path != ? AND exists_on_disk=1",
+                    (str(file_id), str(scene_id), str(src))
+                ).fetchone()
+                if relocated:
+                    reason = f"Approval blocked: scene/file was already relocated to {relocated['path']}"
+                    _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                    return {"id": proposal_id, "status": "blocked", "reason": reason}
+            finally:
+                conn.close()
+
+            # Revalidate destination roots (FAIL CLOSED)
+            configured_dest_roots = get_configured_filing_destination_roots(config)
+            if not configured_dest_roots:
+                reason = "Approval blocked: autoFilingDestinationRoot is not configured; cannot verify destination folder"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            has_existing_root = False
+            for root_str in configured_dest_roots:
+                if Path(root_str).is_dir():
+                    has_existing_root = True
+                    break
+            if not has_existing_root:
+                reason = f"Approval blocked: configured destination root does not exist on disk: {configured_dest_roots[0]}"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            is_inside_root = False
+            resolved_dest_folder_str = str(dest_folder.resolve())
+            for root_str in configured_dest_roots:
+                try:
+                    root_res = str(Path(root_str).expanduser().resolve())
+                    if resolved_dest_folder_str == root_res or resolved_dest_folder_str.startswith(root_res + os.sep):
+                        is_inside_root = True
+                        break
+                except Exception:
+                    continue
+
+            if not is_inside_root:
+                reason = f"Approval blocked: destination folder {dest_folder} is not under current destination root {configured_dest_roots[0]}"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            if not src.is_file():
+                _update_proposal_status(database_path, proposal_id, "blocked", "Source file no longer exists on disk")
+                return {"id": proposal_id, "status": "blocked", "reason": "Source file no longer exists on disk"}
+
+            if not dest_folder.is_dir():
+                _update_proposal_status(database_path, proposal_id, "blocked", "Destination folder does not exist")
+                return {"id": proposal_id, "status": "blocked", "reason": "Destination folder does not exist"}
+
+            if dest_video.exists():
+                _update_proposal_status(database_path, proposal_id, "blocked", "Destination file already exists")
+                return {"id": proposal_id, "status": "blocked", "reason": "Destination file already exists"}
+
+            conn = connect(database_path)
+            try:
+                conflict = conn.execute("SELECT 1 FROM files WHERE path=? AND exists_on_disk=1", (str(dest_video),)).fetchone() is not None
+                if conflict:
+                    _update_proposal_status(database_path, proposal_id, "blocked", "Destination path conflicts with Stash inventory")
+                    return {"id": proposal_id, "status": "blocked", "reason": "Destination path conflicts with Stash inventory"}
+            finally:
+                conn.close()
+
+            if target_destination_folder:
+                companions, comp_err = find_filing_companions(src, dest_folder, dest_video.name)
+                if comp_err:
+                    _update_proposal_status(database_path, proposal_id, "blocked", comp_err)
+                    return {"id": proposal_id, "status": "blocked", "reason": comp_err}
+            else:
+                recorded_companions = json.loads(proposal.get("companions_json") or "[]")
+                if recorded_companions:
+                    companions = [(Path(c["source"]), Path(c["target"])) for c in recorded_companions]
+                else:
+                    companions, comp_err = find_filing_companions(src, dest_folder, dest_video.name)
+                    if comp_err:
+                        _update_proposal_status(database_path, proposal_id, "blocked", comp_err)
+                        return {"id": proposal_id, "status": "blocked", "reason": comp_err}
+
+            for c_src, c_dst in companions:
+                if not c_src.is_file():
+                    reason = f"Preflight companion check failed: recorded companion missing from source: {c_src.name}"
+                    _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                    return {"id": proposal_id, "status": "blocked", "reason": reason}
+                if c_dst.exists():
+                    reason = f"Preflight companion check failed: destination collision already exists on disk: {c_dst.name}"
+                    _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                    return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            # Step 2.5: Preflight Stash scene ownership check (FAIL CLOSED)
+            try:
+                ownership_res = stash.call_GQL(
+                    "query FindScene($id: ID!) { findScene(id: $id) { id files { id path } } }",
+                    {"id": str(scene_id)}
+                )
+            except Exception as q_err:
+                reason = f"Approval blocked: Stash scene ownership query failed ({q_err})"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            scene_obj = (ownership_res or {}).get("findScene")
+            if not scene_obj:
+                reason = f"Approval blocked: Stash scene {scene_id} does not exist or returned incomplete data"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            scene_files = scene_obj.get("files") or []
+            if not scene_files:
+                reason = f"Approval blocked: Stash scene {scene_id} has no file records"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            matched_scene_file = None
+            for sf in scene_files:
+                if str(sf.get("id")) == str(file_id):
+                    matched_scene_file = sf
+                    break
+            if not matched_scene_file:
+                reason = f"Approval blocked: file ID {file_id} not found in Stash scene {scene_id}"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            sf_path = matched_scene_file.get("path") or ""
+            if str(Path(sf_path).resolve()) != str(src.resolve()):
+                reason = f"Approval blocked: Stash file path '{sf_path}' does not match proposal source path '{src}'"
+                _update_proposal_status(database_path, proposal_id, "blocked", reason)
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
+
+            # Step 3: Execute Stash move
+            _update_active_transfer(
+                database_path, proposal_id, str(scene_id or ""), str(file_id or ""), str(src), str(dest_video), str(dest_folder),
+                stage="moving_video", stage_label="Transferring Video",
+                detail=f"Moving video to {dest_folder.name} ({_format_bytes(file_size)})...",
+                total_bytes=file_size
+            )
+
+            expect_filesystem_move(database_path, str(src), str(dest_video))
+            stash_res = None
+            move_err = None
+            try:
+                stash_res = stash.move_files({
+                    "ids": [proposal["file_id"]],
+                    "destination_folder": str(dest_folder),
+                    "destination_basename": dest_video.name
+                })
+            except Exception as err:
+                move_err = str(err)
+
+            if not stash_res or move_err:
+                src_exists = src.is_file()
+                dest_exists = dest_video.is_file()
+                disk_confirmed_at_src = src_exists and not dest_exists
+
+                stash_confirmed_at_src = False
+                stash_unverified_detail = None
+                try:
+                    scene_check = stash.call_GQL(
+                        "query FindScene($id: ID!) { findScene(id: $id) { id files { id path } } }",
+                        {"id": str(scene_id)}
+                    )
+                    if isinstance(scene_check, dict) and scene_check.get("findScene"):
+                        files = scene_check["findScene"].get("files") or []
+                        for f in files:
+                            if str(f.get("id")) == str(file_id):
+                                f_path = f.get("path")
+                                if f_path and str(Path(f_path).resolve()) == str(src.resolve()):
+                                    stash_confirmed_at_src = True
+                                else:
+                                    stash_unverified_detail = f"Stash file path is '{f_path}' (expected '{src}')"
+                                break
+                        else:
+                            stash_unverified_detail = f"file ID {file_id} not found in Stash scene files"
+                    else:
+                        stash_unverified_detail = "Stash scene query returned no scene data"
+                except Exception as check_exc:
+                    stash_unverified_detail = f"Stash query failed: {check_exc}"
+
+                if disk_confirmed_at_src and stash_confirmed_at_src:
+                    err_msg = f"Stash move_files failed ({move_err}); video untouched at source and confirmed in Stash"
+                    _update_proposal_status(database_path, proposal_id, "failed", err_msg)
+                    record_activity(
+                        database_path, "filing", "move failed", "failed",
+                        scene_id=scene_id, file_id=file_id,
+                        old_path=str(src), new_path=str(dest_video),
+                        detail=err_msg
+                    )
+                    return {"id": proposal_id, "status": "failed", "reason": err_msg}
+                else:
+                    unverified_reasons = []
+                    if not disk_confirmed_at_src:
+                        if dest_exists:
+                            unverified_reasons.append(f"video exists at destination {dest_video.name}")
+                        if not src_exists:
+                            unverified_reasons.append(f"video missing at source {src.name}")
+                    if not stash_confirmed_at_src:
+                        unverified_reasons.append(f"Stash record unconfirmed: {stash_unverified_detail}")
+                    
+                    err_msg = f"CRITICAL: Stash move failed and post-move state could not be verified clean: {'; '.join(unverified_reasons)}"
+                    _update_proposal_status(database_path, proposal_id, "needs_recovery", err_msg)
+                    record_activity(
+                        database_path, "filing", "move failed - needs recovery", "needs_recovery",
+                        scene_id=scene_id, file_id=file_id,
+                        old_path=str(src), new_path=str(dest_video),
+                        detail=err_msg
+                    )
+                    return {"id": proposal_id, "status": "needs_recovery", "reason": err_msg}
+
+            # Step 4: Move companions
+            moved_companions = []
+            companion_fail = None
+            if companions:
+                _update_active_transfer(
+                    database_path, proposal_id, str(scene_id or ""), str(file_id or ""), str(src), str(dest_video), str(dest_folder),
+                    stage="moving_companions", stage_label="Transferring Companions",
+                    detail=f"Moving {len(companions)} companion file(s)...",
+                    total_bytes=file_size
+                )
+            for c_src, c_dst in companions:
+                if c_src.is_file():
+                    try:
+                        expect_filesystem_move(database_path, str(c_src), str(c_dst))
+                        _move_file(c_src, c_dst)
+                        moved_companions.append((c_src, c_dst))
+                    except Exception as c_err:
+                        companion_fail = f"Failed moving companion {c_src.name} to {c_dst}: {c_err}"
+                        break
+
+            if companion_fail:
+                # Rollback moved companions
+                rollback_ok = True
+                for orig_src, orig_dst in reversed(moved_companions):
+                    if orig_dst.is_file():
+                        try:
+                            expect_filesystem_move(database_path, str(orig_dst), str(orig_src))
+                            _move_file(orig_dst, orig_src)
+                        except Exception:
+                            rollback_ok = False
+                # Move video back via Stash
+                video_rb_err = None
+                try:
+                    expect_filesystem_move(database_path, str(dest_video), str(src))
+                    stash_back = stash.move_files({
+                        "ids": [proposal["file_id"]],
+                        "destination_folder": str(src.parent),
+                        "destination_basename": src.name
+                    })
+                    if stash_back is False:
+                        rollback_ok = False
+                        video_rb_err = "Stash move_files returned False during rollback"
+                except Exception as v_err:
+                    rollback_ok = False
+                    video_rb_err = str(v_err)
+
+                if rollback_ok and src.is_file() and not dest_video.exists():
+                    err_msg = f"{companion_fail}; safely restored to source"
+                    _update_proposal_status(database_path, proposal_id, "failed", err_msg)
+                    return {"id": proposal_id, "status": "failed", "rolled_back": True, "reason": err_msg}
+                else:
+                    err_msg = f"CRITICAL: Failed moving companion: {companion_fail}; Video rollback failed: {video_rb_err or 'dest exists or src missing'}"
+                    _update_proposal_status(database_path, proposal_id, "needs_recovery", err_msg)
+                    return {"id": proposal_id, "status": "needs_recovery", "rolled_back": False, "reason": err_msg}
+
+            # Step 5: Update database records
+            _update_active_transfer(
+                database_path, proposal_id, str(scene_id or ""), str(file_id or ""), str(src), str(dest_video), str(dest_folder),
+                stage="updating_records", stage_label="Finalizing Records",
+                detail="Updating Stash scene path, metadata, and Library Manager inventory...",
+                total_bytes=file_size
+            )
+
+            now = utc_now()
+            connection = connect(database_path)
+            try:
+                connection.execute(
+                    "UPDATE filing_proposals SET status='completed', proposed_path=?, destination_folder=?, updated_at=? WHERE id=?",
+                    (str(dest_video), str(dest_folder), now, proposal_id)
+                )
+                connection.execute(
+                    "UPDATE files SET path=?, basename=?, exists_on_disk=1, last_seen_at=? WHERE file_id=?",
+                    (str(dest_video), dest_video.name, now, file_id)
+                )
+                if (config or {}).get("autoFilingPreserveFilename"):
+                    existing_st = connection.execute("SELECT file_id FROM filename_state WHERE file_id=?", (file_id,)).fetchone()
+                    if existing_st:
+                        connection.execute("UPDATE filename_state SET rename_protected=1, updated_at=? WHERE file_id=?", (now, file_id))
+                    else:
+                        connection.execute(
+                            "INSERT INTO filename_state (file_id, base_stem, base_source, rename_protected, created_at, updated_at) VALUES (?, ?, 'automatic_filing', 1, ?, ?)",
+                            (file_id, dest_video.stem, now, now)
+                        )
+                connection.execute(
+                    "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
+                    (str(dest_video), now, str(src))
+                )
+                for c_src, c_dst in companions:
+                    connection.execute(
+                        "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
+                        (str(c_dst), now, str(c_src))
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+
+            record_activity(
+                database_path, "filing", "proposal approved", "completed",
+                scene_id=scene_id, file_id=file_id,
+                old_path=str(src), new_path=str(dest_video),
+                detail=f"Moved file and {len(companions)} companion(s) to {dest_folder.name}"
+            )
+
+            # Step 6: Safe, optional metadata updates
+            metadata_updated = False
+            metadata_error = None
+            if update_metadata and scene_id:
+                try:
+                    entity_to_update_type = None
+                    entity_to_update_id = None
+                    entity_to_update_name = None
+
+                    if target_entity_type and target_entity_id:
+                        t_type = target_entity_type.lower()
+                        t_id = str(target_entity_id).strip()
+                        if selected_candidate and selected_candidate.get("matched_entities"):
+                            for me in selected_candidate["matched_entities"]:
+                                if me.get("entity_type") == t_type and str(me.get("entity_id")) == t_id:
+                                    entity_to_update_type = t_type
+                                    entity_to_update_id = t_id
+                                    entity_to_update_name = me.get("entity_name")
+                                    break
+                        elif selected_candidate:
+                            if selected_candidate.get("entity_type") == t_type and str(selected_candidate.get("entity_id")) == t_id:
+                                entity_to_update_type = t_type
+                                entity_to_update_id = t_id
+                                entity_to_update_name = selected_candidate.get("entity_name")
+                        elif proposal.get("organize_by") == t_type and str(proposal.get("matched_entity_id")) == t_id:
+                            entity_to_update_type = t_type
+                            entity_to_update_id = t_id
+                            entity_to_update_name = proposal.get("matched_entity_name")
+                        
+                        if not entity_to_update_type:
+                            metadata_error = f"Target entity {t_type}:{t_id} is not valid for this proposal"
+                    else:
+                        if selected_candidate:
+                            cand_type = selected_candidate.get("entity_type")
+                            if cand_type in ("performer", "studio"):
+                                entity_to_update_type = cand_type
+                                entity_to_update_id = str(selected_candidate.get("entity_id"))
+                                entity_to_update_name = selected_candidate.get("entity_name")
+                            elif cand_type == "both":
+                                metadata_error = "Destination matched both performer and studio; explicit entity selection is required for metadata update"
+                        else:
+                            prop_type = proposal.get("organize_by")
+                            if prop_type in ("performer", "studio"):
+                                entity_to_update_type = prop_type
+                                entity_to_update_id = str(proposal.get("matched_entity_id"))
+                                entity_to_update_name = proposal.get("matched_entity_name")
+
+                    if entity_to_update_type == "performer" and entity_to_update_id:
+                        scene_res = stash.call_GQL(
+                            "query FindScene($id: ID!) { findScene(id: $id) { id performers { id name } } }",
+                            {"id": str(scene_id)}
+                        )
+                        scene_data = (scene_res or {}).get("findScene") or {}
+                        current_performers = scene_data.get("performers") or []
+                        current_ids = [str(p["id"]) for p in current_performers if p.get("id")]
+                        if entity_to_update_id not in current_ids:
+                            new_ids = current_ids + [entity_to_update_id]
+                            stash.call_GQL(
+                                "mutation SceneUpdate($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }",
+                                {"input": {"id": str(scene_id), "performer_ids": new_ids}}
+                            )
+                            metadata_updated = True
+                            record_activity(
+                                database_path, "filing", "metadata updated", "completed",
+                                scene_id=scene_id, file_id=file_id,
+                                detail=f"Added performer '{entity_to_update_name or entity_to_update_id}' to scene {scene_id}"
+                            )
+                        else:
+                            metadata_updated = True
+                    elif entity_to_update_type == "studio" and entity_to_update_id:
+                        scene_res = stash.call_GQL(
+                            "query FindScene($id: ID!) { findScene(id: $id) { id studio { id name } } }",
+                            {"id": str(scene_id)}
+                        )
+                        scene_data = (scene_res or {}).get("findScene") or {}
+                        current_studio = scene_data.get("studio")
+                        if not current_studio:
+                            stash.call_GQL(
+                                "mutation SceneUpdate($input: SceneUpdateInput!) { sceneUpdate(input: $input) { id } }",
+                                {"input": {"id": str(scene_id), "studio_id": entity_to_update_id}}
+                            )
+                            metadata_updated = True
+                            record_activity(
+                                database_path, "filing", "metadata updated", "completed",
+                                scene_id=scene_id, file_id=file_id,
+                                detail=f"Set studio '{entity_to_update_name or entity_to_update_id}' on scene {scene_id}"
+                            )
+                        elif str(current_studio.get("id")) == entity_to_update_id:
+                            metadata_updated = True
+                        else:
+                            metadata_error = f"Scene {scene_id} already has a different studio: '{current_studio.get('name')}'"
+                            record_activity(
+                                database_path, "filing", "metadata preserved", "completed",
+                                scene_id=scene_id, file_id=file_id,
+                                detail=f"Preserved existing scene studio '{current_studio.get('name')}'; did not overwrite with '{entity_to_update_name or entity_to_update_id}'"
+                            )
+                    elif not metadata_error:
+                        metadata_error = "No matching entity available to tag"
+                except Exception as meta_exc:
+                    metadata_error = str(meta_exc)
+                    record_activity(
+                        database_path, "filing", "metadata update failed", "completed",
+                        scene_id=scene_id, file_id=file_id,
+                        detail=f"File move completed, but metadata update could not be completed: {metadata_error}"
+                    )
+
+            return {
+                "id": proposal_id,
+                "status": "completed",
+                "source_path": str(src),
+                "proposed_path": str(dest_video),
+                "destination_folder": str(dest_folder),
+                "companions_moved": len(companions),
+                "metadata_updated": metadata_updated,
+                "metadata_error": metadata_error
+            }
+        finally:
+            _clear_active_transfer(database_path, proposal_id)
+
+
+def ignore_filing_proposal(database_path: Path, proposal_id: int) -> dict:
+    """Explicitly ignore a filing proposal upon user action."""
+    connection = connect(database_path)
+    try:
+        row = connection.execute("SELECT * FROM filing_proposals WHERE id=?", (proposal_id,)).fetchone()
+        if not row:
+            return {"id": proposal_id, "status": "blocked", "reason": "Proposal not found"}
+        if row["status"] == "needs_recovery":
+            return {"id": proposal_id, "status": "blocked", "reason": "Cannot ignore a transaction that requires recovery"}
+        now = utc_now()
+        connection.execute(
+            "UPDATE filing_proposals SET status='ignored', updated_at=? WHERE id=?",
+            (now, proposal_id)
+        )
+        connection.commit()
+        record_activity(
+            database_path, "filing", "proposal ignored", "ignored",
+            scene_id=row["scene_id"], file_id=row["file_id"],
+            old_path=row["source_path"],
+            detail=f"Filing proposal ignored by user for {Path(row['source_path']).name}"
+        )
+        return {"id": proposal_id, "status": "ignored"}
+    finally:
+        connection.close()
+
+
+
+def invalidate_stale_filing_proposals(database_path: Path, stash=None) -> list[int]:
+    """Scan pending filing proposals and automatically mark as 'invalid' any proposal
+    whose source video file or Stash scene no longer exists.
+    Does not affect valid proposals or transactions requiring recovery.
+    Returns list of invalidated proposal IDs."""
+    invalidated = []
+    connection = connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT id, scene_id, file_id, source_path FROM filing_proposals WHERE status='pending'"
+        ).fetchall()
+        now = utc_now()
+        for r in rows:
+            prop_id = r["id"]
+            src_path = Path(r["source_path"])
+            is_stale = False
+            reason = ""
+
+            # 1. Source video file deleted from disk
+            if not src_path.is_file():
+                is_stale = True
+                reason = f"Proposed video source file was deleted: {src_path.name}"
+            # 2. Stash scene deleted from Stash
+            elif stash and r["scene_id"]:
+                try:
+                    if hasattr(stash, "call_GQL"):
+                        res = stash.call_GQL(
+                            "query CheckScene($id: ID!) { findScene(id: $id) { id } }",
+                            {"id": str(r["scene_id"])}
+                        )
+                        if not (res or {}).get("findScene"):
+                            is_stale = True
+                            reason = f"Proposed Stash scene {r['scene_id']} was deleted"
+                    elif hasattr(stash, "find_scene"):
+                        if not stash.find_scene(str(r["scene_id"])):
+                            is_stale = True
+                            reason = f"Proposed Stash scene {r['scene_id']} was deleted"
+                except Exception:
+                    pass
+
+            if is_stale:
+                connection.execute(
+                    "UPDATE filing_proposals SET status='invalid', last_error=?, updated_at=? WHERE id=?",
+                    (reason, now, prop_id)
+                )
+                invalidated.append(prop_id)
+        if invalidated:
+            connection.commit()
+        return invalidated
+    finally:
+        connection.close()
+
+
+def get_pending_filing_proposals(database_path: Path, stash=None) -> list[dict]:
+    """Return all actionable automatic filing proposals (pending or requiring recovery).
+    Automatically invalidates proposals whose source video file or Stash scene no longer exists."""
+    invalidate_stale_filing_proposals(database_path, stash=stash)
+    connection = connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT * FROM filing_proposals WHERE status IN ('pending', 'needs_recovery') ORDER BY CASE status WHEN 'needs_recovery' THEN 0 ELSE 1 END, created_at DESC"
+        ).fetchall()
+        results = []
+        for r in rows:
+            d = dict(r)
+            d["candidate_destinations"] = json.loads(d.get("candidate_destinations_json") or "[]")
+            d["companions"] = json.loads(d.get("companions_json") or "[]")
+            results.append(d)
+        return results
+    finally:
+        connection.close()
+
+
+def recover_filing_proposal(database_path: Path, stash, proposal_id: int) -> dict:
+    """Attempt to recover an incomplete filing transaction by restoring video and companions to source.
+    - Preflights every source and destination; stops safely on any collision (never overwrites).
+    - Only touches the exact companion paths recorded for this transaction (no broad startswith()).
+    - Verifies that the video, all companions, and the original Stash scene record are restored before reporting success.
+    - Safe to retry repeatedly across monitor restarts without affecting unrelated files."""
+    with rename_lock(database_path):
+        connection = connect(database_path)
+        try:
+            row = connection.execute("SELECT * FROM filing_proposals WHERE id=?", (proposal_id,)).fetchone()
+            if not row:
+                return {"id": proposal_id, "status": "blocked", "reason": "Proposal not found"}
+            proposal = dict(row)
+        finally:
+            connection.close()
+
+        src = Path(proposal["source_path"])
+        dest_video = Path(proposal["proposed_path"])
+        recorded_companions = json.loads(proposal.get("companions_json") or "[]")
+
+        # PREFLIGHT 1: Collision check for video
+        if dest_video.is_file():
+            if src.exists():
+                err_msg = f"Recovery collision: source video path already exists on disk: {src}"
+                _update_proposal_status(database_path, proposal_id, "needs_recovery", err_msg)
+                return {"id": proposal_id, "status": "needs_recovery", "recovered": False, "reason": err_msg}
+
+        # PREFLIGHT 2: Collision check for recorded companions (never overwrite)
+        for item in recorded_companions:
+            c_src = Path(item["source"])
+            c_target = Path(item["target"])
+            if c_target.is_file():
+                if c_src.exists():
+                    err_msg = f"Recovery collision: source companion path already exists on disk: {c_src}"
+                    _update_proposal_status(database_path, proposal_id, "needs_recovery", err_msg)
+                    return {"id": proposal_id, "status": "needs_recovery", "recovered": False, "reason": err_msg}
+
+        # STEP 1: Move recorded companions back to source
+        companion_errors = []
+        for item in recorded_companions:
+            c_src = Path(item["source"])
+            c_target = Path(item["target"])
+            if c_target.is_file():
+                try:
+                    expect_filesystem_move(database_path, str(c_target), str(c_src))
+                    _move_file(c_target, c_src)
+                except Exception as exc:
+                    companion_errors.append(f"Failed restoring companion {c_target.name}: {exc}")
+
+        # STEP 2: Move video back to source via Stash move_files
+        video_move_err = None
+        if dest_video.is_file():
+            try:
+                expect_filesystem_move(database_path, str(dest_video), str(src))
+                stash_res = stash.move_files({"ids": [proposal["file_id"]], "destination_folder": str(src.parent), "destination_basename": src.name})
+                if stash_res is False:
+                    video_move_err = "Stash move_files returned False"
+            except Exception as exc:
+                video_move_err = str(exc)
+
+        # STEP 3: STRICT THREE-PART VERIFICATION
+        # 1. Video verified on disk at source
+        video_disk_ok = src.is_file() and not dest_video.exists()
+
+        # 2. All companions verified on disk at source
+        companions_disk_ok = True
+        unverified_companions = []
+        for item in recorded_companions:
+            c_src = Path(item["source"])
+            c_target = Path(item["target"])
+            if not c_src.is_file() or c_target.exists():
+                companions_disk_ok = False
+                unverified_companions.append(c_src.name)
+
+        # 3. Original Stash scene's file path verified
+        stash_scene_ok = False
+        stash_err_detail = None
+        try:
+            scene_res = stash.call_GQL(
+                "query FindScene($id: ID!) { findScene(id: $id) { id files { id path } } }",
+                {"id": proposal["scene_id"]}
+            )
+            scene = (scene_res or {}).get("findScene") or {}
+            files = scene.get("files") or []
+            stash_scene_ok = any(
+                (str(f.get("id")) == str(proposal["file_id"]) or len(files) == 1)
+                and str(Path(f.get("path", "")).resolve()) == str(src.resolve())
+                for f in files
+            )
+            if not stash_scene_ok:
+                stash_paths = [f.get("path") for f in files]
+                stash_err_detail = f"Stash scene files {stash_paths} do not match source {src}"
+        except Exception as exc:
+            stash_err_detail = f"Stash query failed: {exc}"
+
+        if video_disk_ok and companions_disk_ok and stash_scene_ok and not companion_errors and not video_move_err:
+            now = utc_now()
+            connection = connect(database_path)
+            try:
+                connection.execute(
+                    "UPDATE filing_proposals SET status='failed', last_error=NULL, updated_at=? WHERE id=?",
+                    (now, proposal_id)
+                )
+                connection.execute(
+                    "UPDATE files SET path=?, basename=?, exists_on_disk=1, last_seen_at=? WHERE file_id=?",
+                    (str(src), src.name, now, proposal["file_id"])
+                )
+                connection.execute(
+                    "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
+                    (str(src), now, str(dest_video))
+                )
+                for item in recorded_companions:
+                    connection.execute(
+                        "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
+                        (item["source"], now, item["target"])
+                    )
+                connection.commit()
+            finally:
+                connection.close()
+
+            record_activity(
+                database_path, "filing", "recovery complete", "complete",
+                scene_id=proposal["scene_id"], file_id=proposal["file_id"],
+                old_path=str(dest_video), new_path=str(src),
+                detail="Transaction recovery verified: video, companions, and Stash scene restored to source"
+            )
+            return {
+                "id": proposal_id,
+                "status": "failed",
+                "recovered": True,
+                "reason": "Transaction recovery verified: video, companions, and Stash scene restored to source"
+            }
+        else:
+            failures = []
+            if not video_disk_ok:
+                failures.append(f"video not restored on disk ({video_move_err or 'dest exists or src missing'})")
+            if not companions_disk_ok:
+                failures.append(f"companions not restored on disk ({', '.join(unverified_companions)})")
+            if not stash_scene_ok:
+                failures.append(f"Stash scene path not restored ({stash_err_detail})")
+            if companion_errors:
+                failures.append(f"companion move errors ({'; '.join(companion_errors)})")
+
+            err_msg = f"Recovery attempt unverified: {'; '.join(failures)}"
+            _update_proposal_status(database_path, proposal_id, "needs_recovery", err_msg)
+            return {
+                "id": proposal_id,
+                "status": "needs_recovery",
+                "recovered": False,
+                "reason": err_msg
+            }
+
+
+def process_incoming_file_now(database_path: Path, file_path: str) -> dict:
+    """Bypass the settling delay for an individual waiting video after explicit user confirmation.
+    - Validates file existence and incoming queue membership.
+    - Rejects already-processing, scanning, downloading, or imported items.
+    - Checks file size and mtime on disk: if modified, stops safely and restarts settling.
+    - If valid and unchanged, fast-forwards stable_since in incoming_files to make it immediately due.
+    """
+    path_str = str(file_path).strip()
+    if not path_str:
+        return {"success": False, "error": "File path is required"}
+
+    p = Path(path_str)
+    if not p.is_file():
+        return {"success": False, "error": f"File does not exist on disk: {path_str}"}
+
+    connection = connect(database_path)
+    try:
+        row = connection.execute("SELECT * FROM incoming_files WHERE path=?", (path_str,)).fetchone()
+        if not row:
+            return {"success": False, "error": f"File is not in the incoming queue: {p.name}"}
+
+        curr_status = row["status"]
+        if curr_status in ("scanning", "downloading", "generating_sheet"):
+            return {"success": False, "error": f"File is already being processed ({curr_status})"}
+        elif curr_status == "imported":
+            return {"success": False, "error": "File has already been imported into Stash"}
+        elif curr_status != "waiting":
+            return {"success": False, "error": f"File is in '{curr_status}' state and cannot be processed now"}
+
+        try:
+            stat = p.stat()
+        except OSError as err:
+            return {"success": False, "error": f"File could not be accessed: {err}"}
+
+        # Safety check: if file changed on disk before or during click, stop safely and restart wait
+        if row["size"] is not None and (stat.st_size != row["size"] or stat.st_mtime_ns != row["modified_ns"]):
+            now_ts = time.time()
+            connection.execute(
+                "UPDATE incoming_files SET size=?, modified_ns=?, stable_since=?, detail='File modified; settling restarted' WHERE path=?",
+                (stat.st_size, stat.st_mtime_ns, now_ts, path_str)
+            )
+            connection.commit()
+            record_activity(database_path, "incoming", "file modified", "waiting", new_path=path_str,
+                            detail="File changed on disk; settling delay restarted for safety")
+            return {
+                "success": False,
+                "error": "File was modified on disk; settling delay has been restarted for safety.",
+                "restarted": True
+            }
+
+        # Bypass settling delay by making stable_since due
+        settle_sec = row["settle_seconds"] or 300
+        due_ts = time.time() - settle_sec - 1.0
+        connection.execute(
+            "UPDATE incoming_files SET stable_since=?, detail='User bypassed settling delay' WHERE path=?",
+            (due_ts, path_str)
+        )
+        connection.commit()
+        record_activity(database_path, "incoming", "process now", "waiting", new_path=path_str,
+                        detail=f"User bypassed settling delay for {p.name}; processing initiated")
+        return {
+            "success": True,
+            "path": path_str,
+            "message": f"Settling delay bypassed for {p.name}. Processing initiated."
+        }
+    finally:
+        connection.close()
+
+
+
+def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> dict:
+    """Retrieve all files in the Incoming baseline snapshot categorized into eligible videos and companion/non-video files.
+    - Accurately reconciles counts: baseline_total = remaining_incoming + verified_moved + missing.
+    - Distinguishes verified moves (where destination exists on disk), pending proposals, and missing files.
+    - Preserves existing scene IDs, baseline protection, and immutable snapshot.
+    """
+    if config is None:
+        config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
+
+    incoming_folders = get_configured_incoming_folders(config)
+    connection = connect(database_path)
+    try:
+        rows = connection.execute(
+            """SELECT path, size, modified_ns, oshash, seen_at
+               FROM filing_incoming_baseline
+               ORDER BY path ASC"""
+        ).fetchall()
+
+        items = []
+        video_count = 0
+        companion_count = 0
+        eligible_count = 0
+        pending_proposal_count = 0
+        remaining_companion_count = 0
+        verified_moved_video_count = 0
+        verified_moved_companion_count = 0
+        missing_video_count = 0
+        missing_companion_count = 0
+
+        # Pre-fetch existing proposals and files for efficiency
+        proposals_by_path = {}
+        for p_row in connection.execute(
+            "SELECT id, file_id, scene_id, source_path, proposed_path, destination_folder, status FROM filing_proposals"
+        ).fetchall():
+            proposals_by_path[p_row["source_path"]] = dict(p_row)
+
+        completed_video_proposals_by_src = {
+            src: p for src, p in proposals_by_path.items()
+            if p.get("status") == "completed" and p.get("proposed_path") and Path(src).suffix.lower() in VIDEO_EXTENSIONS
+        }
+
+        files_by_path = {}
+        for f_row in connection.execute(
+            "SELECT file_id, scene_id, path, basename, title FROM files WHERE exists_on_disk=1"
+        ).fetchall():
+            files_by_path[f_row["path"]] = dict(f_row)
+
+        diagnostics_by_path = {}
+        for inc_row in connection.execute(
+            "SELECT path, filing_diagnostic, status FROM incoming_files"
+        ).fetchall():
+            if inc_row["filing_diagnostic"]:
+                diagnostics_by_path[inc_row["path"]] = inc_row["filing_diagnostic"]
+
+        for row in rows:
+            path_str = row["path"]
+            p_obj = Path(path_str)
+            ext = p_obj.suffix.lower()
+            is_video = ext in VIDEO_EXTENSIONS
+            is_file = p_obj.is_file()
+
+            # Check if physically inside incoming folders
+            is_inside_incoming = False
+            if is_file and incoming_folders:
+                try:
+                    p_res = p_obj.resolve()
+                    is_inside_incoming = any(
+                        _is_subpath_of(p_res, Path(f).resolve())
+                        for f in incoming_folders
+                    )
+                except Exception:
+                    is_inside_incoming = False
+            elif is_file and not incoming_folders:
+                is_inside_incoming = True
+
+            if not is_video:
+                companion_count += 1
+                destination_path = None
+                if is_file and is_inside_incoming:
+                    remaining_companion_count += 1
+                    status_code = "companion"
+                    status_label = f"{ext.replace('.', '').upper() if ext else 'Non-video'} Companion"
+                    exists_on_disk = True
+                else:
+                    # Check if corresponding video was verified moved
+                    matched_video_prop = None
+                    for v_src, v_prop in completed_video_proposals_by_src.items():
+                        if path_str.startswith(v_src) or (p_obj.stem == Path(v_src).stem and p_obj.parent == Path(v_src).parent):
+                            matched_video_prop = v_prop
+                            break
+                    if matched_video_prop and matched_video_prop.get("proposed_path"):
+                        dst_video = Path(matched_video_prop["proposed_path"])
+                        comp_dst = dst_video.parent / p_obj.name
+                        if comp_dst.is_file():
+                            verified_moved_companion_count += 1
+                            status_code = "moved"
+                            status_label = f"{ext.replace('.', '').upper() if ext else 'Non-video'} Companion (Moved)"
+                            destination_path = str(comp_dst)
+                            exists_on_disk = True
+                        else:
+                            missing_companion_count += 1
+                            status_code = "missing_on_disk"
+                            status_label = f"{ext.replace('.', '').upper() if ext else 'Non-video'} Companion (Missing)"
+                            destination_path = str(comp_dst)
+                            exists_on_disk = False
+                    else:
+                        missing_companion_count += 1
+                        status_code = "missing_on_disk"
+                        status_label = f"{ext.replace('.', '').upper() if ext else 'Non-video'} Companion (Missing)"
+                        destination_path = None
+                        exists_on_disk = False
+
+                items.append({
+                    "path": path_str,
+                    "basename": p_obj.name,
+                    "size": row["size"] or 0,
+                    "is_video": False,
+                    "is_companion": True,
+                    "exists_on_disk": exists_on_disk,
+                    "is_inside_incoming": is_inside_incoming,
+                    "eligible": False,
+                    "status": status_code,
+                    "status_label": status_label,
+                    "destination_path": destination_path,
+                    "scene_id": None,
+                    "scene_title": None,
+                    "diagnostic": None,
+                    "seen_at": row["seen_at"]
+                })
+                continue
+
+            video_count += 1
+
+            # Check proposals
+            prop = proposals_by_path.get(path_str)
+
+            # Check linked Stash scene (from files table or proposal)
+            f_info = files_by_path.get(path_str)
+            scene_id = str(f_info["scene_id"]) if f_info and f_info.get("scene_id") else (str(prop["scene_id"]) if prop and prop.get("scene_id") else None)
+            scene_title = f_info.get("title") if f_info else None
+            filing_status = prop["status"] if prop else None
+            proposed_dst = Path(prop["proposed_path"]) if prop and prop.get("proposed_path") else None
+            dst_exists = proposed_dst.is_file() if proposed_dst else False
+
+            diag = diagnostics_by_path.get(path_str)
+
+            eligible = False
+            destination_path = None
+
+            if filing_status == "completed":
+                destination_path = str(proposed_dst) if proposed_dst else None
+                if dst_exists:
+                    verified_moved_video_count += 1
+                    status_code = "moved"
+                    status_label = "Moved out of Incoming"
+                    exists_on_disk = True
+                else:
+                    missing_video_count += 1
+                    status_code = "moved_destination_missing"
+                    status_label = "Moved (Destination Missing)"
+                    exists_on_disk = False
+            elif filing_status == "needs_recovery":
+                status_code = "needs_recovery"
+                status_label = "Unresolved Recovery"
+                exists_on_disk = is_file
+                destination_path = str(proposed_dst) if proposed_dst else None
+            elif filing_status == "pending":
+                pending_proposal_count += 1
+                status_code = "has_proposal"
+                status_label = "Active Proposal Pending"
+                exists_on_disk = is_file
+                destination_path = str(proposed_dst) if proposed_dst else None
+            elif is_file and is_inside_incoming:
+                eligible = True
+                eligible_count += 1
+                status_code = "eligible"
+                status_label = "Eligible"
+                exists_on_disk = True
+            elif is_file and not is_inside_incoming:
+                status_code = "outside_incoming"
+                status_label = "Outside Incoming"
+                exists_on_disk = True
+            else:
+                missing_video_count += 1
+                status_code = "missing_on_disk"
+                status_label = "File Missing on Disk"
+                exists_on_disk = False
+
+            items.append({
+                "path": path_str,
+                "basename": p_obj.name,
+                "size": row["size"] or (p_obj.stat().st_size if is_file else 0),
+                "is_video": True,
+                "is_companion": False,
+                "exists_on_disk": exists_on_disk,
+                "is_inside_incoming": is_inside_incoming,
+                "eligible": eligible,
+                "status": status_code,
+                "status_label": status_label,
+                "destination_path": destination_path,
+                "scene_id": scene_id,
+                "scene_title": scene_title,
+                "diagnostic": diag,
+                "seen_at": row["seen_at"]
+            })
+
+        remaining_incoming_count = sum(1 for it in items if it["exists_on_disk"] and it["is_inside_incoming"])
+        verified_moved_count = verified_moved_video_count + verified_moved_companion_count
+        missing_count = missing_video_count + missing_companion_count
+        ineligible_count = max(0, video_count - eligible_count)
+
+        return {
+            "total_count": len(rows),
+            "baseline_total": len(rows),
+            "video_count": video_count,
+            "companion_count": companion_count,
+            "remaining_companion_count": remaining_companion_count,
+            "remaining_incoming_count": remaining_incoming_count,
+            "eligible_count": eligible_count,
+            "pending_proposal_count": pending_proposal_count,
+            "already_filed_count": verified_moved_video_count,
+            "verified_moved_video_count": verified_moved_video_count,
+            "verified_moved_companion_count": verified_moved_companion_count,
+            "verified_moved_count": verified_moved_count,
+            "missing_count": missing_count,
+            "ineligible_count": ineligible_count,
+            "items": items
+        }
+    finally:
+        connection.close()
+
+
+def evaluate_backlog_batch(
+    database_path: Path,
+    stash,
+    file_paths: list[str],
+    config: dict = None
+) -> dict:
+    """Evaluate a small batch of selected baseline backlog video files.
+    - Processes files safely and sequentially without overwhelming disk I/O.
+    - Preserves existing scene IDs, metadata, and baseline protection for unselected files.
+    - Never moves files automatically.
+    - Returns structured outcome tallies and per-item results.
+    """
+    if config is None:
+        config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
+
+    results = []
+    tally = {
+        "proposal_ready": 0,
+        "candidate_selection_required": 0,
+        "no_identity_found": 0,
+        "destination_not_found": 0,
+        "ambiguous_match": 0,
+        "already_filed": 0,
+        "ineligible": 0,
+        "errors": 0
+    }
+
+    for path_str in file_paths:
+        try:
+            res = retry_filing_proposal(database_path, stash, path_str, config=config, allow_baseline=True, allow_refresh=False)
+            outcome = "ineligible"
+            if res.get("success"):
+                prop = res.get("proposal") or {}
+                if prop.get("status") == "needs_selection" or prop.get("candidates"):
+                    outcome = "candidate_selection_required"
+                    tally["candidate_selection_required"] += 1
+                else:
+                    outcome = "proposal_ready"
+                    tally["proposal_ready"] += 1
+            else:
+                err_or_diag = (res.get("diagnostic") or res.get("error") or res.get("message") or "").lower()
+                if "already" in err_or_diag or "completed" in err_or_diag:
+                    outcome = "already_filed"
+                    tally["already_filed"] += 1
+                elif "no matching performer" in err_or_diag or "no identity" in err_or_diag or "no performer or studio" in err_or_diag:
+                    outcome = "no_identity_found"
+                    tally["no_identity_found"] += 1
+                elif "no destination folder" in err_or_diag or "destination_not_found" in err_or_diag:
+                    outcome = "destination_not_found"
+                    tally["destination_not_found"] += 1
+                elif "ambiguous" in err_or_diag:
+                    outcome = "ambiguous_match"
+                    tally["ambiguous_match"] += 1
+                else:
+                    outcome = "ineligible"
+                    tally["ineligible"] += 1
+
+            results.append({
+                "path": path_str,
+                "basename": Path(path_str).name,
+                "success": res.get("success", False),
+                "outcome": outcome,
+                "diagnostic": res.get("diagnostic"),
+                "error": res.get("error"),
+                "message": res.get("message"),
+                "proposal": res.get("proposal")
+            })
+        except Exception as exc:
+            logger.error("Error evaluating backlog item %s: %s", path_str, exc)
+            tally["errors"] += 1
+            results.append({
+                "path": path_str,
+                "basename": Path(path_str).name,
+                "success": False,
+                "outcome": "errors",
+                "error": str(exc),
+                "message": str(exc)
+            })
+
+    return {
+        "results": results,
+        "tally": tally
     }

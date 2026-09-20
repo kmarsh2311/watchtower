@@ -26,7 +26,7 @@ from librarymanager_core import (
                                  release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
                                  reconcile_filesystem_events, pending_filesystem_events,
                                  pending_transcoder_candidates, promote_transcoder_candidate, utc_now)
-from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due
+from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch
 
 
 QUERY = """
@@ -863,8 +863,9 @@ def main():
     if hook_context:
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
-        if not config.get("automaticRenaming"):
-            print(json.dumps({"output": "Automatic rename skipped: Automatic Renaming is disabled."}))
+        filing_on_meta = bool(config.get("autoFilingEnabled") and (config.get("autoFilingTrigger") or "import").strip().lower() == "metadata")
+        if not config.get("automaticRenaming") and not filing_on_meta:
+            print(json.dumps({"output": "Hooks skipped: Automatic Renaming and Metadata-triggered Filing are disabled."}))
             return
 
         hook_type = str(hook_context.get("type") or "").strip()
@@ -906,7 +907,27 @@ def main():
                 target_scene_ids = [str(entity_id)]
 
         if not target_scene_ids:
-            print(json.dumps({"output": "No associated scenes found for rename."}))
+            print(json.dumps({"output": "No associated scenes found."}))
+            return
+
+        # Automatic Filing: evaluate filing proposal on metadata update if enabled
+        if filing_on_meta:
+            for sid in target_scene_ids:
+                try:
+                    scene_res = stash.call_GQL(
+                        "query FindSceneForFiling($id: ID!) { findScene(id: $id) { id title files { id path } performers { id name disambiguation alias_list } studio { id name aliases } } }",
+                        {"id": str(sid)}
+                    )
+                    sc = (scene_res or {}).get("findScene")
+                    if sc and sc.get("files"):
+                        fpath = sc["files"][0].get("path")
+                        if fpath:
+                            evaluate_filing_proposal(database_path, stash, fpath, sc, config)
+                except Exception as f_err:
+                    activity_logger().warning("Automatic filing evaluation failed for scene %s on metadata update: %s", sid, f_err)
+
+        if not config.get("automaticRenaming"):
+            print(json.dumps({"output": "Automatic filing evaluation complete; renaming skipped (disabled)."}))
             return
 
         rename_settle = int(config.get("renameSettleSeconds") if config.get("renameSettleSeconds") is not None else 30)
@@ -1191,6 +1212,34 @@ def main():
             elif key == "stripMetadataFromTitle":
                 status = "enabled" if val else "disabled"
                 audit(database_path, "config", "title metadata strip", status, detail=f"Embedded performer/studio stripping was {status}")
+            elif key == "autoFilingEnabled":
+                status = "enabled" if val else "disabled"
+                if val:
+                    stash = StashInterface(plugin_input["server_connection"])
+                    config = stash.find_plugin_config("librarymanager") or {}
+                    incoming_folders = get_configured_incoming_folders(config)
+                    snapshotted = snapshot_incoming_baseline(database_path, incoming_folders)
+                    audit(database_path, "config", "automatic filing", "enabled",
+                          detail=f"Automatic filing enabled; baseline snapshot captured {snapshotted} existing incoming files")
+                else:
+                    audit(database_path, "config", "automatic filing", "disabled", detail="Automatic filing disabled")
+            elif key == "autoFilingOrganizeBy":
+                audit(database_path, "config", "filing organize by", "updated", detail=f"Automatic filing organization set to {val}")
+            elif key == "autoFilingDestinationRoots":
+                if isinstance(val, list):
+                    cleaned_roots = [str(r).strip() for r in val if str(r).strip()]
+                    audit(database_path, "config", "filing destination roots", "updated", detail=f"Automatic filing destination roots set to {', '.join(cleaned_roots)}")
+                else:
+                    audit(database_path, "config", "filing destination roots", "updated", detail=f"Automatic filing destination roots set to {val}")
+            elif key == "autoFilingDestinationRoot":
+                audit(database_path, "config", "filing destination root", "updated", detail=f"Automatic filing destination root set to {val}")
+            elif key == "autoFilingMatchSource":
+                audit(database_path, "config", "filing match source", "updated", detail=f"Automatic filing match source set to {val}")
+            elif key == "autoFilingTrigger":
+                audit(database_path, "config", "filing trigger", "updated", detail=f"Automatic filing trigger set to {val}")
+            elif key == "autoFilingPreserveFilename":
+                status = "enabled" if val else "disabled"
+                audit(database_path, "config", "filing preserve filename", status, detail=f"Automatic filing filename preservation was {status}")
             else:
                 audit(database_path, "config", str(key), "updated", detail=f"Setting '{key}' updated to {val}")
         message = json.dumps({"recorded": True})
@@ -1264,6 +1313,7 @@ def main():
             "activity": recent_activity(database_path, 250),
             "pending_events": pending,
             "transcoder_candidates": pending_transcoder_candidates(database_path),
+            "filing_proposals": get_pending_filing_proposals(database_path),
             "server_time": time.time(),
             "current_scene_count": current_scene_count(stash),
         }
@@ -1289,6 +1339,11 @@ def main():
             message = json.dumps({"executed": True, "scene_id": scene_id, "job_id": job_id})
         except Exception as e:
             message = json.dumps({"executed": False, "error": str(e)})
+    elif mode == "process_incoming_file_now":
+        arguments = plugin_input.get("args") or {}
+        path = str(arguments.get("path") or "").strip()
+        result = process_incoming_file_now(database_path, path)
+        message = json.dumps(result, ensure_ascii=False)
     elif mode == "retry_incoming_file":
         arguments = plugin_input.get("args") or {}
         path = str(arguments.get("path") or "")
@@ -1484,7 +1539,7 @@ def main():
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
         roots = fetch_library_roots(stash)
-        payload = dashboard_data(database_path, (plugin_input.get("args") or {}).get("limit", 250))
+        payload = dashboard_data(database_path, (plugin_input.get("args") or {}).get("limit", 250), stash=stash)
         payload["monitor"].pop("token", None)
         payload["library_roots"] = [{"path": root, "exists": os.path.exists(root)} for root in roots]
         payload["incoming_folder"] = incoming_folder_status(config, roots)
@@ -1547,6 +1602,95 @@ def main():
                 refresh_scene_contact_sheet(database_path, result.get("proposed_path"), scene_id, active_config)
         result_path = Path(__file__).with_name("test-rename-result.json")
         result_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "filing_proposals":
+        stash = StashInterface(plugin_input["server_connection"])
+        result = {"proposals": get_pending_filing_proposals(database_path, stash=stash)}
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "approve_filing_proposal":
+        args = plugin_input.get("args") or {}
+        proposal_id = args.get("proposal_id")
+        update_metadata = bool(args.get("update_metadata", False))
+        target_destination_folder = args.get("target_destination_folder")
+        target_entity_type = args.get("target_entity_type")
+        target_entity_id = args.get("target_entity_id")
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        result = apply_filing_proposal(
+            database_path, stash, int(proposal_id),
+            config=config,
+            update_metadata=update_metadata,
+            target_destination_folder=target_destination_folder,
+            target_entity_type=target_entity_type,
+            target_entity_id=target_entity_id
+        )
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "ignore_filing_proposal":
+        proposal_id = plugin_input.get("args", {}).get("proposal_id")
+        result = ignore_filing_proposal(database_path, int(proposal_id))
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "recover_filing_proposal":
+        proposal_id = plugin_input.get("args", {}).get("proposal_id")
+        stash = StashInterface(plugin_input["server_connection"])
+        result = recover_filing_proposal(database_path, stash, int(proposal_id))
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "establish_filing_baseline":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        incoming_folders = get_configured_incoming_folders(config)
+        snapshotted = snapshot_incoming_baseline(database_path, incoming_folders)
+        message = json.dumps({"snapshotted": snapshotted}, ensure_ascii=False)
+    elif mode == "get_filing_folder_mappings":
+        mappings = get_filing_folder_mappings(database_path)
+        message = json.dumps({"mappings": mappings}, ensure_ascii=False)
+    elif mode == "save_filing_folder_mapping":
+        args = plugin_input.get("args") or {}
+        entity_type = args.get("entity_type")
+        entity_id = args.get("entity_id")
+        entity_name = args.get("entity_name")
+        folder_path = args.get("folder_path")
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        configured_roots = get_configured_filing_destination_roots(config)
+        success, msg = save_filing_folder_mapping(
+            database_path, entity_type, entity_id, entity_name, folder_path,
+            configured_roots=configured_roots
+        )
+        mappings = get_filing_folder_mappings(database_path)
+        message = json.dumps({"success": success, "message": msg, "mappings": mappings}, ensure_ascii=False)
+    elif mode == "delete_filing_folder_mapping":
+        mapping_id = plugin_input.get("args", {}).get("mapping_id")
+        success = delete_filing_folder_mapping(database_path, int(mapping_id))
+        mappings = get_filing_folder_mappings(database_path)
+        message = json.dumps({"success": success, "mappings": mappings}, ensure_ascii=False)
+    elif mode in ("refresh_destination_roots_cache", "refresh_filing_cache"):
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        roots = get_configured_filing_destination_roots(config)
+        max_depth = int(config.get("autoFilingMaxDiscoveryDepth", 4))
+        result = refresh_destination_dir_cache(database_path, roots, max_depth=max_depth)
+        message = json.dumps({"success": True, "message": f"Destination folders cache refreshed ({result.get('total_folders', 0)} folders discovered across {len(result.get('scanned_roots', []))} root(s)).", **result}, ensure_ascii=False)
+    elif mode == "retry_filing_proposal":
+        args = plugin_input.get("args") or {}
+        path = args.get("path")
+        allow_baseline = bool(args.get("allow_baseline", False))
+        allow_refresh = bool(args.get("allow_refresh", False))
+        proposal_id = args.get("proposal_id")
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        result = retry_filing_proposal(database_path, stash, path, config=config, allow_baseline=allow_baseline, allow_refresh=allow_refresh, proposal_id=proposal_id)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "get_backlog_items":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        result = get_backlog_items(database_path, stash, config=config)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "evaluate_backlog_batch":
+        args = plugin_input.get("args") or {}
+        paths = args.get("paths") or []
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        result = evaluate_backlog_batch(database_path, stash, paths, config=config)
         message = json.dumps(result, ensure_ascii=False)
     else:
         raise ValueError(f"Unsupported Library Manager mode: {mode}")

@@ -9,6 +9,10 @@ ui:
   assets:
     /: assets
 settings:
+  onboardingCompleted:
+    displayName: Onboarding Completed
+    description: Indicates whether initial onboarding setup has been completed.
+    type: BOOLEAN
   testSceneId:
     displayName: Test Scene ID
     description: Optional test scene ID. While set, Automatic Renaming is restricted to this scene only, protecting the rest of your library while you test.
@@ -116,6 +120,38 @@ settings:
   incomingSettleMinutes:
     displayName: Wait Before Adding a Video
     description: "Minutes that a video must remain completely unchanged before Library Manager asks Stash to add it (default: 5). If 0 or blank, the 5-minute default is used."
+    type: NUMBER
+  autoFilingEnabled:
+    displayName: Enable Automatic Filing Proposals
+    description: Propose destination folders for newly arrived videos in incoming folders based on performer or studio matching. Disabled by default.
+    type: BOOLEAN
+  autoFilingOrganizeBy:
+    displayName: Automatic Filing Organization
+    description: "Choose whether to organize new incoming videos by 'performer', 'studio', or 'both' (Performer or Studio (Let me choose))."
+    type: STRING
+  autoFilingDestinationRoots:
+    displayName: Automatic Filing Destination Roots
+    description: Up to five destination root directories containing your existing performer or studio folders (e.g. /Media/Performers/Example Folder).
+    type: STRING
+  autoFilingDestinationRoot:
+    displayName: Automatic Filing Destination Root
+    description: Legacy single root directory containing your existing performer or studio folders (e.g. /Media/Performers).
+    type: STRING
+  autoFilingMatchSource:
+    displayName: Automatic Filing Match Source
+    description: Choose whether to prioritize Stash scene metadata (if available) or match purely from the physical filename.
+    type: STRING
+  autoFilingTrigger:
+    displayName: When to Suggest Filing
+    description: "Choose when Watchtower suggests filing: 'import' (immediately after video import) or 'metadata' (after a performer or studio is assigned in Stash)."
+    type: STRING
+  autoFilingPreserveFilename:
+    displayName: Preserve Original Filename
+    description: "Keep original filenames when filing, and protect filed videos from subsequent renaming by Automatic Renaming."
+    type: BOOLEAN
+  autoFilingMaxDiscoveryDepth:
+    displayName: Maximum Folder Discovery Depth
+    description: "Maximum folder depth (1 to 8, default: 4) when automatically searching destination roots for matching performer or studio folders."
     type: NUMBER
   generateContactSheets:
     displayName: Generate Visual Contact Sheets (CSM)

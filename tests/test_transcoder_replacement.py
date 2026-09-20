@@ -362,7 +362,7 @@ def test_worker_rechecks_local_ownership_inside_final_inventory_transaction():
         with patch('librarymanager_monitor.destination_inventory_conflict',
                    side_effect=conflict_at_transaction):
             _run_one(MoveWorker(database, stash, True, False, True), source, destination)
-        assert calls == 3
+        assert calls == 4
         stash.metadata_scan.assert_called_once()
         assert _inventory_path(database) == str(source)
 

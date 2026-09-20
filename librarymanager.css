@@ -1365,6 +1365,13 @@ a.lm-activity-scene-pill:hover {
   color: #20e64a;
   border-color: rgba(32, 230, 74, 0.5);
 }
+.lm-terminal-inline-btn.process-now {
+  color: #ffb52e;
+  border-color: rgba(255, 181, 46, 0.5);
+}
+.lm-terminal-inline-btn.process-now:hover {
+  background: rgba(255, 181, 46, 0.15);
+}
 
 /* Real Revolving Lighthouse (Single 360° Rotating Beam) */
 .lm-brand-wrapper {
@@ -2687,4 +2694,476 @@ a.lm-activity-scene-pill:hover {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+
+/* Automatic Filing (Phase 1) */
+.lm-terminal-filing-card {
+  margin: .85rem 0 1rem;
+  padding: .95rem 1.1rem;
+  border: 1px solid #3b82f6;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, .06);
+  box-shadow: inset 0 0 18px rgba(59, 130, 246, .08), 0 0 10px rgba(59, 130, 246, .1);
+}
+
+.lm-terminal-filing-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: .75rem;
+  padding-bottom: .45rem;
+  border-bottom: 1px dashed rgba(59, 130, 246, .35);
+}
+
+.lm-terminal-filing-tag {
+  color: #60a5fa;
+  font-weight: 700;
+  font-size: .88rem;
+  letter-spacing: .08em;
+  text-shadow: 0 0 5px rgba(59, 130, 246, .5);
+}
+
+.lm-terminal-filing-count {
+  font-size: .78rem;
+  color: #93c5fd;
+}
+.lm-terminal-attention-item.filing {
+  border-left-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.lm-terminal-badge.filing {
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.lm-terminal-btn.filing-approve {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.lm-terminal-btn.filing-approve:hover:not(:disabled) {
+  background: rgba(16, 185, 129, 0.25);
+  border-color: #10b981;
+}
+
+.lm-terminal-attention-item.filing-recovery {
+  border-left-color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.lm-terminal-badge.filing-recovery {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  border: 1px solid #ef4444;
+}
+
+.lm-terminal-btn.filing-recovery {
+  background: rgba(239, 68, 68, 0.2);
+  color: #f87171;
+  border: 1px solid #ef4444;
+}
+
+.lm-terminal-btn.filing-recovery:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.35);
+}
+
+/* Automatic Filing Phase 2 */
+.lm-filing-candidate-picker {
+  margin: 6px 0 8px;
+}
+.lm-filing-candidate-picker select {
+  background: var(--input-bg, #1a1e27);
+  color: var(--text-color, #e2e8f0);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  border-radius: 4px;
+}
+.lm-filing-torrent-warning {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.1);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border-left: 2px solid #f59e0b;
+}
+.lm-filing-metadata-check {
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted, #aab3c5);
+}
+.lm-custom-mappings-container {
+  margin-top: 20px;
+}
+
+.lm-terminal-line.imported {
+  color: #38bdf8;
+}
+.lm-terminal-line.imported span {
+  color: #38bdf8 !important;
+  font-weight: 700;
+}
+.lm-terminal-line.imported em {
+  color: #7dd3fc !important;
+  opacity: 0.9;
+}
+.lm-terminal-inline-btn.retry-filing {
+  border-color: rgba(56, 189, 248, 0.4);
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+}
+.lm-terminal-inline-btn.retry-filing:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.3);
+  border-color: rgba(56, 189, 248, 0.7);
+}
+.lm-terminal-filing-diagnostic {
+  margin-top: 3px;
+  font-size: 0.78rem;
+  color: #93c5fd;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.lm-terminal-filing-diagnostic .lm-filing-diag-label {
+  font-weight: 700;
+  color: #60a5fa;
+  flex-shrink: 0;
+}
+.lm-terminal-filing-diagnostic .lm-filing-diag-text {
+  opacity: 0.92;
+  color: #bfdbfe;
+}
+
+.lm-terminal-btn-backlog {
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #38bdf8;
+  font-family: inherit;
+  font-size: 0.74rem;
+  font-weight: 700;
+  padding: 0.2rem 0.6rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.lm-terminal-btn-backlog:hover {
+  background: rgba(56, 189, 248, 0.25);
+  border-color: rgba(56, 189, 248, 0.7);
+  color: #7dd3fc;
+}
+
+/* Backlog Organiser Modal Styles */
+.lm-modal-backlog-dialog {
+  max-width: 820px !important;
+}
+.lm-backlog-stats-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.lm-backlog-stat {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+}
+.lm-backlog-stat.total {
+  border-color: rgba(148, 163, 184, 0.25);
+}
+.lm-backlog-stat.incoming {
+  border-color: rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.05);
+}
+.lm-backlog-stat.incoming .stat-val {
+  color: #38bdf8;
+}
+.lm-backlog-stat.eligible {
+  border-color: rgba(74, 222, 128, 0.3);
+  background: rgba(74, 222, 128, 0.06);
+}
+.lm-backlog-stat.eligible .stat-val {
+  color: #4ade80;
+}
+.lm-backlog-stat.companions {
+  border-color: rgba(148, 163, 184, 0.25);
+}
+.lm-backlog-stat.pending {
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.05);
+}
+.lm-backlog-stat.pending .stat-val {
+  color: #f59e0b;
+}
+.lm-backlog-stat.moved {
+  border-color: rgba(56, 189, 248, 0.3);
+  background: rgba(56, 189, 248, 0.05);
+}
+.lm-backlog-stat.moved .stat-val {
+  color: #38bdf8;
+}
+.lm-backlog-stat.ineligible {
+  border-color: rgba(245, 158, 11, 0.25);
+}
+.lm-backlog-stat .stat-label {
+  font-size: 0.68rem;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.lm-backlog-stat .stat-val {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #f1f5f9;
+}
+.lm-backlog-stat .stat-sub {
+  font-size: 0.65rem;
+  color: #64748b;
+  margin-top: 2px;
+}
+.lm-backlog-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 8px 0;
+}
+.lm-backlog-tabs {
+  display: flex;
+  gap: 4px;
+}
+.lm-backlog-tabs button {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #94a3b8;
+  font-size: 0.76rem;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.lm-backlog-tabs button.active {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: #38bdf8;
+  color: #38bdf8;
+  font-weight: 600;
+}
+.lm-backlog-search {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #fff;
+  font-size: 0.76rem;
+  padding: 3px 8px;
+  border-radius: 4px;
+  width: 140px;
+}
+.lm-backlog-list {
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+}
+.lm-backlog-item {
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  transition: background 0.12s;
+}
+.lm-backlog-item.eligible {
+  cursor: pointer;
+}
+.lm-backlog-item.eligible:hover {
+  background: rgba(56, 189, 248, 0.08);
+}
+.lm-backlog-item.selected {
+  background: rgba(56, 189, 248, 0.14);
+}
+.lm-backlog-item .item-name {
+  font-family: monospace;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lm-backlog-item .item-status-pill {
+  font-size: 0.68rem;
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.item-status-pill.eligible {
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.3);
+}
+.item-status-pill.companion {
+  background: rgba(148, 163, 184, 0.15);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+.item-status-pill.already_filed,
+.item-status-pill.moved {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+.item-status-pill.moved_destination_missing {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.item-status-pill.has_proposal {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.item-status-pill.needs_recovery,
+.item-status-pill.missing_on_disk,
+.item-status-pill.outside_incoming {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+.lm-backlog-tally-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+.lm-backlog-tally-grid .tally-item {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 0.78rem;
+  color: #94a3b8;
+}
+.lm-backlog-tally-grid .tally-item strong {
+  display: block;
+  font-size: 1.1rem;
+  color: #fff;
+}
+.lm-backlog-tally-grid .tally-item.ready strong { color: #4ade80; }
+.lm-backlog-tally-grid .tally-item.multi strong { color: #38bdf8; }
+.lm-backlog-tally-grid .tally-item.no-id strong { color: #94a3b8; }
+.lm-backlog-tally-grid .tally-item.no-dest strong { color: #f59e0b; }
+.lm-backlog-tally-grid .tally-item.inelig strong { color: #f87171; }
+.lm-backlog-confirm-card,
+.lm-backlog-summary-card,
+.lm-backlog-eval-progress-card {
+  background: rgba(56, 189, 248, 0.06);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 6px;
+  padding: 16px;
+  margin: 10px 0;
+}
+
+
+/* Automatic Filing Destination Panels */
+.lm-filing-destination-box {
+  margin-top: 10px;
+  margin-bottom: 8px;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.28);
+  border-radius: 6px;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+}
+.lm-filing-destination-box.multiple {
+  border-color: rgba(56, 189, 248, 0.4);
+}
+.lm-filing-dest-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 5px;
+  font-size: 0.83rem;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+.lm-filing-dest-item.selected {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: #38bdf8;
+}
+.lm-filing-dest-path {
+  display: block;
+  margin-top: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  color: #94a3b8;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+
+
+/* Filing Move Progress Indicators */
+.lm-filing-progress-panel {
+  margin-top: 12px;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  background: rgba(14, 165, 233, 0.08);
+  border: 1px solid rgba(14, 165, 233, 0.35);
+  border-radius: 6px;
+  animation: lmFadeIn 0.2s ease-in-out;
+}
+
+.lm-filing-progress-track {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+  position: relative;
+  margin: 6px 0;
+}
+
+.lm-filing-progress-bar-indeterminate {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, #38bdf8, #818cf8, transparent);
+  border-radius: 3px;
+  animation: lmProgressIndeterminate 1.5s infinite ease-in-out;
+}
+
+@keyframes lmProgressIndeterminate {
+  0% { left: -40%; }
+  50% { left: 40%; }
+  100% { left: 100%; }
+}
+
+.lm-filing-spinner {
+  display: inline-block;
+  animation: lmSpin 1s linear infinite;
+}
+
+@keyframes lmSpin {
+  100% { transform: rotate(360deg); }
+}
+
+.lm-filing-transfer-badge {
+  background: rgba(14, 165, 233, 0.2);
+  color: #38bdf8;
+  border: 1px solid rgba(14, 165, 233, 0.4);
+  font-size: 0.72rem;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  text-transform: uppercase;
 }

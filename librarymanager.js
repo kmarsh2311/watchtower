@@ -4,6 +4,7 @@
   if (!api) return;
   const React = api.React;
   const ReactDOM = api.ReactDOM;
+  const { useState, useEffect, useRef, useMemo, useCallback } = React;
   const { NavLink } = api.libraries.ReactRouterDOM;
   const { Button, Modal, Form } = api.libraries.Bootstrap;
   const PLUGIN_ID = "librarymanager";
@@ -1167,6 +1168,32 @@
     const [terminalFilter, setTerminalFilter] = React.useState("all");
     const [sceneHover, setSceneHover] = React.useState(null);
     const sceneHoverCache = React.useRef(new Map());
+    const sceneHoverTimer = React.useRef(null);
+    const [helpSectionId, setHelpSectionId] = React.useState("getting-started");
+    const [helpSearch, setHelpSearch] = React.useState("");
+    const [filingOptions, setFilingOptions] = React.useState({});
+    const [newMappingType, setNewMappingType] = React.useState("performer");
+    const [newMappingName, setNewMappingName] = React.useState("");
+    const [newMappingFolder, setNewMappingFolder] = React.useState("");
+    const [showBacklogModal, setShowBacklogModal] = React.useState(false);
+    const [backlogData, setBacklogData] = React.useState(null);
+    const [loadingBacklog, setLoadingBacklog] = React.useState(false);
+    const [backlogError, setBacklogError] = React.useState("");
+    const [selectedBacklogPaths, setSelectedBacklogPaths] = React.useState(new Set());
+    const [backlogTab, setBacklogTab] = React.useState("eligible");
+    const [backlogSearch, setBacklogSearch] = React.useState("");
+    const [showBacklogConfirm, setShowBacklogConfirm] = React.useState(false);
+    const [isBacklogEvaluating, setIsBacklogEvaluating] = React.useState(false);
+    const [backlogProgress, setBacklogProgress] = React.useState({ current: 0, total: 0, currentFile: "", tally: {} });
+    const [backlogCompletedSummary, setBacklogCompletedSummary] = React.useState(null);
+    const backlogCancelRequested = React.useRef(false);
+    const [useOriginalHeader, setUseOriginalHeader] = React.useState(() => {
+      try {
+        return window.localStorage.getItem("lm_header_original") === "true";
+      } catch (_) {
+        return false;
+      }
+    });
 
     React.useEffect(() => {
       if (!notice) return;
@@ -1179,16 +1206,6 @@
       const timer = window.setTimeout(() => setError(""), 6000);
       return () => window.clearTimeout(timer);
     }, [error]);
-    const sceneHoverTimer = React.useRef(null);
-    const [helpSectionId, setHelpSectionId] = React.useState("getting-started");
-    const [helpSearch, setHelpSearch] = React.useState("");
-    const [useOriginalHeader, setUseOriginalHeader] = React.useState(() => {
-      try {
-        return window.localStorage.getItem("lm_header_original") === "true";
-      } catch (_) {
-        return false;
-      }
-    });
 
     const toggleHeaderArt = React.useCallback(() => {
       setUseOriginalHeader(prev => {
@@ -1207,8 +1224,13 @@
         const [raw, settings] = await Promise.all([operation("dashboard", { limit: 250 }), getConfig()]);
         const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
         setData({ ...payload, _liveReceivedAt: Date.now() }); setConfig(settings);
-        if (settings.onboardingCompleted !== true && !onboardingClosedForSession.current) {
-          setShowOnboardingWizard(true);
+        const hasCompletedInventory = payload?.inventory?.status === "complete" && Boolean(payload?.inventory?.completed_at) && ((payload?.inventory?.present_count || 0) > 0 || (payload?.inventory?.stash_file_count || 0) > 0);
+        if (settings.onboardingCompleted !== true) {
+          if (hasCompletedInventory) {
+            updateSetting("onboardingCompleted", true).catch(() => {});
+          } else if (!onboardingClosedForSession.current) {
+            setShowOnboardingWizard(true);
+          }
         }
         window.dispatchEvent(new CustomEvent("librarymanager:health-check"));
       } catch (e) { setError(e.message); }
@@ -1231,10 +1253,125 @@
       });
     }, []);
 
+    const loadBacklog = React.useCallback(async () => {
+      setLoadingBacklog(true);
+      setBacklogError("");
+      try {
+        const raw = await operation("get_backlog_items");
+        const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
+        setBacklogData(payload);
+      } catch (err) {
+        setBacklogError(err.message || "Failed to load backlog files.");
+      } finally {
+        setLoadingBacklog(false);
+      }
+    }, []);
+
+    const handleSelectAllEligible = React.useCallback(() => {
+      if (!backlogData?.items) return;
+      const eligible = backlogData.items.filter(i => i.eligible).map(i => i.path);
+      setSelectedBacklogPaths(new Set(eligible));
+    }, [backlogData]);
+
+    const handleClearBacklogSelection = React.useCallback(() => {
+      setSelectedBacklogPaths(new Set());
+    }, []);
+
+    const toggleBacklogItemSelection = React.useCallback((path) => {
+      setSelectedBacklogPaths(prev => {
+        const next = new Set(prev);
+        if (next.has(path)) next.delete(path);
+        else next.add(path);
+        return next;
+      });
+    }, []);
+
+    const startBacklogEvaluation = React.useCallback(async () => {
+      setShowBacklogConfirm(false);
+      if (!backlogData?.items || selectedBacklogPaths.size === 0) return;
+      
+      const eligibleList = backlogData.items.filter(i => i.eligible && selectedBacklogPaths.has(i.path));
+      if (eligibleList.length === 0) return;
+
+      setIsBacklogEvaluating(true);
+      backlogCancelRequested.current = false;
+      setBacklogCompletedSummary(null);
+
+      const total = eligibleList.length;
+      let evaluated = 0;
+      const runningTally = {
+        proposal_ready: 0,
+        candidate_selection_required: 0,
+        no_identity_found: 0,
+        destination_not_found: 0,
+        ambiguous_match: 0,
+        already_filed: 0,
+        ineligible: 0,
+        errors: 0
+      };
+
+      setBacklogProgress({
+        current: 0,
+        total,
+        currentFile: eligibleList[0].basename,
+        tally: { ...runningTally }
+      });
+
+      const batchSize = 3;
+      for (let i = 0; i < total; i += batchSize) {
+        if (backlogCancelRequested.current) break;
+        const batch = eligibleList.slice(i, i + batchSize);
+        setBacklogProgress({
+          current: evaluated,
+          total,
+          currentFile: batch.map(b => b.basename).join(", "),
+          tally: { ...runningTally }
+        });
+
+        try {
+          const raw = await operation("evaluate_backlog_batch", { paths: batch.map(b => b.path) });
+          const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+          if (res?.tally) {
+            for (const [k, v] of Object.entries(res.tally)) {
+              runningTally[k] = (runningTally[k] || 0) + (v || 0);
+            }
+          }
+        } catch (err) {
+          runningTally.errors = (runningTally.errors || 0) + batch.length;
+        }
+
+        evaluated += batch.length;
+        setBacklogProgress({
+          current: Math.min(evaluated, total),
+          total,
+          currentFile: batch.map(b => b.basename).join(", "),
+          tally: { ...runningTally }
+        });
+      }
+
+      setBacklogCompletedSummary({
+        total,
+        processed: evaluated,
+        cancelled: backlogCancelRequested.current,
+        tally: { ...runningTally }
+      });
+      setIsBacklogEvaluating(false);
+      refresh();
+      loadBacklog();
+    }, [backlogData, selectedBacklogPaths, refresh, loadBacklog]);
+
     React.useEffect(() => { document.title = "Watchtower | Stash"; refresh(); }, [refresh]);
     React.useEffect(() => {
       if (tab === "advanced") loadReports().catch(error => setError(error.message));
     }, [tab, loadReports]);
+    React.useEffect(() => {
+      if (showBacklogModal) {
+        loadBacklog();
+      } else {
+        setShowBacklogConfirm(false);
+        setBacklogCompletedSummary(null);
+      }
+    }, [showBacklogModal, loadBacklog]);
     React.useEffect(() => {
       if (!["overview", "manage"].includes(tab)) return undefined;
       let stopped = false;
@@ -1401,7 +1538,7 @@
       finally { setBusy(""); }
     }
 
-    async function updateSettings(changes) {
+    async function updateSettings(changes, notifyMsg) {
       const next = { ...config, ...changes };
       setConfig(next); setError("");
       try {
@@ -1414,11 +1551,16 @@
         if (data?.monitor?.state === "running") {
           await operation("reload_monitor");
         }
+        if (notifyMsg) {
+          setNotice(notifyMsg);
+        }
         // Silent setting update to avoid distracting toasts while testing
         window.setTimeout(refresh, 500);
       }
-      catch (e) { setError(e.message); await refresh(); }
+      catch (e) { setError(e.message || String(e)); await refresh(); }
     }
+
+    const updateSetting = (key, value, notifyMsg) => updateSettings({ [key]: value }, notifyMsg);
 
     async function correctFilename(apply) {
       const sceneId = correction.sceneId.trim();
@@ -1507,8 +1649,6 @@
       finally { setBusy(""); }
     }
 
-    const updateSetting = (key, value) => updateSettings({ [key]: value }, false);
-
     function requestAutomaticRenaming(enabled) {
       if (enabled !== true) {
         updateSetting("automaticRenaming", false);
@@ -1544,9 +1684,17 @@
           type: "checkbox",
           checked: isChecked,
           style: { cursor: "pointer" },
-          onChange: e => setting === "automaticRenaming"
-            ? requestAutomaticRenaming(e.target.checked)
-            : updateSetting(setting, e.target.checked)
+          onChange: e => {
+            if (setting === "automaticRenaming") {
+              requestAutomaticRenaming(e.target.checked);
+            } else if (setting === "autoFilingEnabled") {
+              updateSetting(setting, e.target.checked, e.target.checked ? "Automatic Filing proposals enabled." : "Automatic Filing proposals disabled.");
+            } else if (setting === "autoFilingPreserveFilename") {
+              updateSetting(setting, e.target.checked, e.target.checked ? "Filename preservation enabled." : "Filename preservation disabled.");
+            } else {
+              updateSetting(setting, e.target.checked);
+            }
+          }
         }),
         React.createElement("div", { className: "lm-switch-text" },
           React.createElement("strong", null, label),
@@ -1743,9 +1891,14 @@
     }
 
     function countdown(item) {
-      const elapsed = Math.floor((clock - (data?._liveReceivedAt || clock)) / 1000);
-      const remaining = Math.max(0, Number(item.remaining_seconds || 0) - elapsed);
-      const minutes = Math.floor(remaining / 60);
+      let remaining = 0;
+      if (item.settling_deadline != null) {
+        remaining = Math.max(0, Math.round(Number(item.settling_deadline) - (Date.now() / 1000)));
+      } else {
+        const elapsed = Math.floor((clock - (data?._liveReceivedAt || clock)) / 1000);
+        remaining = Math.max(0, Number(item.remaining_seconds || 0) - elapsed);
+      }
+      const minutes = String(Math.floor(remaining / 60)).padStart(2, "0");
       const seconds = String(remaining % 60).padStart(2, "0");
       return `${minutes}:${seconds}`;
     }
@@ -1799,6 +1952,51 @@
       }
     }
 
+    async function handleRetryFiling(path) {
+      setBusy(`retry_filing:${path}`); setError("");
+      try {
+        const raw = await operation("retry_filing_proposal", { path });
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res && res.success) {
+          setNotice(res.message || "Filing proposal generated successfully.");
+          await refresh(true);
+        } else {
+          setNotice("");
+          setError(res?.error || res?.message || res?.diagnostic || "Filing evaluation did not produce a proposal.");
+          await refresh(true);
+        }
+      } catch (err) {
+        setError(err.message || String(err));
+        await refresh(true);
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleProcessIncomingNow(path, displayName) {
+      const name = displayName || basename(path);
+      if (!window.confirm(`Process "${name}" now?\n\nOnly proceed if you know this download has completely finished. All standard safety and existence checks will still run.`)) {
+        return;
+      }
+      setBusy(`process_incoming:${path}`); setError("");
+      try {
+        const raw = await operation("process_incoming_file_now", { path });
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res && res.success) {
+          setNotice(res.message || `Settling delay bypassed for ${name}. Processing initiated.`);
+          await refresh();
+        } else {
+          setError(res?.error || "Failed to process incoming file now.");
+          await refresh();
+        }
+      } catch (err) {
+        setError(err.message || String(err));
+        await refresh();
+      } finally {
+        setBusy("");
+      }
+    }
+
     async function handleRetryAllIncoming() {
       setBusy("retry_all_incoming"); setError("");
       try {
@@ -1826,10 +2024,120 @@
       }
     }
 
+
+
+    async function handleApproveFiling(proposalId, updateMetadata = false, targetDest = null, targetEntityType = null, targetEntityId = null) {
+      setBusy(`filing_${proposalId}`); setError("");
+      try {
+        const opts = filingOptions[proposalId] || {};
+        const shouldUpdateMetadata = updateMetadata || Boolean(opts.updateMetadata);
+        const selectedDestination = targetDest || opts.targetDest || undefined;
+        const selectedEntityType = targetEntityType || opts.targetEntityType || undefined;
+        const selectedEntityId = targetEntityId || opts.targetEntityId || undefined;
+        const raw = await operation("approve_filing_proposal", {
+          proposal_id: proposalId,
+          update_metadata: shouldUpdateMetadata,
+          target_destination_folder: selectedDestination,
+          target_entity_type: selectedEntityType,
+          target_entity_id: selectedEntityId
+        });
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res && res.status === "completed") {
+          let msg = `✓ Video successfully moved to ${res.destination_folder || (res.proposed_path ? res.proposed_path.split("/").slice(-2).join("/") : "destination")}`;
+          if (res.companions_moved > 0) msg += ` (${res.companions_moved} companion file${res.companions_moved === 1 ? "" : "s"} moved)`;
+          if (res.metadata_updated) msg += " — metadata updated in Stash";
+          else if (res.metadata_error) msg += ` (metadata note: ${res.metadata_error})`;
+          setNotice(msg);
+        } else if (res && res.status === "needs_recovery") {
+          setError(`CRITICAL: Move incomplete / uncertain. Recovery required: ${res.reason || "Transaction halted safely"}`);
+        } else if (res && (res.status === "blocked" || res.status === "failed" || res.reason)) {
+          setError(`Filing failed: ${res.reason || "The operation was rejected by safety verification"}`);
+        } else {
+          setError("Filing approval returned an unexpected result.");
+        }
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleIgnoreFiling(proposalId) {
+      setBusy(`ignore_filing_${proposalId}`); setError("");
+      try {
+        await operation("ignore_filing_proposal", { proposal_id: proposalId });
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleRefreshFilingProposal(filePath, proposalId) {
+      setBusy("refresh_prop_" + filePath); setError("");
+      try {
+        const raw = await operation("retry_filing_proposal", {
+          path: filePath,
+          proposal_id: proposalId,
+          allow_refresh: true,
+          allow_baseline: true
+        });
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res && res.success) {
+          setNotice("Filing proposal destination choices refreshed successfully.");
+          const newCandidates = res.proposal?.candidate_destinations || [];
+          const currentSelected = filingOptions[proposalId]?.targetDest;
+          if (currentSelected && !newCandidates.some(c => (c.destination_folder || c) === currentSelected)) {
+            setFilingOptions(prev => ({
+              ...prev,
+              [proposalId]: { ...(prev[proposalId] || {}), targetDest: undefined }
+            }));
+          }
+        } else {
+          setError(`Failed to refresh proposal: ${res?.error || res?.diagnostic || "No matching destination found"}`);
+        }
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleRecoverFiling(proposalId) {
+      setBusy(`recover_filing_${proposalId}`); setError("");
+      try {
+        const raw = await operation("recover_filing_proposal", { proposal_id: proposalId });
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res && res.recovered) {
+          setNotice("Filing move recovered: video and companions safely restored to source folder");
+        } else {
+          setError(`Recovery attempt failed: ${res.reason || "Check file permissions"}`);
+        }
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
         function RetroStatus() {
       const allActive = incoming.active || [];
-      const waitingAndScanning = allActive.filter(item => item.status !== "failed");
-      const hasActiveRename = waitingAndScanning.some(i => i.status === "pending_rename" || i.status === "renaming");
+      const activeIncoming = allActive.filter(item => {
+        if (item.status === "downloading" || item.status === "scanning" || item.status === "generating_sheet" || item.status === "renaming" || item.status === "pending_rename") {
+          return true;
+        }
+        if (item.status === "waiting") {
+          const isImage = /\.(jpg|jpeg|png|webp)$/i.test(item.path);
+          return !isImage;
+        }
+        return false;
+      });
+      const waitingAndScanning = activeIncoming;
+      const hasActiveRename = activeIncoming.some(i => i.status === "pending_rename" || i.status === "renaming");
       const activeJobs = (data?.active_jobs || []).filter(job => {
         if (job.status !== "RUNNING" && job.status !== "QUEUED") return false;
         if (hasActiveRename && /rename/i.test(job.description)) return false;
@@ -1844,6 +2152,17 @@
       const deferredMoves = unresolved.filter(e => e.processing_state === "deferred");
       const attentionEvents = unresolved.filter(e => !e.processing_state);
 
+      const filingProposals = data?.filing_proposals || [];
+      const activeFilingTransfers = data?.active_filing_transfers || [];
+      const activeTransferMap = {};
+      for (const t of activeFilingTransfers) {
+        if (t.proposal_id) activeTransferMap[t.proposal_id] = t;
+      }
+      const isAnyTransferActive = activeFilingTransfers.length > 0 || String(busy || "").startsWith("filing_");
+      const pendingFilingProposals = filingProposals.filter(p => p.status !== "needs_recovery");
+      const filingRecoveryProposals = filingProposals.filter(p => p.status === "needs_recovery");
+      const filingRecoveryCount = filingRecoveryProposals.length;
+
       const inFlightCount = reconnectingMoves.length + waitingMoves.length + deferredMoves.length;
       const totalPending = monitor.pending_events != null ? monitor.pending_events : unresolved.length;
       const attentionCount = attentionEvents.length;
@@ -1852,7 +2171,7 @@
       const isMonitorStale = monitor.is_stale === true || monitor.state === "stale";
       const watcherWorking = monitor.state === "running" && !isMonitorStale;
 
-      const totalProblems = failedIncoming.length + unavailableRoots.length + attentionCount + (isMonitorStale ? 1 : 0);
+      const totalProblems = failedIncoming.length + unavailableRoots.length + attentionCount + filingRecoveryCount + (isMonitorStale ? 1 : 0);
 
       const problemsCount = stream.filter(r => r.severity === "error" || r.severity === "warning" || r.status === "failed" || r.status === "review").length;
       const addedCount = stream.filter(r => r.category === "incoming" && r.status === "imported").length;
@@ -1980,6 +2299,31 @@
             React.createElement("p", { className: "lm-terminal-attention-detail" },
               "Storage volume or network mount is disconnected. Check that the drive is plugged in or mounted."))),
 
+          filingRecoveryProposals.map(prop => React.createElement("div", {
+            className: "lm-terminal-attention-item filing-recovery",
+            key: `filing-${prop.id}`
+          },
+            React.createElement("div", { className: "lm-terminal-attention-title" },
+              React.createElement("strong", null, `⚠️ INCOMPLETE FILING MOVE: ${basename(prop.source_path)}`),
+              React.createElement("span", {
+                className: "lm-terminal-badge filing-recovery"
+              }, "RECOVERY NEEDED")),
+            React.createElement("p", { className: "lm-terminal-attention-detail" },
+              prop.last_error || "Companion move failed and video rollback could not be verified."),
+            React.createElement("p", { className: "lm-terminal-attention-sub" },
+              React.createElement("b", null, "From: "), prop.source_path),
+            React.createElement("p", { className: "lm-terminal-attention-sub" },
+              React.createElement("b", null, "To: "), prop.proposed_path),
+            React.createElement("div", { className: "lm-terminal-actions" },
+              React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn filing-recovery",
+                disabled: !!busy,
+                onClick: () => handleRecoverFiling(prop.id)
+              }, busy === `recover_filing_${prop.id}` ? "⟳ RECOVERING…" : "⟳ RECOVER TO SOURCE")
+            )
+          )),
+
           attentionEvents.map((event, idx) => {
             const info = pendingEventInfo(event);
             const deletion = event.event_type === "deleted" || String(event.destination_path || "").toLowerCase().endsWith(".delete");
@@ -2012,9 +2356,277 @@
                 }, !isVideo && deletion ? "✓ ACKNOWLEDGE DELETION" : "✕ DISMISS")));
           })),
 
+        pendingFilingProposals.length > 0 && React.createElement("div", { className: "lm-terminal-filing-card" },
+          React.createElement("div", { className: "lm-terminal-filing-header" },
+            React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: ".65rem" } },
+              React.createElement("span", { className: "lm-terminal-filing-tag" }, "📁 FILING PROPOSALS"),
+              React.createElement("span", { className: "lm-terminal-filing-count" },
+                `${pendingFilingProposals.length} proposal${pendingFilingProposals.length === 1 ? "" : "s"} ready for review`))),
+          pendingFilingProposals.map(prop => {
+            const opts = filingOptions[prop.id] || {};
+            const rawCandidates = prop.candidate_destinations || [];
+            const candidates = rawCandidates.map(c => {
+              if (typeof c === "string") {
+                return { destination_folder: c, label: c, entity_type: prop.organize_by || "performer", entity_name: prop.matched_entity_name };
+              }
+              return c;
+            });
+            const hasMultiple = candidates.length > 1;
+            const selectedTarget = opts.targetDest || (hasMultiple ? "" : (prop.destination_folder || (candidates[0] ? candidates[0].destination_folder : "")));
+            const selectedCandidate = candidates.find(c => c.destination_folder === selectedTarget) || (hasMultiple ? null : candidates[0]);
+
+            const singleDestPath = prop.destination_folder || (candidates[0] ? candidates[0].destination_folder : "");
+            const singleLabel = candidates[0]?.label || `[${(candidates[0]?.entity_type || "DEST").toUpperCase()}] ${candidates[0]?.entity_name || prop.matched_entity_name || "Destination"} → ${singleDestPath}`;
+
+            const destDisplay = hasMultiple
+              ? React.createElement("div", {
+                  className: "lm-filing-candidate-picker multiple",
+                  style: { marginTop: "10px", padding: "10px 14px", background: "rgba(0,0,0,0.28)", borderRadius: "6px", border: "1px solid rgba(56, 189, 248, 0.4)" }
+                },
+                  React.createElement("div", {
+                    style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px", fontSize: "0.85rem", fontWeight: "600", color: "#38bdf8" }
+                  },
+                    React.createElement("span", null, `⚠️ Multiple Destinations Detected (${candidates.length}) — Select Destination:`),
+                    React.createElement("span", {
+                      className: "lm-terminal-badge",
+                      style: {
+                        background: selectedTarget ? "rgba(56, 189, 248, 0.15)" : "rgba(245, 158, 11, 0.15)",
+                        color: selectedTarget ? "#38bdf8" : "#f59e0b",
+                        border: `1px solid ${selectedTarget ? "rgba(56, 189, 248, 0.3)" : "rgba(245, 158, 11, 0.3)"}`,
+                        fontSize: "0.72rem",
+                        padding: "2px 8px"
+                      }
+                    }, selectedTarget ? "CHOICE SELECTED" : "SELECTION REQUIRED")
+                  ),
+                  React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "6px" } },
+                    candidates.map(c => {
+                      const isSelected = selectedTarget === c.destination_folder;
+                      const displayLabel = c.label || `[${(c.entity_type || "DEST").toUpperCase()}] ${c.entity_name ? `${c.entity_name} → ` : ""}${c.destination_folder}`;
+                      return React.createElement("label", {
+                        key: c.destination_folder,
+                        style: {
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: "10px",
+                          padding: "8px 12px",
+                          background: isSelected ? "rgba(56, 189, 248, 0.15)" : "rgba(255,255,255,0.03)",
+                          border: `1px solid ${isSelected ? "#38bdf8" : "rgba(255,255,255,0.08)"}`,
+                          borderRadius: "5px",
+                          cursor: "pointer",
+                          fontSize: "0.83rem",
+                          wordBreak: "break-all",
+                          overflowWrap: "anywhere"
+                        }
+                      },
+                        React.createElement("input", {
+                          type: "radio",
+                          name: `dest_choice_${prop.id}`,
+                          value: c.destination_folder,
+                          checked: isSelected,
+                          onChange: () => setFilingOptions(prev => ({ ...prev, [prop.id]: { ...(prev[prop.id] || {}), targetDest: c.destination_folder } })),
+                          style: { marginTop: "3px" }
+                        }),
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                          React.createElement("span", { style: { fontWeight: "600", color: isSelected ? "#38bdf8" : "#f1f5f9" } }, displayLabel),
+                          React.createElement("span", {
+                            style: {
+                              display: "block",
+                              marginTop: "2px",
+                              fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                              fontSize: "0.78rem",
+                              color: isSelected ? "#bae6fd" : "#94a3b8",
+                              wordBreak: "break-all",
+                              overflowWrap: "anywhere"
+                            }
+                          }, c.destination_folder)
+                        )
+                      );
+                    })
+                  )
+                )
+              : React.createElement("div", {
+                  className: "lm-filing-candidate-picker",
+                  style: { marginTop: "10px", padding: "10px 14px", background: "rgba(0,0,0,0.28)", borderRadius: "6px", border: "1px solid rgba(56, 189, 248, 0.25)" }
+                },
+                  React.createElement("div", {
+                    style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px", fontSize: "0.85rem", fontWeight: "600", color: "#38bdf8" }
+                  },
+                    React.createElement("span", null, "📁 Destination Folder:"),
+                    React.createElement("span", {
+                      className: "lm-terminal-badge",
+                      style: { background: "rgba(56, 189, 248, 0.15)", color: "#38bdf8", border: "1px solid rgba(56, 189, 248, 0.3)", fontSize: "0.72rem", padding: "2px 8px" }
+                    }, "SELECTED DESTINATION")
+                  ),
+                  React.createElement("div", {
+                    style: {
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: "10px",
+                      padding: "8px 12px",
+                      background: "rgba(56, 189, 248, 0.10)",
+                      border: "1px solid rgba(56, 189, 248, 0.35)",
+                      borderRadius: "5px",
+                      fontSize: "0.83rem",
+                      wordBreak: "break-all",
+                      overflowWrap: "anywhere"
+                    }
+                  },
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                      React.createElement("span", { style: { fontWeight: "600", color: "#38bdf8" } }, singleLabel),
+                      React.createElement("span", {
+                        style: {
+                          display: "block",
+                          marginTop: "2px",
+                          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+                          fontSize: "0.78rem",
+                          color: "#bae6fd",
+                          wordBreak: "break-all",
+                          overflowWrap: "anywhere"
+                        }
+                      }, singleDestPath || "(Destination folder will be resolved upon approval)")
+                    )
+                  )
+                );
+
+            const activeTransfer = activeTransferMap[prop.id];
+            const isCurrentTransferring = Boolean(activeTransfer) || busy === `filing_${prop.id}`;
+            const isAnotherTransferActive = isAnyTransferActive && !isCurrentTransferring;
+            const isApproveDisabled = Boolean(busy) || isAnyTransferActive || (hasMultiple && !selectedTarget);
+
+            let approveButtonLabel = "✓ APPROVE & MOVE";
+            if (isCurrentTransferring) {
+              approveButtonLabel = "⟳ IN PROGRESS…";
+            } else if (isAnotherTransferActive) {
+              approveButtonLabel = "⚠️ TRANSFER IN PROGRESS";
+            } else if (hasMultiple && !selectedTarget) {
+              approveButtonLabel = "⚠️ SELECT DESTINATION FIRST";
+            }
+
+            const isDualMatch = Boolean(selectedCandidate?.matched_entities && selectedCandidate.matched_entities.length > 1);
+            const currentTagEntity = selectedCandidate?.entity_type || prop.organize_by || "performer";
+            const currentEntityName = selectedCandidate?.entity_name || prop.matched_entity_name;
+
+            const progressPanel = isCurrentTransferring ? React.createElement("div", {
+              className: "lm-filing-progress-panel"
+            },
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" } },
+                React.createElement("span", { style: { fontWeight: "600", fontSize: "0.85rem", color: "#38bdf8", display: "flex", alignItems: "center", gap: "6px" } },
+                  React.createElement("span", { className: "lm-filing-spinner" }, "⟳"),
+                  activeTransfer?.stage_label || "Filing in progress…"
+                ),
+                (activeTransfer?.total_bytes > 0 || prop.file_size > 0) ? React.createElement("span", { style: { fontSize: "0.78rem", color: "#94a3b8" } }, formatBytes(activeTransfer?.total_bytes || prop.file_size)) : null
+              ),
+              React.createElement("div", { className: "lm-filing-progress-track" },
+                React.createElement("div", { className: "lm-filing-progress-bar-indeterminate" })
+              ),
+              React.createElement("div", { style: { fontSize: "0.78rem", color: "#bae6fd", marginTop: "6px" } },
+                activeTransfer?.detail || "Moving video and companion files to destination folder..."
+              )
+            ) : null;
+
+            return React.createElement("div", {
+              className: "lm-terminal-attention-item filing",
+              key: `filing-${prop.id}`
+            },
+              React.createElement("div", { className: "lm-terminal-attention-title" },
+                React.createElement("strong", null, `📁 FILING PROPOSAL: ${basename(prop.source_path)}`),
+                React.createElement("span", {
+                  className: "lm-terminal-badge filing"
+                }, (selectedCandidate?.entity_type || prop.organize_by || "FILING").toUpperCase()),
+                (selectedCandidate?.is_custom_mapped || prop.is_custom_mapped) ? React.createElement("span", {
+                  className: "lm-terminal-badge",
+                  style: { background: "rgba(99, 102, 241, 0.15)", color: "#818cf8", border: "1px solid rgba(99, 102, 241, 0.3)" }
+                }, "CUSTOM MAPPED") : null),
+              React.createElement("p", { className: "lm-terminal-attention-detail" },
+                React.createElement(React.Fragment, null,
+                  React.createElement("b", null, "Matched: "),
+                  `${currentEntityName}${prop.matched_alias ? ` (via alias "${prop.matched_alias}")` : ""}`,
+                  React.createElement("span", { style: { marginLeft: "8px", opacity: 0.8 } }, `(${selectedCandidate?.match_source || prop.match_source})`))),
+              React.createElement("p", { className: "lm-terminal-attention-sub", style: { wordBreak: "break-all", overflowWrap: "anywhere" } },
+                React.createElement("b", null, "From: "), prop.source_path),
+              destDisplay,
+              prop.in_nested_folder ? React.createElement("div", {
+                className: "lm-filing-torrent-warning",
+                style: { marginTop: "6px", fontSize: "0.8rem", color: "#f59e0b", background: "rgba(245, 158, 11, 0.1)", padding: "4px 8px", borderRadius: "4px" }
+              }, "⚠️ Nested download folder: moving this file may interrupt torrent seeding.") : null,
+              progressPanel,
+              React.createElement("div", { style: { marginTop: "8px" } },
+                React.createElement("label", {
+                  style: { fontSize: "0.85rem", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "6px" }
+                },
+                  React.createElement("input", {
+                    type: "checkbox",
+                    checked: Boolean(opts.updateMetadata),
+                    onChange: e => setFilingOptions(prev => ({ ...prev, [prop.id]: { ...(prev[prop.id] || {}), updateMetadata: e.target.checked } }))
+                  }),
+                  isDualMatch
+                    ? `Tag matched entity in Stash scene (Default: Move only)`
+                    : `Tag matched ${currentTagEntity} in Stash scene (Default: Move only)`
+                ),
+                isDualMatch && Boolean(opts.updateMetadata) ? React.createElement("div", {
+                  style: { marginTop: "6px", marginLeft: "22px", display: "flex", gap: "12px", fontSize: "0.82rem" }
+                },
+                  selectedCandidate.matched_entities.map(me => React.createElement("label", {
+                    key: me.entity_type,
+                    style: { cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "4px" }
+                  },
+                    React.createElement("input", {
+                      type: "radio",
+                      name: `meta_choice_${prop.id}`,
+                      value: me.entity_type,
+                      checked: (opts.targetEntityType || selectedCandidate.matched_entities[0].entity_type) === me.entity_type,
+                      onChange: () => setFilingOptions(prev => ({ ...prev, [prop.id]: { ...(prev[prop.id] || {}), targetEntityType: me.entity_type, targetEntityId: me.entity_id } }))
+                    }),
+                    `Tag ${me.entity_type === "performer" ? "Performer" : "Studio"} (${me.entity_name})`
+                  ))
+                ) : null
+              ),
+              React.createElement("div", { className: "lm-terminal-actions", style: { marginTop: "10px" } },
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn filing-approve",
+                  disabled: isApproveDisabled,
+                  onClick: () => handleApproveFiling(prop.id)
+                }, approveButtonLabel),
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn retry",
+                  disabled: Boolean(busy) || isAnyTransferActive,
+                  onClick: () => handleRefreshFilingProposal(prop.source_path, prop.id),
+                  title: "Re-evaluate destination choices and directory cache for this scene"
+                }, busy === `refresh_prop_${prop.source_path}` ? "⟳ REFRESHING…" : "⟳ REFRESH CHOICES"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn dismiss",
+                  disabled: Boolean(busy) || isAnyTransferActive,
+                  onClick: () => handleIgnoreFiling(prop.id)
+                }, "✕ IGNORE")
+              )
+            );
+          })),
+
         React.createElement("div", { className: "lm-terminal-section" },
-          React.createElement("h3", null, "HAPPENING NOW"),
-          (waitingAndScanning.length || activeJobs.length || transcoderCandidates.length || reconnectingMoves.length || waitingMoves.length || deferredMoves.length) ? React.createElement(React.Fragment, null,
+          React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: ".55rem", flexWrap: "wrap", gap: ".5rem" } },
+            React.createElement("h3", { style: { margin: 0 } }, "HAPPENING NOW"),
+            React.createElement("button", {
+              type: "button",
+              className: "lm-terminal-btn-backlog",
+              onClick: () => setShowBacklogModal(true),
+              title: "View workflow for organising pre-existing library files"
+            }, `📁 ORGANISE EXISTING FILES${(incoming?.baseline_count || 0) > 0 ? ` (${(backlogData?.eligible_count ?? incoming?.backlog_eligible_count ?? 0).toLocaleString()})` : ""}`)
+          ),
+          (activeFilingTransfers.length || waitingMoves.length || reconnectingMoves.length || deferredMoves.length || transcoderCandidates.length || activeJobs.length || activeIncoming.length) ? React.createElement(React.Fragment, null,
+            activeFilingTransfers.map(t => {
+              const displayName = basename(t.source_path);
+              return React.createElement("div", {
+                className: "lm-terminal-line filing_transfer",
+                key: `filing-transfer-${t.proposal_id}`
+              },
+                React.createElement("span", { className: "lm-filing-transfer-badge" }, (t.stage_label || "FILING").toUpperCase()),
+                React.createElement("strong", { title: `${t.source_path} → ${t.destination_path}` }, displayName),
+                React.createElement("span", { className: "lm-terminal-sub" }, `→ ${t.detail || t.destination_folder}`)
+              );
+            }),
             waitingMoves.map(event => {
               const displayName = basename(event.destination_path || event.source_path);
               const targetVideo = event.companion_of || "VIDEO";
@@ -2029,7 +2641,7 @@
             }),
             reconnectingMoves.map(event => {
               const displayName = basename(event.destination_path || event.source_path);
-              const isCompanion = !!event.companion_of;
+              const isCompanion = !event.companion_of;
               const badgeText = isCompanion ? "RECONNECTING (COMPANION)" : "RECONNECTING";
               const detailText = isCompanion
                 ? `RECONNECTING WITH VIDEO: ${event.companion_of}`
@@ -2065,7 +2677,7 @@
               React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn details",
-                disabled: !!busy,
+                disabled: !busy,
                 title: "Stop treating this as an encoded replacement and review it as a separate new file",
                 onClick: async () => {
                   setBusy(`promote-transcoder:${item.candidate_path}`);
@@ -2112,15 +2724,14 @@
                 }, "✕ STOP")
               );
             }),
-            waitingAndScanning.map(item => {
+            activeIncoming.map(item => {
               const isDownloading = item.status === "downloading";
               const isScanning = item.status === "scanning";
               const isPendingRename = item.status === "pending_rename";
               const isRenaming = item.status === "renaming";
               const isGeneratingSheet = item.status === "generating_sheet";
-              const isUnmatched = item.status === "unmatched";
-              const isIgnored = item.status === "ignored";
               const isImage = /\.(jpg|jpeg|png|webp)$/i.test(item.path);
+              const isWaitingVideo = item.status === "waiting" && !isImage;
               let displayName = basename(item.path);
               if (isDownloading) {
                 displayName = displayName.replace(/\.(crdownload|part|partial|download|tmp|temp|!qb)$/i, "");
@@ -2145,28 +2756,19 @@
                   React.createElement("div", {
                     style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: ".4rem" }
                   },
-                    React.createElement("span", { style: { fontWeight: "700", color: "#39ff64", fontSize: ".82rem" } },
-                      `⏳ PENDING RENAME (SCENE #${item.scene_id})`
-                    ),
-                    React.createElement("em", { style: { fontStyle: "normal", color: "#ffb52e", fontSize: ".8rem", fontWeight: "700" } },
-                      `SETTLES IN ${countdown(item)}`
-                    )
-                  ),
-                  React.createElement("div", { style: { fontSize: ".82rem", lineHeight: "1.45", overflowWrap: "anywhere" } },
-                    React.createElement("div", { style: { color: "rgba(32, 230, 74, .7)" } },
-                      React.createElement("span", { style: { opacity: .65 } }, "Current:  "),
-                      currentName
-                    ),
-                    React.createElement("div", { style: { color: "#39ff64", fontWeight: "600", marginTop: "2px" } },
-                      React.createElement("span", { style: { opacity: .65 } }, "Proposed: "),
-                      proposedName
-                    )
-                  ),
-                  React.createElement("div", { className: "lm-terminal-actions", style: { marginTop: ".55rem", gap: ".5rem" } },
+                    React.createElement("strong", { style: { color: "#4ade80", fontSize: "0.85rem" } }, "RENAMING PROPOSAL (PENDING USER CONFIRMATION)"),
+                    React.createElement("span", { className: "lm-terminal-badge rename" }, "RENAME")),
+                  React.createElement("div", { style: { fontSize: "0.82rem", color: "#94a3b8", marginBottom: "3px" } },
+                    React.createElement("span", null, "Current: "),
+                    React.createElement("span", { style: { color: "#e2e8f0" } }, currentName)),
+                  React.createElement("div", { style: { fontSize: "0.82rem", color: "#94a3b8", marginBottom: "6px" } },
+                    React.createElement("span", null, "Proposed: "),
+                    React.createElement("span", { style: { color: "#4ade80", fontWeight: "bold" } }, proposedName)),
+                  React.createElement("div", { className: "lm-terminal-actions" },
                     React.createElement("button", {
                       type: "button",
-                      className: "lm-terminal-btn retry",
-                      disabled: !!busy,
+                      className: "lm-terminal-btn rename-approve",
+                      disabled: !busy,
                       onClick: async () => {
                         setBusy(`rename:${item.scene_id}`);
                         setError("");
@@ -2183,7 +2785,7 @@
                     React.createElement("button", {
                       type: "button",
                       className: "lm-terminal-btn dismiss",
-                      disabled: !!busy,
+                      disabled: !busy,
                       onClick: async () => {
                         setBusy(`cancel:${item.scene_id}`);
                         setError("");
@@ -2201,11 +2803,7 @@
                 );
               }
 
-              const badgeText = isUnmatched
-                ? "UNMATCHED"
-                : isIgnored
-                ? "IGNORED"
-                : isRenaming
+              const badgeText = isRenaming
                 ? "RENAMING"
                 : isDownloading
                 ? "DOWNLOADING"
@@ -2213,14 +2811,9 @@
                 ? "ADDING"
                 : isGeneratingSheet
                 ? "GENERATING"
-                : isImage
-                ? "WAITING (IMG)"
-                : "FINISHING";
-              const statusDetail = isUnmatched
-                ? (item.detail || "IMAGE UNMATCHED")
-                : isIgnored
-                ? (item.detail || "IGNORED BY USER")
-                : isRenaming
+                : "SETTLING";
+
+              const statusDetail = isRenaming
                 ? "APPLYING FILENAME IN STASH"
                 : isDownloading
                 ? "INCOMING DOWNLOAD (IN PROGRESS)"
@@ -2228,37 +2821,29 @@
                 ? "STASH IS CHECKING IT"
                 : isGeneratingSheet
                 ? "CREATING CONTACT SHEET (CSM)"
-                : item.detail && !item.detail.startsWith("Discovered")
-                ? item.detail
-                : `READY IN ${countdown(item)}`;
+                : `SETTLES IN ${countdown(item)}`;
 
-              const showDismiss = isUnmatched || (item.status === "waiting" && isImage);
-              const showRetry = isUnmatched || isIgnored;
+              const showProcessNow = item.status === "waiting" && !isDownloading && !isScanning;
 
               return React.createElement("div", { className: `lm-terminal-line ${item.status}`, key: item.path },
                 React.createElement("span", null, badgeText),
-                React.createElement("strong", { title: item.path }, displayName),
+                React.createElement("div", { style: { overflow: "hidden", minWidth: 0 } },
+                  React.createElement("strong", { title: item.path, style: { display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, displayName)
+                ),
                 React.createElement("em", null,
                   React.createElement("span", null, statusDetail),
-                  showRetry && React.createElement("button", {
+                  showProcessNow && React.createElement("button", {
                     type: "button",
-                    className: "lm-terminal-inline-btn retry",
-                    disabled: !!busy,
-                    title: "Retry pairing against current folder contents",
-                    onClick: () => handleRetryIncoming(item.path)
-                  }, "⟳ RETRY"),
-                  showDismiss && React.createElement("button", {
-                    type: "button",
-                    className: "lm-terminal-inline-btn dismiss",
-                    disabled: !!busy,
-                    title: "Ignore this image without moving or deleting the file",
-                    onClick: () => handleDismissIncoming(item.path)
-                  }, "✕ IGNORE")
+                    className: "lm-terminal-inline-btn process-now",
+                    disabled: !busy,
+                    title: "Bypass settling delay and import this video into Stash immediately",
+                    onClick: () => handleProcessIncomingNow(item.path, displayName)
+                  }, "▶ PROCESS NOW")
                 )
               );
             })
           ) :
-            React.createElement("p", { className: "lm-terminal-empty" }, watcherWorking ? "No videos are downloading or waiting. The watcher is listening." : "The watcher is not running.")),
+            React.createElement("p", { className: "lm-terminal-empty" }, watcherWorking ? "No active operations. Watchtower is listening." : "The watcher is not running.")),
 
         React.createElement("div", { className: "lm-terminal-section lm-terminal-stream-section" },
           React.createElement("div", { className: "lm-terminal-stream-header" },
@@ -2731,6 +3316,123 @@
         }
       };
 
+      const rawDestRoots = Array.isArray(config.autoFilingDestinationRoots)
+        ? config.autoFilingDestinationRoots
+        : (config.autoFilingDestinationRoot ? [config.autoFilingDestinationRoot] : [""]);
+      const destinationRootsList = rawDestRoots.length > 0 ? rawDestRoots : [""];
+
+      const handleAddDestRoot = () => {
+        if (destinationRootsList.length >= 5) return;
+        const next = [...destinationRootsList, ""];
+        setConfig({ ...config, autoFilingDestinationRoots: next });
+      };
+
+      const handleUpdateDestRoot = (index, val) => {
+        const next = [...destinationRootsList];
+        next[index] = val;
+        setConfig({ ...config, autoFilingDestinationRoots: next });
+      };
+
+      const handleSaveDestRoots = (nextRoots) => {
+        const cleaned = nextRoots.map(f => (f || "").trim()).filter(Boolean);
+        const finalList = cleaned.length > 0 ? cleaned.slice(0, 5) : [];
+        setConfig({ ...config, autoFilingDestinationRoots: nextRoots, autoFilingDestinationRoot: nextRoots[0] || "" });
+        updateSettings({
+          autoFilingDestinationRoots: finalList,
+          autoFilingDestinationRoot: finalList[0] || ""
+        }, "Destination roots saved.");
+      };
+
+      const handleRemoveDestRoot = (index) => {
+        if (destinationRootsList.length <= 1) {
+          const next = [""];
+          setConfig({ ...config, autoFilingDestinationRoots: next, autoFilingDestinationRoot: "" });
+          updateSettings({ autoFilingDestinationRoots: [], autoFilingDestinationRoot: "" }, "Destination root removed.");
+        } else {
+          const next = destinationRootsList.filter((_, idx) => idx !== index);
+          const cleaned = next.map(f => (f || "").trim()).filter(Boolean);
+          setConfig({ ...config, autoFilingDestinationRoots: next, autoFilingDestinationRoot: next[0] || "" });
+          updateSettings({
+            autoFilingDestinationRoots: cleaned,
+            autoFilingDestinationRoot: cleaned[0] || ""
+          }, "Destination root removed.");
+        }
+      };
+
+      const handleRefreshFolderCache = async () => {
+        try {
+          setBusy("refresh_cache");
+          await operation("refresh_filing_cache");
+          setNotice("Destination folder discovery cache refreshed.");
+        } catch (err) {
+          setError(`Folder cache refresh failed: ${err?.message || err}`);
+        } finally {
+          setBusy("");
+        }
+      };
+
+      const folderMappingsList = data?.filing_folder_mappings || [];
+
+
+      const handleSaveNewMapping = async () => {
+        if (!newMappingName.trim() || !newMappingFolder.trim()) return;
+        setBusy("save_mapping");
+        try {
+          let entityId = "";
+          try {
+            if (newMappingType === "performer") {
+              const gqlRes = await query(`query FindP { allPerformers { id name } }`);
+              const performers = gqlRes?.allPerformers || [];
+              const pMatch = performers.find(p => p.name.toLowerCase() === newMappingName.trim().toLowerCase());
+              if (pMatch) entityId = pMatch.id;
+            } else {
+              const gqlRes = await query(`query FindS { allStudios { id name } }`);
+              const studios = gqlRes?.allStudios || [];
+              const sMatch = studios.find(s => s.name.toLowerCase() === newMappingName.trim().toLowerCase());
+              if (sMatch) entityId = sMatch.id;
+            }
+          } catch (e) {
+            // fallback
+          }
+          if (!entityId) {
+            entityId = newMappingName.trim();
+          }
+
+          const raw = await operation("save_filing_folder_mapping", {
+            entity_type: newMappingType,
+            entity_id: String(entityId),
+            entity_name: newMappingName.trim(),
+            folder_path: newMappingFolder.trim()
+          });
+          const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+          if (res && res.success) {
+            setNotice(`Custom folder mapping for ${newMappingType} '${newMappingName.trim()}' saved.`);
+            setNewMappingName("");
+            setNewMappingFolder("");
+            await refresh(true);
+          } else {
+            setError(`Failed saving mapping: ${res?.message || "Invalid path or destination root"}`);
+          }
+        } catch (err) {
+          setError(err.message || String(err));
+        } finally {
+          setBusy("");
+        }
+      };
+
+      const handleDeleteMapping = async (mappingId) => {
+        setBusy(`delete_mapping_${mappingId}`);
+        try {
+          await operation("delete_filing_folder_mapping", { mapping_id: mappingId });
+          setNotice("Custom folder mapping removed.");
+          await refresh(true);
+        } catch (err) {
+          setError(`Failed deleting mapping: ${err.message || String(err)}`);
+        } finally {
+          setBusy("");
+        }
+      };
+
       content = React.createElement(React.Fragment, null,
         panel("Incoming Downloads Folders (Auto-Ingest)", "Watch up to 5 staging folders where new downloads arrive before you organize them.",
           React.createElement(React.Fragment, null,
@@ -2801,7 +3503,232 @@
                   : "Please configure at least one incoming folder located inside a Stash library root.")),
               React.createElement("small", null, `${incoming.downloading ? `${incoming.downloading} downloading, ` : ""}${incoming.waiting || 0} waiting, ${incoming.scanning || 0} being added, ${incoming.imported || 0} added, ${incoming.failed || 0} failed.`)),
             React.createElement("p", { className: "lm-help", style: { marginTop: "10px" } },
-              "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."))))
+              "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."))),
+        panel("Incoming File Status & Diagnostics", "Review discovered files in incoming folders, automatic filing eligibility diagnostics, and retry options.",
+          React.createElement(React.Fragment, null,
+            (allActive.length > 0) ? React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } },
+              allActive.map(item => {
+                const isImported = item.status === "imported";
+                const isVideo = item.is_video ?? /\.(mp4|mkv|avi|mov|wmv|m4v|webm|flv|ts|m2ts)$/i.test(item.path);
+                const hasPendingProposal = (data?.filing_proposals || []).some(p => p.source_path === item.path);
+                const showRetryFiling = isImported && isVideo && !item.filed && !item.needs_recovery && !hasPendingProposal && !item.is_baseline && item.exists_on_disk !== false;
+                const isUnmatched = item.status === "unmatched";
+                const isFailed = item.status === "failed";
+                const displayName = basename(item.path);
+
+                return React.createElement("div", {
+                  key: `inc-diag-${item.path}`,
+                  className: `lm-terminal-line ${item.status}`,
+                  style: { background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: "5px", padding: "8px 12px", margin: 0 }
+                },
+                  React.createElement("span", {
+                    className: `lm-terminal-badge ${isImported ? "imported" : (isFailed ? "error" : (isUnmatched ? "warn" : ""))}`
+                  }, (item.status || "STATUS").toUpperCase()),
+                  React.createElement("div", { style: { flex: 1, minWidth: 0, overflow: "hidden" } },
+                    React.createElement("strong", { title: item.path, style: { display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, displayName),
+                    item.filing_diagnostic ? React.createElement("div", { className: "lm-terminal-filing-diagnostic", style: { marginTop: "4px" } },
+                      React.createElement("span", { className: "lm-filing-diag-label" }, "📁 Filing: "),
+                      React.createElement("span", { className: "lm-filing-diag-text" }, item.filing_diagnostic)
+                    ) : null
+                  ),
+                  React.createElement("em", { style: { display: "flex", alignItems: "center", gap: "6px" } },
+                    React.createElement("span", { style: { fontSize: "0.8rem", color: "var(--text-muted, #aab3c5)" } }, item.detail || (isImported ? "Added to Stash" : item.status)),
+                    showRetryFiling && React.createElement("button", {
+                      type: "button",
+                      className: "lm-terminal-inline-btn retry-filing",
+                      disabled: !busy,
+                      title: "Re-evaluate Stash metadata, aliases, and destinations for automatic filing",
+                      onClick: () => handleRetryFiling(item.path)
+                    }, "⟳ RETRY FILING"),
+                    isFailed && React.createElement("button", {
+                      type: "button",
+                      className: "lm-terminal-inline-btn retry",
+                      disabled: !busy,
+                      title: "Retry scan against current folder contents",
+                      onClick: () => handleRetryIncoming(item.path)
+                    }, "⟳ RETRY SCAN"),
+                    isUnmatched && React.createElement("button", {
+                      type: "button",
+                      className: "lm-terminal-inline-btn dismiss",
+                      disabled: !busy,
+                      title: "Dismiss unmatched alert",
+                      onClick: () => handleDismissIncoming(item.path)
+                    }, "✕ DISMISS")
+                  )
+                );
+              })
+            ) : React.createElement("p", { className: "lm-empty" }, "No incoming files currently tracked.")
+          )
+        ),
+        panel("Automatic Filing (Phase 2)", "Conservatively propose destination folders for new videos arriving in Incoming folders across multiple roots with custom mappings and optional metadata tagging. All moves require explicit review and approval.",
+          React.createElement(React.Fragment, null,
+            React.createElement(Switch, { setting: "autoFilingEnabled", defaultValue: false,
+              label: "Enable Automatic Filing Proposals",
+              help: "Disabled by default. When enabled, Watchtower evaluates newly added videos in incoming folders and proposes safe moves into matching performer or studio subdirectories." }),
+            React.createElement("div", { style: { marginTop: "14px" } },
+              React.createElement(ChoiceField, {
+                label: "Organize By",
+                help: "Choose whether newly arrived videos are filed into Performer or Studio subdirectories, or both (let you choose when both match).",
+                value: config.autoFilingOrganizeBy || "performer",
+                choices: [["performer", "Performer"], ["studio", "Studio"], ["both", "Performer or Studio (Let me choose)"]],
+                onChange: value => updateSetting("autoFilingOrganizeBy", value, `Automatic Filing organization set to ${value === "studio" ? "Studio" : (value === "both" ? "Performer or Studio (Let me choose)" : "Performer")}.`)
+              })),
+            React.createElement("div", { style: { marginTop: "14px" } },
+              React.createElement(ChoiceField, {
+                label: "Match Source Priority",
+                help: "Choose whether to prioritize Stash scene metadata (if already tagged) or match strictly from the physical filename.",
+                value: config.autoFilingMatchSource || "metadata_first",
+                choices: [["metadata_first", "Metadata First (Fallback to Filename)"], ["filename_only", "Filename Only"], ["metadata_only", "Metadata Only"]],
+                onChange: value => updateSetting("autoFilingMatchSource", value, "Match source priority updated.")
+              })),
+            React.createElement("div", { style: { marginTop: "14px" } },
+              React.createElement(ChoiceField, {
+                label: "When to Suggest Filing",
+                help: "Choose whether to evaluate filing proposals immediately upon import, or wait until a performer or studio is assigned in Stash.",
+                value: config.autoFilingTrigger || "import",
+                choices: [["import", "Immediately after import"], ["metadata", "After metadata has been added in Stash"]],
+                onChange: value => updateSetting("autoFilingTrigger", value, `When to suggest filing set to ${value === "metadata" ? "after metadata has been added" : "immediately after import"}.`)
+              })),
+            React.createElement(Switch, { setting: "autoFilingPreserveFilename", defaultValue: false,
+              label: "Preserve Original Filename",
+              help: "Keep the original filename when moving files via Automatic Filing, and protect filed videos from being subsequently renamed by Automatic Renaming." }),
+            React.createElement("div", { style: { marginTop: "14px" } },
+              React.createElement(ChoiceField, {
+                label: "Maximum Folder Discovery Depth",
+                help: "Maximum folder depth (1 to 8, default: 4) when automatically searching destination roots for matching performer or studio folders. Custom folder mappings can target any existing depth.",
+                value: String(config.autoFilingMaxDiscoveryDepth ?? 4),
+                choices: [
+                  ["1", "1 (Immediate subfolders only)"],
+                  ["2", "2 levels"],
+                  ["3", "3 levels"],
+                  ["4", "4 levels (Default)"],
+                  ["5", "5 levels"],
+                  ["6", "6 levels"],
+                  ["7", "7 levels"],
+                  ["8", "8 levels (Maximum safe)"]
+                ],
+                onChange: value => updateSetting("autoFilingMaxDiscoveryDepth", parseInt(value, 10) || 4, `Folder discovery depth set to ${value} level${value === "1" ? "" : "s"}.`)
+              })),
+            React.createElement("div", { className: "lm-incoming-list-container", style: { marginTop: "18px" } },
+              React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
+                React.createElement("strong", null, `Destination Roots (${destinationRootsList.length}/5)`),
+                React.createElement("div", { style: { display: "flex", gap: "6px" } },
+                  React.createElement("button", {
+                    type: "button",
+                    className: "btn btn-secondary btn-sm lm-refresh-folders-btn",
+                    disabled: !!busy,
+                    onClick: handleRefreshFolderCache,
+                    title: "Force an immediate refresh of the destination folder discovery cache"
+                  }, "⟳ Refresh Folders"),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "btn btn-secondary btn-sm lm-incoming-add-btn",
+                    disabled: destinationRootsList.length >= 5,
+                    onClick: handleAddDestRoot,
+                    title: destinationRootsList.length >= 5 ? "Maximum 5 roots reached" : "Add another destination root directory"
+                  }, destinationRootsList.length >= 5 ? "Max 5 Roots Configured" : "+ Add Destination Root")
+                )
+              ),
+              React.createElement("small", { style: { display: "block", color: "var(--text-muted, #aab3c5)", marginBottom: "10px" } },
+                "Configure up to 5 parent directories containing existing performer or studio subfolders (e.g. /Media/Performers/Example Folder)."),
+              destinationRootsList.map((rootPath, idx) => {
+                return React.createElement("div", { className: "lm-incoming-row", key: `dest-root-${idx}` },
+                  React.createElement("input", {
+                    value: rootPath || "",
+                    className: "lm-incoming-row-input",
+                    onChange: event => handleUpdateDestRoot(idx, event.target.value),
+                    onBlur: event => {
+                      const next = [...destinationRootsList];
+                      next[idx] = event.target.value;
+                      handleSaveDestRoots(next);
+                    },
+                    placeholder: `/Media/Performers${idx > 0 ? `_${idx + 1}` : ""}`
+                  }),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "lm-incoming-row-remove",
+                    title: destinationRootsList.length > 1 ? "Remove this destination root" : "Clear root path",
+                    onMouseDown: event => event.preventDefault(),
+                    onClick: () => handleRemoveDestRoot(idx)
+                  }, "✕")
+                );
+              })
+            ),
+            React.createElement("div", { className: "lm-custom-mappings-container", style: { marginTop: "20px", borderTop: "1px solid var(--border-color, #2a2f3a)", paddingTop: "16px" } },
+              React.createElement("strong", { style: { display: "block", marginBottom: "4px" } }, "Custom Folder Mappings"),
+              React.createElement("small", { style: { display: "block", color: "var(--text-muted, #aab3c5)", marginBottom: "10px" } },
+                "Associate specific Stash performers or studios with custom folder locations (e.g. Performer name → /Media/Performers/Example Folder). Mapped folders must exist and be inside configured destination roots."),
+              (folderMappingsList.length > 0) ? React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginBottom: "14px" } },
+                folderMappingsList.map(m => React.createElement("div", {
+                  key: `mapping-${m.id}`,
+                  style: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", padding: "8px 12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.07)" }
+                },
+                  React.createElement("div", null,
+                    React.createElement("strong", null, m.entity_name),
+                    React.createElement("span", { style: { opacity: 0.6, fontSize: "0.8rem", marginLeft: "6px" } }, `(${m.entity_type} #${m.entity_id})`),
+                    React.createElement("div", { style: { fontSize: "0.85rem", color: "var(--text-muted, #aab3c5)", marginTop: "2px" } }, m.folder_path)
+                  ),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "btn btn-outline-danger btn-sm",
+                    disabled: !!busy,
+                    onClick: () => handleDeleteMapping(m.id),
+                    title: "Delete custom mapping"
+                  }, "✕")
+                ))
+              ) : React.createElement("p", { style: { fontStyle: "italic", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } }, "No custom folder mappings configured."),
+              React.createElement("div", { style: { background: "rgba(0,0,0,0.15)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.05)" } },
+                React.createElement("span", { style: { fontWeight: "bold", fontSize: "0.85rem", display: "block", marginBottom: "8px" } }, "+ Add Custom Folder Mapping"),
+                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 2fr auto", gap: "8px", alignItems: "center" } },
+                  React.createElement("select", {
+                    className: "form-control form-control-sm",
+                    value: newMappingType,
+                    onChange: e => setNewMappingType(e.target.value)
+                  },
+                    React.createElement("option", { value: "performer" }, "Performer"),
+                    React.createElement("option", { value: "studio" }, "Studio")
+                  ),
+                  React.createElement("input", {
+                    type: "text",
+                    className: "form-control form-control-sm",
+                    placeholder: "Performer name",
+                    value: newMappingName,
+                    onChange: e => setNewMappingName(e.target.value)
+                  }),
+                  React.createElement("input", {
+                    type: "text",
+                    className: "form-control form-control-sm",
+                    placeholder: "Existing destination folder",
+                    value: newMappingFolder,
+                    onChange: e => setNewMappingFolder(e.target.value)
+                  }),
+                  React.createElement("button", {
+                    type: "button",
+                    className: "btn btn-primary btn-sm",
+                    disabled: !!busy || !newMappingName.trim() || !newMappingFolder.trim(),
+                    onClick: handleSaveNewMapping
+                  }, "+ Save")
+                )
+              )
+            ),
+            React.createElement("div", { style: { marginTop: "20px" } },
+              React.createElement("button", {
+                type: "button",
+                className: "btn btn-outline-secondary btn-sm",
+                disabled: !!busy,
+                onClick: async () => {
+                  setBusy("baseline");
+                  try {
+                    const raw = await operation("establish_filing_baseline");
+                    const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+                    setNotice(`Baseline snapshot captured ${res?.snapshotted ?? 0} existing incoming file(s).`);
+                  } catch (err) {
+                    setError(err.message || String(err));
+                  } finally {
+                    setBusy("");
+                  }
+                }
+              }, "Snapshot Incoming Baseline Now")))))
     }
     else if (tab === "csm") content = React.createElement(React.Fragment, null,
       panel("Contact Sheets (CSM)", "Generate multi-frame visual contact sheet companion images alongside your video files.",
@@ -3344,7 +4271,7 @@
           })
         ))),
       React.createElement(Toast, { notice, error, onClose: () => { setNotice(""); setError(""); } }),
-      (data !== null && config?.onboardingCompleted !== true) ? React.createElement(OnboardingBanner, {
+      (data !== null && config?.onboardingCompleted !== true && !(data?.inventory?.status === "complete" && Boolean(data?.inventory?.completed_at) && ((data?.inventory?.present_count || 0) > 0 || (data?.inventory?.stash_file_count || 0) > 0))) ? React.createElement(OnboardingBanner, {
         onStart: () => {
           onboardingClosedForSession.current = false;
           setShowOnboardingWizard(true);
@@ -3370,6 +4297,272 @@
         onCancel: () => setShowAutomaticRenamingWarning(false),
         onConfirm: confirmAutomaticRenaming
       }),
+      showBacklogModal ? (() => {
+        const validSelectedPaths = new Set(Array.from(selectedBacklogPaths).filter(p => (backlogData?.items || []).some(i => i.path === p && i.eligible && i.exists_on_disk !== false)));
+        const validSelectedCount = validSelectedPaths.size;
+
+        return React.createElement(Modal, {
+        show: true,
+        size: "xl",
+        onHide: () => {
+          if (!isBacklogEvaluating) {
+            setShowBacklogModal(false);
+            setSelectedBacklogPaths(new Set());
+          }
+        },
+        centered: true,
+        dialogClassName: "lm-backlog-modal"
+      },
+        React.createElement(Modal.Header, { closeButton: !isBacklogEvaluating, style: { background: "#0b120c", borderBottom: "1px solid rgba(56, 189, 248, .2)" } },
+          React.createElement(Modal.Title, { style: { color: "#38bdf8", fontWeight: "700", fontSize: "1.1rem" } },
+            "📁 Organise Existing Files (Backlog Workflow)"
+          )
+        ),
+        React.createElement(Modal.Body, { style: { background: "#060a07", color: "#d1fae5", fontSize: ".88rem", lineHeight: "1.5", maxHeight: "75vh", overflowY: "auto" } },
+          React.createElement("div", { style: { marginBottom: "12px" } },
+            React.createElement("p", { style: { margin: "0 0 6px 0", fontSize: ".86rem" } },
+              React.createElement("strong", { style: { color: "#38bdf8" } }, "Baseline Protection Active: "),
+              `Watchtower registered ${(backlogData?.baseline_total ?? backlogData?.total_count ?? incoming?.baseline_count ?? 0).toLocaleString()} pre-existing files in your original baseline snapshot. Files remain protected and are never moved automatically.`
+            ),
+            React.createElement("div", { className: "lm-backlog-stats-bar" },
+              React.createElement("div", { className: "lm-backlog-stat total" },
+                React.createElement("span", { className: "stat-label" }, "Original Snapshot"),
+                React.createElement("span", { className: "stat-val" }, (backlogData?.baseline_total ?? backlogData?.total_count ?? 0).toLocaleString()),
+                React.createElement("span", { className: "stat-sub" }, "Baseline total")
+              ),
+              React.createElement("div", { className: "lm-backlog-stat incoming" },
+                React.createElement("span", { className: "stat-label" }, "Remaining in Incoming"),
+                React.createElement("span", { className: "stat-val" }, (backlogData?.remaining_incoming_count ?? 0).toLocaleString()),
+                React.createElement("span", { className: "stat-sub" }, "Present in folders")
+              ),
+              React.createElement("div", { className: "lm-backlog-stat eligible" },
+                React.createElement("span", { className: "stat-label" }, "Eligible Videos"),
+                React.createElement("span", { className: "stat-val" }, (backlogData?.eligible_count ?? 0).toLocaleString()),
+                React.createElement("span", { className: "stat-sub" }, "Ready to evaluate")
+              ),
+              React.createElement("div", { className: "lm-backlog-stat pending" },
+                React.createElement("span", { className: "stat-label" }, "Pending Proposals"),
+                React.createElement("span", { className: "stat-val" }, (backlogData?.pending_proposal_count ?? 0).toLocaleString()),
+                React.createElement("span", { className: "stat-sub" }, "Awaiting approval")
+              ),
+              React.createElement("div", { className: "lm-backlog-stat companions" },
+                React.createElement("span", { className: "stat-label" }, "Companion Files"),
+                React.createElement("span", { className: "stat-val" }, (backlogData?.remaining_companion_count ?? backlogData?.companion_count ?? 0).toLocaleString()),
+                React.createElement("span", { className: "stat-sub" }, "In Incoming (JPG/NFO)")
+              ),
+              React.createElement("div", { className: "lm-backlog-stat moved" },
+                React.createElement("span", { className: "stat-label" }, "Verified Moved"),
+                React.createElement("span", { className: "stat-val" }, (backlogData?.verified_moved_count ?? (backlogData?.already_filed_count ?? 0)).toLocaleString()),
+                React.createElement("span", { className: "stat-sub" }, "Moved out of Incoming")
+              ),
+              (backlogData?.missing_count || 0) > 0 ? React.createElement("div", { className: "lm-backlog-stat ineligible" },
+                React.createElement("span", { className: "stat-label" }, "Missing on Disk"),
+                React.createElement("span", { className: "stat-val" }, (backlogData?.missing_count ?? 0).toLocaleString()),
+                React.createElement("span", { className: "stat-sub" }, "Unaccounted for")
+              ) : null
+            )
+          ),
+
+          loadingBacklog ? React.createElement("div", { style: { padding: "2rem", textAlign: "center", color: "#94a3b8" } }, "Loading Incoming baseline backlog items…") :
+          backlogError ? React.createElement("div", { className: "lm-alert-box error" }, backlogError) :
+          
+          isBacklogEvaluating ? React.createElement("div", { className: "lm-backlog-eval-progress-card" },
+            React.createElement("h4", { style: { color: "#38bdf8", margin: "0 0 10px 0", fontSize: "1rem" } }, "⚙️ Evaluating Selected Backlog Videos…"),
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: ".82rem", color: "#94a3b8", marginBottom: "6px" } },
+              React.createElement("span", null, `Progress: ${backlogProgress.current} / ${backlogProgress.total} (${Math.round((backlogProgress.current / (backlogProgress.total || 1)) * 100)}%)`),
+              React.createElement("span", { style: { maxWidth: "60%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, backlogProgress.currentFile)
+            ),
+            React.createElement("div", { className: "lm-progress-bar-bg", style: { height: "8px", background: "rgba(255,255,255,0.1)", borderRadius: "4px", overflow: "hidden", marginBottom: "14px" } },
+              React.createElement("div", { style: { width: `${Math.round((backlogProgress.current / (backlogProgress.total || 1)) * 100)}%`, height: "100%", background: "#38bdf8", transition: "width 0.2s" } })
+            ),
+            React.createElement("div", { className: "lm-backlog-tally-grid" },
+              React.createElement("div", { className: "tally-item ready" }, React.createElement("strong", null, backlogProgress.tally?.proposal_ready || 0), " Proposals Ready"),
+              React.createElement("div", { className: "tally-item multi" }, React.createElement("strong", null, backlogProgress.tally?.candidate_selection_required || 0), " Multi-Candidate"),
+              React.createElement("div", { className: "tally-item no-id" }, React.createElement("strong", null, backlogProgress.tally?.no_identity_found || 0), " No Identity Found"),
+              React.createElement("div", { className: "tally-item no-dest" }, React.createElement("strong", null, backlogProgress.tally?.destination_not_found || 0), " No Destination"),
+              React.createElement("div", { className: "tally-item inelig" }, React.createElement("strong", null, (backlogProgress.tally?.ineligible || 0) + (backlogProgress.tally?.already_filed || 0) + (backlogProgress.tally?.errors || 0)), " Ineligible / Errors")
+            ),
+            React.createElement("div", { style: { marginTop: "16px", textAlign: "right" } },
+              React.createElement(Button, {
+                variant: "danger",
+                size: "sm",
+                onClick: () => { backlogCancelRequested.current = true; },
+                style: { background: "#a9434c", borderColor: "#ca5964" }
+              }, "⏹ Cancel Evaluation")
+            )
+          ) :
+
+          backlogCompletedSummary ? React.createElement("div", { className: "lm-backlog-summary-card" },
+            React.createElement("h4", { style: { color: backlogCompletedSummary.cancelled ? "#f59e0b" : "#4ade80", margin: "0 0 10px 0", fontSize: "1rem" } },
+              backlogCompletedSummary.cancelled ? "⚠️ Backlog Evaluation Cancelled" : "✅ Backlog Evaluation Complete"
+            ),
+            React.createElement("p", { style: { fontSize: ".85rem", color: "#cbd5e1" } },
+              `Evaluated ${backlogCompletedSummary.processed} of ${backlogCompletedSummary.total} selected videos. Filing proposals were created for review. Files were not moved.`
+            ),
+            React.createElement("div", { className: "lm-backlog-tally-grid", style: { margin: "14px 0" } },
+              React.createElement("div", { className: "tally-item ready" }, React.createElement("strong", null, backlogCompletedSummary.tally?.proposal_ready || 0), " Proposals Ready"),
+              React.createElement("div", { className: "tally-item multi" }, React.createElement("strong", null, backlogCompletedSummary.tally?.candidate_selection_required || 0), " Multi-Candidate"),
+              React.createElement("div", { className: "tally-item no-id" }, React.createElement("strong", null, backlogCompletedSummary.tally?.no_identity_found || 0), " No Identity Found"),
+              React.createElement("div", { className: "tally-item no-dest" }, React.createElement("strong", null, backlogCompletedSummary.tally?.destination_not_found || 0), " No Destination"),
+              React.createElement("div", { className: "tally-item inelig" }, React.createElement("strong", null, (backlogCompletedSummary.tally?.ineligible || 0) + (backlogCompletedSummary.tally?.already_filed || 0) + (backlogCompletedSummary.tally?.errors || 0)), " Ineligible / Errors")
+            ),
+            React.createElement("div", { style: { display: "flex", gap: "8px", justifyContent: "flex-end", marginTop: "16px" } },
+              React.createElement(Button, {
+                variant: "secondary",
+                size: "sm",
+                onClick: () => setBacklogCompletedSummary(null),
+                style: { background: "rgba(255,255,255,0.1)", color: "#fff" }
+              }, "Back to Backlog List"),
+              ((backlogCompletedSummary.tally?.proposal_ready || 0) + (backlogCompletedSummary.tally?.candidate_selection_required || 0)) > 0 ?
+                React.createElement(Button, {
+                  variant: "success",
+                  size: "sm",
+                  onClick: () => {
+                    setShowBacklogModal(false);
+                    setSelectedBacklogPaths(new Set());
+                    setBacklogCompletedSummary(null);
+                    setTab("overview");
+                    refresh(true);
+                  },
+                  style: { background: "#2fa66d", borderColor: "#3ab87b" }
+                }, `Review Proposals (${(backlogCompletedSummary.tally?.proposal_ready || 0) + (backlogCompletedSummary.tally?.candidate_selection_required || 0)})`) : null
+            )
+          ) :
+
+          showBacklogConfirm ? React.createElement("div", { className: "lm-backlog-confirm-card" },
+            React.createElement("h4", { style: { color: "#38bdf8", margin: "0 0 10px 0", fontSize: "1rem" } }, "🛡️ Confirm Backlog Evaluation"),
+            React.createElement("p", { style: { fontSize: ".88rem", color: "#e2e8f0" } },
+              `You are about to evaluate `,
+              React.createElement("strong", { style: { color: "#38bdf8" } }, `${validSelectedCount} selected video(s)`),
+              ` for Automatic Filing.`
+            ),
+            React.createElement("ul", { style: { fontSize: ".82rem", color: "#94a3b8", paddingLeft: "1.2rem", margin: "10px 0" } },
+              React.createElement("li", null, "Existing Stash scene IDs and metadata will be preserved without rescanning or reimporting."),
+              React.createElement("li", null, "Files are processed in small batches to protect disk I/O and keep the dashboard snappy."),
+              React.createElement("li", null, "Proposals will be generated for your individual review. Files are NEVER moved automatically.")
+            ),
+            React.createElement("div", { style: { display: "flex", gap: "10px", justifyContent: "flex-end", marginTop: "16px" } },
+              React.createElement(Button, {
+                variant: "secondary",
+                size: "sm",
+                onClick: () => setShowBacklogConfirm(false),
+                style: { background: "rgba(255,255,255,0.1)", color: "#fff" }
+              }, "Cancel"),
+              React.createElement(Button, {
+                variant: "primary",
+                size: "sm",
+                onClick: startBacklogEvaluation,
+                style: { background: "#0284c7", borderColor: "#38bdf8" }
+              }, `Confirm & Evaluate ${validSelectedCount} Videos`)
+            )
+          ) :
+
+          React.createElement("div", null,
+            React.createElement("div", { className: "lm-backlog-controls" },
+              React.createElement("div", { className: "lm-backlog-tabs" },
+                React.createElement("button", { className: backlogTab === "eligible" ? "active" : "", onClick: () => setBacklogTab("eligible") }, `Eligible Videos (${backlogData?.eligible_count ?? 0})`),
+                React.createElement("button", { className: backlogTab === "companions" ? "active" : "", onClick: () => setBacklogTab("companions") }, `Companions (${backlogData?.remaining_companion_count ?? backlogData?.companion_count ?? 0})`),
+                React.createElement("button", { className: backlogTab === "ineligible" ? "active" : "", onClick: () => setBacklogTab("ineligible") }, `Ineligible / Filed (${backlogData?.ineligible_count ?? Math.max(0, (backlogData?.video_count ?? 0) - (backlogData?.eligible_count ?? 0))})`),
+                React.createElement("button", { className: backlogTab === "all" ? "active" : "", onClick: () => setBacklogTab("all") }, `All Files (${backlogData?.total_count ?? 0})`)
+              ),
+              React.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } },
+                React.createElement("input", {
+                  type: "text",
+                  className: "lm-backlog-search",
+                  placeholder: "Filter filename...",
+                  value: backlogSearch,
+                  onChange: (e) => setBacklogSearch(e.target.value)
+                }),
+                backlogTab === "eligible" || backlogTab === "all" ? React.createElement(React.Fragment, null,
+                  React.createElement(Button, {
+                    size: "sm",
+                    variant: "outline-info",
+                    className: "lm-btn-select-all-eligible",
+                    onClick: handleSelectAllEligible,
+                    style: { fontSize: ".76rem", whiteSpace: "nowrap" }
+                  }, `Select All Eligible (${backlogData?.eligible_count ?? 0})`),
+                  validSelectedCount > 0 ? React.createElement(Button, {
+                    size: "sm",
+                    variant: "outline-secondary",
+                    onClick: handleClearBacklogSelection,
+                    style: { fontSize: ".76rem", whiteSpace: "nowrap" }
+                  }, "Clear") : null
+                ) : null
+              )
+            ),
+
+            React.createElement("div", { className: "lm-backlog-list" },
+              (backlogData?.items || [])
+                .filter(item => {
+                  if (backlogTab === "eligible") return item.eligible;
+                  if (backlogTab === "companions") return item.is_companion;
+                  if (backlogTab === "ineligible") return item.is_video && !item.eligible;
+                  return true;
+                })
+                .filter(item => !backlogSearch || item.basename.toLowerCase().includes(backlogSearch.toLowerCase()))
+                .map((item, idx) => {
+                  const isChecked = validSelectedPaths.has(item.path);
+                  return React.createElement("div", {
+                    key: item.path || idx,
+                    className: `lm-backlog-item ${item.eligible ? "eligible" : "ineligible"} ${isChecked ? "selected" : ""}`,
+                    onClick: () => {
+                      if (item.eligible && item.exists_on_disk !== false) toggleBacklogItemSelection(item.path);
+                    }
+                  },
+                    item.eligible ? React.createElement("input", {
+                      type: "checkbox",
+                      checked: isChecked,
+                      onChange: () => {},
+                      style: { cursor: "pointer", marginRight: "8px" }
+                    }) : React.createElement("span", { style: { width: "18px", display: "inline-block", color: "#64748b" } }, "•"),
+                    React.createElement("div", { className: "item-body", style: { flex: 1, minWidth: 0 } },
+                      React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" } },
+                        React.createElement("span", { className: "item-name", title: item.path }, item.basename),
+                        React.createElement("span", { className: `item-status-pill ${item.status}` }, item.status_label)
+                      ),
+                      React.createElement("div", { className: "item-meta", style: { fontSize: ".75rem", color: "#94a3b8", display: "flex", flexWrap: "wrap", gap: "10px", marginTop: "2px" } },
+                        item.scene_id ? React.createElement("span", null, `Scene ${item.scene_id}${item.scene_title ? `: ${item.scene_title}` : ""}`) : null,
+                        item.size ? React.createElement("span", null, `${(item.size / (1024 * 1024)).toFixed(1)} MB`) : null,
+                        item.diagnostic ? React.createElement("span", { style: { color: "#bfdbfe" } }, `Diag: ${item.diagnostic}`) : null
+                      ),
+                      item.destination_path ? React.createElement("div", {
+                        className: "item-destination",
+                        style: { fontSize: ".74rem", color: "#38bdf8", marginTop: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+                        title: item.destination_path
+                      }, `➔ ${item.destination_path}`) : null
+                    )
+                  );
+                })
+            ),
+
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "14px", borderTop: "1px solid rgba(56,189,248,0.15)", paddingTop: "12px" } },
+              React.createElement("span", { style: { fontSize: ".82rem", color: "#94a3b8" } },
+                `Selected: `,
+                React.createElement("strong", { style: { color: "#38bdf8" } }, validSelectedCount),
+                ` of ${backlogData?.eligible_count ?? 0} eligible videos`
+              ),
+              React.createElement(Button, {
+                variant: "primary",
+                disabled: validSelectedCount === 0,
+                onClick: () => setShowBacklogConfirm(true),
+                style: { background: "#0284c7", borderColor: "#38bdf8", fontWeight: "700" }
+              }, `🚀 Evaluate Selected (${validSelectedCount})`)
+            )
+          )
+        ),
+        React.createElement(Modal.Footer, { style: { background: "#0b120c", borderTop: "1px solid rgba(56, 189, 248, .2)" } },
+          React.createElement(Button, {
+            variant: "secondary",
+            disabled: isBacklogEvaluating,
+            onClick: () => {
+              setShowBacklogModal(false);
+              setSelectedBacklogPaths(new Set());
+            },
+            style: { background: "rgba(255,255,255,0.1)", border: "1px solid rgba(255,255,255,0.2)", color: "#fff" }
+          }, "Close")
+        )
+      );
+    })() : null,
       React.createElement("div", { className: "lm-layout" },
         React.createElement("nav", { className: "lm-tabs" },
           sections.map(([id, label]) => React.createElement("button", {
@@ -3408,10 +4601,9 @@
           operation("monitor_health"),
           getConfig().catch(() => ({}))
         ]);
-        const isCompleted = cfg?.onboardingCompleted === true;
-        setOnboarded(isCompleted);
-
         const status = typeof raw === "string" ? JSON.parse(raw) : raw;
+        const isCompleted = cfg?.onboardingCompleted === true || (status?.inventory?.status === "complete" && Boolean(status?.inventory?.completed_at));
+        setOnboarded(isCompleted);
 
         if (!isCompleted) {
           setHealth({
