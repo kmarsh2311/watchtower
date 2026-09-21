@@ -269,6 +269,43 @@ def test_cross_volume_create_delete_order_becomes_one_folder_move(tmp_path, crea
     assert all(member["state"] == "ready" for member in batches[0]["members"])
 
 
+def test_delayed_event_waves_join_same_folder_move(tmp_path):
+    database = tmp_path / "watchtower.sqlite3"
+    source = tmp_path / "Library" / "Old Name"
+    destination = tmp_path / "Library" / "New Name"
+    source.mkdir(parents=True)
+    destination.mkdir(parents=True)
+    paths = []
+    for index in range(4):
+        old_path = source / f"scene-{index}.mp4"
+        payload = (f"wave-{index}" * 40).encode()
+        old_path.write_bytes(payload)
+        _seed_file(database, old_path, f"wave-file-{index}", f"wave-scene-{index}", len(payload))
+        paths.append((old_path, payload))
+
+    for old_path, payload in paths[:2]:
+        new_path = destination / old_path.name
+        new_path.write_bytes(payload)
+        old_path.unlink()
+        _record_event(database, "created", new_path)
+        _record_event(database, "deleted", old_path)
+    first = detect_settled_operations(database, settle_seconds=10, now=_settled_now())
+    assert len(first) == 1
+    assert first[0]["tracked_count"] == 2
+
+    for old_path, payload in paths[2:]:
+        new_path = destination / old_path.name
+        new_path.write_bytes(payload)
+        old_path.unlink()
+        _record_event(database, "created", new_path)
+        _record_event(database, "deleted", old_path)
+    second = detect_settled_operations(database, settle_seconds=10, now=_settled_now())
+
+    assert len(second) == 1
+    assert second[0]["id"] == first[0]["id"]
+    assert second[0]["tracked_count"] == 4
+
+
 def test_folder_copy_is_distinguished_while_originals_remain(tmp_path):
     database = tmp_path / "watchtower.sqlite3"
     source = tmp_path / "Library" / "Original"

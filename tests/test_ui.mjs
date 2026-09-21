@@ -984,6 +984,11 @@ test("Phase 3 presents one expandable grouped review without destructive actions
   assert.doesNotMatch(javascript, /operation\("relink_grouped_reconciliation"/);
 });
 
+test("Reconnecting companion rows require an actual companion association", () => {
+  assert.match(javascript, /const isCompanion = Boolean\(event\.companion_of\)/);
+  assert.doesNotMatch(javascript, /const isCompanion = !event\.companion_of/);
+});
+
 test("Phase 4 requires explicit Stash scan approval and keeps copy groups review-only", () => {
   assert.match(javascript, /operation\("execute_grouped_reconciliation"/);
   assert.match(javascript, /Watchtower will ask Stash to scan/);

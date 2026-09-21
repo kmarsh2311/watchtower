@@ -3301,7 +3301,7 @@
             }),
             reconnectingMoves.map(event => {
               const displayName = basename(event.destination_path || event.source_path);
-              const isCompanion = !event.companion_of;
+              const isCompanion = Boolean(event.companion_of);
               const badgeText = isCompanion ? "RECONNECTING (COMPANION)" : "RECONNECTING";
               const detailText = isCompanion
                 ? `RECONNECTING WITH VIDEO: ${event.companion_of}`

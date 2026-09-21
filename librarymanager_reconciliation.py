@@ -550,8 +550,9 @@ def _unavailable_roots(connection: sqlite3.Connection) -> list[str]:
 
 
 def _group_key(operation_type: str, source_prefix: str, destination_prefix: str, event_keys: list[str]) -> str:
+    operation_family = "copy" if "copy" in str(operation_type) else "move"
     evidence = json.dumps(
-        [operation_type, _path_key(source_prefix), _path_key(destination_prefix), sorted(event_keys)],
+        [operation_family, _path_key(source_prefix), _path_key(destination_prefix)],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -868,8 +869,12 @@ def detect_settled_operations(
                 "directory_event": bool(candidate["directory_event"]),
             },
         )
+        if batch["state"] in ("ready_for_review", "needs_attention"):
+            transition_batch(database_path, batch["id"], "collecting", expected_state=batch["state"])
+            batch = batch_snapshot(database_path, batch["id"])
         if batch["state"] == "collecting":
             transition_batch(database_path, batch["id"], "settling", expected_state="collecting")
+            batch = batch_snapshot(database_path, batch["id"])
         elif batch["state"] != "settling":
             used_event_keys.update(candidate["event_keys"])
             snapshot = batch_snapshot(database_path, batch["id"])
