@@ -62,10 +62,24 @@ Built with a retro-futuristic Cyberpunk/Lighthouse control console, live event s
 
 ---
 
-### ⚡ 3. Smart External Move Tracking & Auto-Reconnection
-* **Organize Anywhere with Zero Broken Links:** Move or rename files and folders in Finder, Windows Explorer, or terminal scripts without breaking your Stash library.
-* **Cryptographic & Size Verification:** When an inventoried file moves, Watchtower verifies its size and `OSHash` at the new destination to guarantee identity.
-* **Targeted Path Updates:** Automatically asks Stash to scan the destination path and update the scene record—preserving all scene IDs, play counts, ratings, and tag histories.
+### ⚡ 3. External Moves, Folder Renames & Grouped Reconciliation
+Watchtower tracks changes made externally in Finder, File Explorer, or command-line scripts, reconnecting Stash scenes without destructive rescans.
+
+#### 🔄 What Happens When You Move or Rename Files Externally:
+
+| Operation | Detection | Workflow | Verification & Safety |
+| :--- | :--- | :--- | :--- |
+| **Single File Move** *(Same Volume)* | Real-time watchdog `on_moved` event | **Automatic:** MoveWorker tracks and reconnects path in Stash | Size and `OSHash` cryptographic match; sidecars re-associated. |
+| **Folder Rename** *(Populated Folder)* | Coalesced event waves derive old/new folder prefixes | **User Review:** Consolidated into a single Grouped Review card | Targeted Stash scan on destination prefix; all scene IDs & metadata preserved. |
+| **Populated Folder Move** *(New Location)* | Prefix matching aggregates all member video events | **User Review:** Grouped move card with full member breakdown | Single-pass Stash scan; verifies all member files before marking complete. |
+| **Cross-Volume Move** *(Between Disks)* | Delete+Create event correlation across roots | **User Review:** Matched by size and checksum cache within settling window | Reconnects Stash scene ID to new volume path once transfer settles. |
+| **Folder / File Copy** *(Source Retained)* | Detected as new destination files with source still intact | **Review-Only:** Grouped as duplicate content (`folder_copy`) | **Zero scene theft:** Original scenes remain 100% untouched; copies require explicit decision. |
+| **Daemon Restart Mid-Reconciliation** | Startup recovery reads durable SQLite state | **Automatic:** Resumes settling or re-attaches to in-flight Stash jobs | Zero dropped events or duplicate scans across restarts. |
+
+#### 📋 Operational Modes Summary:
+* **Fully Automatic**: Unambiguous single-file moves on active monitored library roots, companion sidecar re-linking, and settling timers.
+* **Review & Approval Required**: Entire folder renames, multi-file folder relocations, cross-volume transfers, and duplicate copy groups.
+* **Safeguarded Limitations**: Offline/unmounted network drives are protected from destructive sweeps and display warning banners until reconnected; ambiguous duplicate files with identical sizes remain in Needs Attention for manual selection.
 
 ---
 

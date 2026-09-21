@@ -2,13 +2,35 @@
 
 ## 1.0.13 — 2026-09-22
 
-- **Simplified Renaming & Automatic Filing Architecture**: Completely decoupled Automatic Filing from Automatic Renaming. Automatic Filing moves files to destination folders preserving original filenames without generating permanent rename protection locks.
-- **Independent Automatic Renaming**: Master Automatic Renaming switch alone controls whether subsequent Stash metadata edits rename files on disk. When disabled, metadata edits leave files unchanged.
-- **Safe Database Migration**: Automatically clears legacy `rename_protected` flags in `filename_state` without enqueuing renames or triggering bulk renaming. Cleanly retired the redundant `autoFilingPreserveFilename` setting.
-- **Optional Video Quality Filename Token**: Added optional video quality token (`[1080p]`, `[720p]`, `[4K]`, etc.) to canonical filenames with configurable beginning/end positioning and responsive inline UI.
-- **Ingestion & Preview Height Resolution**: Ensures stored video dimensions supply the resolution for canonical filename generation and read-only test previews without requiring a full library rescan.
-- **Reconnecting Root & Monitor Resilience**: Stale monitor data cannot block recovery after a drive reconnects; backend verifies root availability on user removal acknowledgement.
-- **Bounded Operational History**: Safely bounded historical operational table retention (`prune_operational_records`) while preserving actionable proposals and unreviewed events indefinitely.
+### ⚡ External Moves & Folder Renames (Grouped Reconciliation)
+- **Folder Rename & Move Detection**: External folder renames and moves in Finder, Windows Explorer, or scripts are automatically detected and coalesced into single grouped operations rather than generating dozens of individual missing-file errors.
+- **Review-Driven Grouped Recovery**: Grouped folder moves and cross-volume relocations are presented in a unified Overview card showing source/destination paths, member counts, and verification status before any changes are committed.
+- **Single-Pass Stash Reconciliation**: Once approved, Watchtower executes a single targeted directory scan in Stash, verifying member files by size and checksum/OSHash without full-library sweeps or hashing entire video bodies.
+- **Cross-Volume Move Correlation**: Detects cross-device moves (which the OS manifests as delete+create pairs) by matching cryptographic and size fingerprints within a settling window.
+- **Duplicate & Copy Group Safety**: Classifies copied folders as duplicate content (`folder_copy`) rather than moves, preserving original scene identities and requiring explicit user review before any new scene ingest.
+- **Daemon Restart & Crash Resilience**: All grouped batches and member states are durably tracked in SQLite. Interrupted or in-flight reconciliations automatically recover and resume upon Watchtower restart.
+- **Single-File Move Automation**: Unambiguous single-file moves on the same monitored library root continue to reconnect automatically in real-time.
+
+### 📁 Backlog Organiser & Ingest Reliability (Work Package A)
+- **Dynamic Backlog Working Set**: The Backlog Organiser dynamically tracks real-time unresolved files, retiring completed or moved items immediately.
+- **Atomic Staged Snapshot Replacement**: Protection snapshot regeneration uses atomic staging to prevent baseline corruption if interrupted.
+- **Incomplete Download Exclusion**: In-flight downloads (.part, .crdownload, .tmp) and active downloaders are cleanly excluded from backlog scans.
+- **Unavailable Storage Root Handling**: Unmounted or offline drive roots display clear warning banners and disable destructive actions without crashing the monitor or losing state.
+- **Cached Dynamic Directory Discovery**: Substantially accelerated folder discovery through intelligent TTL-bounded caching.
+
+### 🏷️ Video Quality Filename Token (Work Package B)
+- **Optional Canonical Quality Token**: Added `includeVideoQuality` option to embed standard resolution tags (e.g. `[1080p]`, `[720p]`, `[4K]`) into filenames.
+- **Configurable Token Placement**: Choose `start` (prefix) or `end` (suffix) positioning with responsive inline UI controls.
+- **Zero-Rescan Ingestion Resolution**: Stored video dimensions from Stash's files table supply the resolution immediately for canonical filenames and read-only test previews without requiring full library rescans.
+
+### 🛡️ Renaming & Filing Architecture Simplification
+- **Decoupled Filing & Renaming**: Automatic Filing moves files to destination folders preserving original filenames without creating permanent rename protection locks.
+- **Master Renaming Control**: Automatic Renaming toggle exclusively governs whether metadata edits in Stash trigger renames on disk.
+- **Safe Schema Migration**: Clears legacy `rename_protected` flags safely in SQLite without enqueuing renames or triggering bulk renaming.
+- **Cleaned Configuration**: Removed redundant `autoFilingPreserveFilename` switch from settings and UI.
+
+### 🧹 Operational Retention & Maintenance
+- **Bounded Retention Policy**: `prune_operational_records` bounds historical completed/resolved events while preserving actionable proposals and unreviewed issues indefinitely.
 
 
 ## 1.0.12 — 2026-09-21
