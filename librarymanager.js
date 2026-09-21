@@ -1375,6 +1375,39 @@
       }
     }, []);
 
+    async function handleRecheckBacklog() {
+      setBusy("backlog_recheck");
+      try {
+        await loadBacklog();
+        setNotice("Incoming files checked again. Resolved items were removed from Needs Attention.");
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleAcknowledgeMissing(item) {
+      if (!item?.path) return;
+      const confirmed = window.confirm(
+        `Stop showing this missing baseline item as needing attention?\n\n${item.path}\n\n` +
+        "Use this only if you intentionally deleted or moved it outside Watchtower. The original baseline history will be retained."
+      );
+      if (!confirmed) return;
+      setBusy(`backlog_ack:${item.path}`);
+      try {
+        const raw = await operation("acknowledge_backlog_missing", { paths: [item.path] });
+        const result = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (!(result?.acknowledged || []).includes(item.path)) {
+          throw new Error("The file is present again or is no longer an unresolved baseline item.");
+        }
+        await loadBacklog();
+        setNotice("Missing item acknowledged. Its baseline history was retained.");
+      } catch (err) {
+        setError(err?.message || "Could not acknowledge the missing item.");
+      } finally {
+        setBusy("");
+      }
+    }
+
     function openBacklogMetadataEditor(event, sceneId) {
       event?.stopPropagation?.();
       if (!sceneId) return;
@@ -4998,8 +5031,7 @@
               "Review files already in your incoming folders and create filing suggestions. Nothing moves until you approve a proposal."
             ),
             React.createElement("p", { className: "lm-backlog-protection" },
-              React.createElement("strong", { style: { color: "#38bdf8" } }, "Baseline Protection Active: "),
-              `Watchtower registered ${(backlogData?.baseline_total ?? backlogData?.total_count ?? incoming?.baseline_count ?? 0).toLocaleString()} pre-existing files in your original baseline snapshot. Files remain protected and are never moved automatically.`
+              "Files that were already in Incoming when this feature was enabled remain protected from automatic moves."
             ),
             React.createElement("div", { className: "lm-backlog-stats-bar" },
               React.createElement("section", { className: "lm-backlog-stat-group current" },
@@ -5015,16 +5047,17 @@
                 React.createElement("div", { className: "lm-backlog-stat-cards" },
                   React.createElement("div", { className: "lm-backlog-stat pending" }, React.createElement("span", { className: "stat-label" }, "Filing Proposals"), React.createElement("span", { className: "stat-val" }, (backlogData?.pending_proposal_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Awaiting approval")),
                   React.createElement("div", { className: "lm-backlog-stat duplicate-removed" }, React.createElement("span", { className: "stat-label" }, "Duplicate Review"), React.createElement("span", { className: "stat-val" }, (backlogData?.duplicate_review_count || 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Possible exact copies")),
-                  React.createElement("div", { className: "lm-backlog-stat ineligible" }, React.createElement("span", { className: "stat-label" }, "Missing on Disk"), React.createElement("span", { className: "stat-val" }, (backlogData?.missing_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Needs explanation"))
+                  React.createElement("div", { className: "lm-backlog-stat ineligible" }, React.createElement("span", { className: "stat-label" }, "Files to Check"), React.createElement("span", { className: "stat-val" }, (backlogData?.missing_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Recheck or acknowledge"))
                 )
               ),
-              React.createElement("section", { className: "lm-backlog-stat-group completed" },
-                React.createElement("h4", null, "Completed"),
-                React.createElement("div", { className: "lm-backlog-stat-cards" },
-                  React.createElement("div", { className: "lm-backlog-stat total" }, React.createElement("span", { className: "stat-label" }, "Protected Baseline"), React.createElement("span", { className: "stat-val" }, (backlogData?.baseline_total ?? backlogData?.total_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Original snapshot")),
-                  React.createElement("div", { className: "lm-backlog-stat moved" }, React.createElement("span", { className: "stat-label" }, "Verified Filed"), React.createElement("span", { className: "stat-val" }, (backlogData?.verified_moved_count ?? (backlogData?.already_filed_count ?? 0)).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Moved from Incoming")),
-                  React.createElement("div", { className: "lm-backlog-stat duplicate-removed" }, React.createElement("span", { className: "stat-label" }, "Duplicates Removed"), React.createElement("span", { className: "stat-val" }, (backlogData?.resolved_duplicate_count || 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Verified incoming copies"))
-                )
+            ),
+            React.createElement("details", { className: "lm-backlog-history-summary" },
+              React.createElement("summary", null, "Activity summary"),
+              React.createElement("p", null,
+                `${(backlogData?.baseline_total ?? backlogData?.total_count ?? 0).toLocaleString()} files recorded in the original snapshot · `,
+                `${(backlogData?.verified_moved_count ?? 0).toLocaleString()} verified as filed · `,
+                `${(backlogData?.resolved_duplicate_count ?? 0).toLocaleString()} verified incoming copies removed · `,
+                `${(backlogData?.acknowledged_missing_count ?? 0).toLocaleString()} removals acknowledged`
               )
             )
           ),
@@ -5215,10 +5248,18 @@
               React.createElement("div", { className: "lm-backlog-tabs" },
                 React.createElement("button", { className: backlogTab === "eligible" ? "active" : "", onClick: () => setBacklogTab("eligible") }, `Ready to Evaluate (${backlogData?.eligible_count ?? 0})`),
                 React.createElement("button", { className: backlogTab === "companions" ? "active" : "", onClick: () => setBacklogTab("companions") }, `Companions (${backlogData?.remaining_companion_count ?? backlogData?.companion_count ?? 0})`),
-                React.createElement("button", { className: backlogTab === "ineligible" ? "active" : "", onClick: () => setBacklogTab("ineligible") }, `Ineligible / Filed (${backlogData?.ineligible_count ?? Math.max(0, (backlogData?.video_count ?? 0) - (backlogData?.eligible_count ?? 0))})`),
+                React.createElement("button", { className: backlogTab === "attention" ? "active" : "", onClick: () => setBacklogTab("attention") }, `Needs Attention (${backlogData?.needs_attention_count ?? ((backlogData?.missing_count ?? 0) + (backlogData?.duplicate_review_count ?? 0))})`),
+                React.createElement("button", { className: backlogTab === "history" ? "active" : "", onClick: () => setBacklogTab("history") }, "History"),
                 React.createElement("button", { className: backlogTab === "all" ? "active" : "", onClick: () => setBacklogTab("all") }, `All Files (${backlogData?.total_count ?? 0})`)
               ),
               React.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } },
+                React.createElement(Button, {
+                  size: "sm",
+                  variant: "outline-info",
+                  disabled: busy === "backlog_recheck",
+                  onClick: handleRecheckBacklog,
+                  style: { fontSize: ".76rem", whiteSpace: "nowrap" }
+                }, busy === "backlog_recheck" ? "CHECKING…" : "↻ Recheck Files"),
                 React.createElement("input", {
                   type: "text",
                   className: "lm-backlog-search",
@@ -5248,8 +5289,9 @@
               (backlogData?.items || [])
                 .filter(item => {
                   if (backlogTab === "eligible") return item.eligible;
-                  if (backlogTab === "companions") return item.is_companion;
-                  if (backlogTab === "ineligible") return item.is_video && !item.eligible;
+                  if (backlogTab === "companions") return item.status === "companion";
+                  if (backlogTab === "attention") return ["missing_on_disk", "moved_destination_missing", "needs_recovery", "duplicate_candidate", "exact_duplicate"].includes(item.status);
+                  if (backlogTab === "history") return ["moved", "duplicate_removed", "acknowledged_missing"].includes(item.status);
                   return true;
                 })
                 .filter(item => !backlogSearch || item.basename.toLowerCase().includes(backlogSearch.toLowerCase()))
@@ -5334,6 +5376,27 @@
                           }, busy === `duplicate_verify:${item.path}` ? "VERIFYING…" :
                              busy === `duplicate_delete:${item.path}` ? "DELETING…" :
                              item.duplicate_info.checksum_status === "verified" ? "DELETE EXACT DUPLICATE…" : "VERIFY EXACT DUPLICATE")
+                        )
+                      ) : ["missing_on_disk", "moved_destination_missing"].includes(item.status) ? React.createElement("div", { className: "lm-missing-file-help" },
+                        React.createElement("p", null,
+                          item.status === "moved_destination_missing"
+                            ? "Watchtower recorded this file as filed, but neither its original nor expected destination path currently exists."
+                            : "This file was in the protected Incoming snapshot, but its recorded path no longer exists."
+                        ),
+                        React.createElement("p", null, "Restore or move the file back to a known path and choose Recheck Files. If you intentionally removed it, acknowledge the removal to clear it from Needs Attention."),
+                        React.createElement("div", { className: "lm-backlog-item-actions" },
+                          React.createElement("button", {
+                            type: "button",
+                            className: "lm-terminal-btn retry",
+                            disabled: !!busy,
+                            onClick: event => { event.stopPropagation(); handleRecheckBacklog(); }
+                          }, "↻ RECHECK FILES"),
+                          React.createElement("button", {
+                            type: "button",
+                            className: "lm-terminal-btn dismiss",
+                            disabled: !!busy,
+                            onClick: event => { event.stopPropagation(); handleAcknowledgeMissing(item); }
+                          }, busy === `backlog_ack:${item.path}` ? "ACKNOWLEDGING…" : "ACKNOWLEDGE REMOVAL…")
                         )
                       ) : null
                     )

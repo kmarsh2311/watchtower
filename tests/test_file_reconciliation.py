@@ -40,6 +40,7 @@ from librarymanager_core import (
     inspect_backlog_duplicate,
     strict_incoming_companions,
     get_backlog_items,
+    acknowledge_backlog_missing,
     evaluate_backlog_batch,
     is_source_companion_of_moved_video,
     pending_filesystem_events,
@@ -48,6 +49,51 @@ from librarymanager_core import (
     COMPANION_EXTENSIONS,
     SCHEMA,
 )
+
+
+def test_backlog_missing_items_can_be_rechecked_or_acknowledged_without_deleting_history(tmp_path: Path):
+    db_path = create_test_db(tmp_path / "watchtower.db")
+    incoming = tmp_path / "Incoming"
+    incoming.mkdir()
+    missing_video = incoming / "intentionally removed.mp4"
+    missing_companion = incoming / "restored later.jpg"
+    missing_video.write_bytes(b"video")
+    missing_companion.write_bytes(b"image")
+    librarymanager_core.snapshot_incoming_baseline(db_path, [str(incoming)])
+    conn = connect(db_path)
+    conn.execute(
+        """INSERT INTO filing_proposals(
+               file_id,scene_id,source_path,proposed_path,destination_folder,destination_filename,
+               organize_by,matched_entity_id,matched_entity_name,match_source,reason,status,created_at,updated_at
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("old-file", "12", str(missing_video), str(tmp_path / "Filed" / missing_video.name),
+         str(tmp_path / "Filed"), missing_video.name, "performer", "p12", "Example",
+         "scene_performer", "test completed proposal", "completed", "2026-01-01", "2026-01-01"),
+    )
+    conn.commit()
+    conn.close()
+    missing_video.unlink()
+    missing_companion.unlink()
+
+    before = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
+    assert before["missing_count"] == 2
+
+    result = acknowledge_backlog_missing(db_path, [str(missing_video)])
+    assert result["acknowledged"] == [str(missing_video)]
+    after_ack = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
+    assert after_ack["missing_count"] == 1
+    assert after_ack["acknowledged_missing_count"] == 1
+    assert after_ack["needs_attention_count"] == 1
+    items = {item["path"]: item for item in after_ack["items"]}
+    assert items[str(missing_video)]["status"] == "acknowledged_missing"
+
+    missing_companion.write_bytes(b"image")
+    after_restore = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
+    assert after_restore["missing_count"] == 0
+    assert after_restore["acknowledged_missing_count"] == 1
+    assert {row["path"] for row in connect(db_path).execute("SELECT path FROM filing_incoming_baseline")} == {
+        str(missing_video), str(missing_companion)
+    }
 from librarymanager import (
     assert_scene_removal_safe,
     validate_filesystem_scan_action,

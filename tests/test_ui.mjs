@@ -485,24 +485,22 @@ test("Automatic Filing unresolved imports and Retry Filing appear in Command Cen
   assert.match(javascript, /className: "lm-terminal-btn-backlog"/);
   assert.match(javascript, /📁 ORGANISE EXISTING FILES/);
   assert.match(javascript, /Organise Existing Files/);
-  assert.match(javascript, /Baseline Protection Active/);
+  assert.match(javascript, /Files that were already in Incoming when this feature was enabled remain protected/);
 
   // 4. Backlog entry styling remains available in Command Center.
   assert.match(css, /\.lm-terminal-btn-backlog/);
 });
 
-test("Backlog Organiser UI: selection, stats badges, confirmation modal, progress tallies and cancel action", () => {
-  // 1. Stats bar with separate original baseline snapshot, remaining incoming, eligible videos, companions and filed/ineligible
+test("Backlog Organiser UI: selection, current-work stats, confirmation modal, progress tallies and cancel action", () => {
+  // 1. Current work and actionable review stay visible; historical totals are collapsed.
   assert.match(javascript, /className: "lm-backlog-stats-bar"/);
   assert.match(javascript, /Current work/);
   assert.match(javascript, /Needs review/);
-  assert.match(javascript, /Completed/);
-  assert.match(javascript, /Protected Baseline/);
+  assert.match(javascript, /Activity summary/);
   assert.match(javascript, /In Incoming/);
   assert.match(javascript, /Ready to Evaluate/);
   assert.match(javascript, /Companions/);
-  assert.match(javascript, /Verified Filed/);
-  assert.match(javascript, /Ineligible \/ Filed/);
+  assert.match(javascript, /Needs Attention/);
 
   // 2. Select all eligible videos, reset on open, and individual checkbox selection
   assert.match(javascript, /handleSelectAllEligible/);
@@ -878,12 +876,12 @@ test('Happening Now uncluttered and shows only active operations or listening em
 
 test('Backlog Organise Existing Files reconciled stats, verified moved status pill, destination display and selection reset', () => {
   // 1. Stats Bar Cards
-  assert.ok(javascript.includes('Protected Baseline'), 'Stats bar explains the protected baseline');
+  assert.ok(javascript.includes('Activity summary'), 'Historical totals are available without resembling current work');
   assert.ok(javascript.includes('In Incoming'), 'Stats bar includes current incoming work');
   assert.ok(javascript.includes('Ready to Evaluate'), 'Stats bar uses clear evaluation wording');
   assert.ok(javascript.includes('Filing Proposals'), 'Stats bar includes filing proposals');
   assert.ok(javascript.includes('Companions'), 'Stats bar includes companion files');
-  assert.ok(javascript.includes('Verified Filed'), 'Stats bar includes completed filing');
+  assert.ok(javascript.includes('verified as filed'), 'Activity summary includes completed filing');
 
   // 2. Verified moved item rendering and destination path display
   assert.ok(javascript.includes('item.destination_path'), 'Renders destination path when available');
@@ -960,6 +958,17 @@ test("Backlog failures can open metadata editing and be re-evaluated", () => {
   assert.match(javascript, /"data-scene-id": result\.scene_id \|\| ""/);
   assert.match(css, /\.lm-backlog-item-actions/);
   assert.match(css, /\.lm-fasttag-scene-context/);
+});
+
+test("Backlog separates current missing files from retained activity history", () => {
+  assert.match(javascript, /Needs Attention \(\$\{backlogData\?\.needs_attention_count/);
+  assert.match(javascript, /Activity summary/);
+  assert.match(javascript, /async function handleRecheckBacklog\(\)/);
+  assert.match(javascript, /operation\("acknowledge_backlog_missing"/);
+  assert.match(javascript, /ACKNOWLEDGE REMOVAL…/);
+  assert.match(javascript, /The original baseline history will be retained/);
+  assert.doesNotMatch(javascript, /"Protected Baseline"/);
+  assert.doesNotMatch(javascript, /"Ineligible \/ Filed/);
 });
 
 test("Exact duplicate repair requires verification and keeps companion deletion optional", () => {

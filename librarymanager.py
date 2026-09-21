@@ -29,7 +29,7 @@ from librarymanager_core import (
                                  find_duplicate_scene_file, inspect_backlog_duplicate,
                                  get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
                                  cancel_expected_filesystem_delete, _is_pid_alive)
-from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch
+from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing
 
 
 from librarymanager_reconciliation import (dismiss_review_batch, execute_grouped_move_reconciliation,
@@ -1935,6 +1935,10 @@ def main():
         stash = StashInterface(plugin_input["server_connection"])
         config = filing_config_with_library_roots(stash)
         result = get_backlog_items(database_path, stash, config=config)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "acknowledge_backlog_missing":
+        paths = (plugin_input.get("args") or {}).get("paths") or []
+        result = acknowledge_backlog_missing(database_path, paths)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "evaluate_backlog_batch":
         args = plugin_input.get("args") or {}

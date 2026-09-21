@@ -294,6 +294,11 @@ CREATE TABLE IF NOT EXISTS filing_incoming_baseline (
     seen_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_filing_baseline_hash ON filing_incoming_baseline(oshash, size);
+CREATE TABLE IF NOT EXISTS filing_baseline_acknowledgements (
+    path TEXT PRIMARY KEY REFERENCES filing_incoming_baseline(path) ON DELETE CASCADE,
+    reason TEXT NOT NULL DEFAULT 'intentionally_removed',
+    acknowledged_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS filing_baseline_state (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     established_at TEXT NOT NULL,
@@ -7486,6 +7491,13 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
         duplicate_review_count = 0
         missing_video_count = 0
         missing_companion_count = 0
+        acknowledged_missing_count = 0
+
+        acknowledged_paths = {
+            row["path"] for row in connection.execute(
+                "SELECT path FROM filing_baseline_acknowledgements"
+            ).fetchall()
+        }
 
         resolved_duplicate_paths = {}
         for repair_row in connection.execute(
@@ -7592,12 +7604,24 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                             status_label = f"{ext.replace('.', '').upper() if ext else 'Non-video'} Companion (Moved)"
                             destination_path = str(comp_dst)
                             exists_on_disk = True
+                        elif path_str in acknowledged_paths:
+                            acknowledged_missing_count += 1
+                            status_code = "acknowledged_missing"
+                            status_label = "Removal Acknowledged"
+                            destination_path = str(comp_dst)
+                            exists_on_disk = False
                         else:
                             missing_companion_count += 1
                             status_code = "missing_on_disk"
                             status_label = f"{ext.replace('.', '').upper() if ext else 'Non-video'} Companion (Missing)"
                             destination_path = str(comp_dst)
                             exists_on_disk = False
+                    elif path_str in acknowledged_paths:
+                        acknowledged_missing_count += 1
+                        status_code = "acknowledged_missing"
+                        status_label = "Removal Acknowledged"
+                        destination_path = None
+                        exists_on_disk = False
                     else:
                         missing_companion_count += 1
                         status_code = "missing_on_disk"
@@ -7663,6 +7687,12 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                 if destination_info:
                     scene_id = str(destination_info.get("scene_id") or scene_id or "") or None
                     scene_title = destination_info.get("title") or scene_title
+            elif path_str in acknowledged_paths and not is_file:
+                acknowledged_missing_count += 1
+                status_code = "acknowledged_missing"
+                status_label = "Removal Acknowledged"
+                exists_on_disk = False
+                destination_path = str(proposed_dst) if proposed_dst else None
             elif filing_status == "completed":
                 destination_path = str(proposed_dst) if proposed_dst else None
                 if dst_exists:
@@ -7710,11 +7740,17 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                 status_code = "outside_incoming"
                 status_label = "Outside Incoming"
                 exists_on_disk = True
+            elif path_str in acknowledged_paths:
+                acknowledged_missing_count += 1
+                status_code = "acknowledged_missing"
+                status_label = "Removal Acknowledged"
+                exists_on_disk = False
             else:
                 missing_video_count += 1
                 status_code = "missing_on_disk"
                 status_label = "File Missing on Disk"
                 exists_on_disk = False
+                diag = "The file was recorded in the protected Incoming snapshot, but that path no longer exists. Recheck after restoring it, or acknowledge an intentional removal."
 
             items.append({
                 "path": path_str,
@@ -7740,6 +7776,13 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
         resolved_duplicate_count = resolved_duplicate_video_count + resolved_duplicate_companion_count
         missing_count = missing_video_count + missing_companion_count
         ineligible_count = max(0, video_count - eligible_count)
+        needs_attention_count = sum(
+            1 for item in items
+            if item["status"] in {
+                "missing_on_disk", "moved_destination_missing", "needs_recovery",
+                "duplicate_candidate", "exact_duplicate",
+            }
+        )
 
         return {
             "total_count": len(rows),
@@ -7759,11 +7802,42 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             "resolved_duplicate_count": resolved_duplicate_count,
             "duplicate_review_count": duplicate_review_count,
             "missing_count": missing_count,
+            "acknowledged_missing_count": acknowledged_missing_count,
+            "needs_attention_count": needs_attention_count,
             "ineligible_count": ineligible_count,
             "items": items
         }
     finally:
         connection.close()
+
+
+def acknowledge_backlog_missing(database_path: Path, file_paths: list[str]) -> dict:
+    """Acknowledge deliberately removed baseline paths without deleting history."""
+    requested = sorted({str(path) for path in (file_paths or []) if str(path).strip()})
+    if not requested:
+        raise ValueError("At least one missing baseline path is required")
+    acknowledged = []
+    skipped = []
+    connection = connect(database_path)
+    try:
+        for path_str in requested:
+            baseline = connection.execute(
+                "SELECT 1 FROM filing_incoming_baseline WHERE path=?", (path_str,)
+            ).fetchone()
+            if baseline is None or Path(path_str).exists():
+                skipped.append(path_str)
+                continue
+            connection.execute(
+                """INSERT INTO filing_baseline_acknowledgements(path,reason,acknowledged_at)
+                   VALUES (?, 'intentionally_removed', ?)
+                   ON CONFLICT(path) DO UPDATE SET acknowledged_at=excluded.acknowledged_at""",
+                (path_str, utc_now()),
+            )
+            acknowledged.append(path_str)
+        connection.commit()
+    finally:
+        connection.close()
+    return {"success": True, "acknowledged": acknowledged, "skipped": skipped}
 
 
 def evaluate_backlog_batch(

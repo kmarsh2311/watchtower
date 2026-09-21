@@ -2866,9 +2866,23 @@ a.lm-activity-scene-pill:hover {
 }
 .lm-backlog-stats-bar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-top: 10px;
+}
+.lm-backlog-history-summary {
+  margin-top: 8px;
+  color: #94a3b8;
+  font-size: .75rem;
+}
+.lm-backlog-history-summary summary {
+  cursor: pointer;
+  color: #7dd3fc;
+}
+.lm-backlog-history-summary p {
+  margin: 6px 0 0;
+  padding: 7px 10px;
+  border-left: 2px solid rgba(56, 189, 248, .35);
 }
 .lm-backlog-overview { margin-bottom: 14px; }
 .lm-backlog-intro { margin: 0 0 8px; color: #cbd5e1; }
@@ -3379,6 +3393,15 @@ a.lm-activity-scene-pill:hover {
   gap: 0.45rem;
   margin-top: 0.55rem;
 }
+.lm-missing-file-help {
+  margin-top: 7px;
+  padding: 8px 10px;
+  border-left: 3px solid rgba(245, 158, 11, .65);
+  background: rgba(245, 158, 11, .055);
+  color: #d6d3d1;
+  font-size: .75rem;
+}
+.lm-missing-file-help p { margin: 0 0 5px; }
 
 .lm-duplicate-review-evidence {
   margin-top: .55rem;
