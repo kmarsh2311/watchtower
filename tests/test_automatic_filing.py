@@ -16,6 +16,7 @@ from librarymanager_core import (
     refresh_destination_dir_cache,
     preview_scene_filename,
     preview_safe_filenames,
+    apply_scene_filename,
     connect,
     opensubtitles_hash,
     utc_now,
@@ -2121,10 +2122,9 @@ def test_auto_filing_trigger_metadata_mode_waits_for_metadata(test_env):
     assert prop_dup is None
 
 
-def test_auto_filing_preserve_filename_protects_from_subsequent_auto_rename(test_env):
-    """Requirement 2: 'Preserve original filename' preserves filename during move
-    and marks file as rename_protected so Auto-Rename cannot subsequently rename it.
-    Unrelated scenes remain renameable."""
+def test_auto_filing_moves_without_renaming_and_leaves_renaming_control_to_setting(test_env):
+    """Automatic Filing moves files without changing filenames and without permanent rename protection.
+    Automatic Renaming alone governs subsequent metadata-triggered renaming."""
     db = test_env["db"]
     incoming = test_env["incoming"]
     dest_root = test_env["dest_root"]
@@ -2168,34 +2168,40 @@ def test_auto_filing_preserve_filename_protects_from_subsequent_auto_rename(test
 
     config = {
         "incomingFolders": [str(incoming)],
-        "autoFilingDestinationRoots": [str(dest_root)],
-        "autoFilingPreserveFilename": True
+        "autoFilingDestinationRoots": [str(dest_root)]
     }
 
-    # Apply filing move with preserve original filename enabled
+    # Apply filing move
     res = apply_filing_proposal(db, mock_stash, proposal_id, config=config)
     assert res["status"] == "completed"
 
-    # 1. Preview for the filed scene must be protected from Auto-Rename (status='unchanged')
-    rename_options = {"filenameStyle": "studio_performers_title"}
-    preview_protected = preview_scene_filename(db, "s501", rename_options)
-    assert preview_protected["status"] == "unchanged"
-    assert "protected from automatic renaming" in preview_protected["reason"]
-    assert preview_protected["proposed_path"] == preview_protected["current_path"]
-
-    # 2. Batch preview run also protects the filed scene
-    summary, report = preview_safe_filenames(db, rename_options)
+    # 1. Verify file was moved with original filename preserved
     con = connect(db)
-    previews = con.execute("SELECT file_id, scene_id, status, reason FROM filename_previews WHERE run_id=?", (summary["run_id"],)).fetchall()
+    f501_file = con.execute("SELECT path, basename FROM files WHERE file_id='f501'").fetchone()
+    assert f501_file["basename"] == "Original_Custom_Name_Jane_Doe.mp4"
+    assert f501_file["path"] == str(dest_video)
+
+    # 2. Verify no permanent rename_protected flag was created
+    f501_state = con.execute("SELECT rename_protected FROM filename_state WHERE file_id='f501'").fetchone()
+    assert f501_state is None or f501_state["rename_protected"] == 0
     con.close()
 
-    p501 = next(p for p in previews if p["file_id"] == "f501")
-    assert p501["status"] == "unchanged"
-    assert "protected from automatic renaming" in p501["reason"]
+    # 3. Preview calculates standard safe rename candidate based on metadata
+    rename_options = {"filenameStyle": "studio_performers_title"}
+    preview = preview_scene_filename(db, "s501", rename_options)
+    assert preview["status"] == "ready"
+    assert Path(preview["proposed_path"]).name == "Original Title - Jane Studio - Jane Doe.mp4"
 
-    # 3. Unrelated scene s502 is NOT protected and generates normal rename proposal
-    p502 = next(p for p in previews if p["file_id"] == "f502")
-    assert p502["status"] == "proposed"
+    # 4. Explicit manual rename remains possible
+    moves = []
+    apply_res = apply_scene_filename(
+        db, "s501",
+        lambda file_id, folder, basename: moves.append((file_id, folder, basename)) or True,
+        rename_options
+    )
+    assert apply_res["status"] == "renamed"
+    assert len(moves) == 1
+    assert moves[0][2] == "Original Title - Jane Studio - Jane Doe.mp4"
 
 
 def test_shared_studio_destination_folder_mapping_and_independent_removal(tmp_path: Path):
@@ -5118,3 +5124,68 @@ def test_backlog_metadata_refresh_preserves_scene_identity(test_env, monkeypatch
     assert received["allow_refresh"] is True
     assert result["results"][0]["file_id"] == "metadata-file"
     assert result["results"][0]["scene_id"] == "metadata-scene"
+
+
+def test_rename_protected_schema_migration_and_auto_rename_independence(tmp_path):
+    """Verify schema migration safely resets legacy rename_protected locks to 0
+    without queuing renames or bulk renaming, and Automatic Renaming alone controls renaming."""
+    from librarymanager_core import connect, _ensure_schema, preview_safe_filenames, preview_scene_filename, apply_scene_filename, utc_now
+    db = tmp_path / "migration_test.sqlite3"
+    video = tmp_path / "Sample Video.mp4"
+    video.write_bytes(b"content")
+
+    # Connect to initialize schema
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO files (file_id, scene_id, path, basename, size, title, studio, performers_json, exists_on_disk, first_seen_at, last_seen_at)
+           VALUES ('f100', 's100', ?, 'Sample Video.mp4', 100, 'Super Title', 'Super Studio', '["Performer One"]', 1, ?, ?)""",
+        (str(video), utc_now(), utc_now())
+    )
+    # Manually simulate legacy rename_protected = 1
+    conn.execute(
+        """INSERT INTO filename_state (file_id, base_stem, base_source, rename_protected, created_at, updated_at)
+           VALUES ('f100', 'Sample Video', 'automatic_filing', 1, ?, ?)""",
+        (utc_now(), utc_now())
+    )
+    conn.commit()
+    conn.close()
+
+    # 1. Run schema migration
+    # 1. Run schema migration (clearing in-memory cache to simulate fresh connection)
+    librarymanager_core._schema_applied.clear()
+    conn = connect(db)
+    conn.close()
+
+    # 2. Verify rename_protected is safely reset to 0
+    conn = connect(db)
+    st = conn.execute("SELECT rename_protected FROM filename_state WHERE file_id='f100'").fetchone()
+    assert st["rename_protected"] == 0
+
+    # 3. Verify rename_queue has no items automatically enqueued
+    queue_items = conn.execute("SELECT * FROM rename_queue").fetchall()
+    assert len(queue_items) == 0
+    conn.close()
+
+    # 4. Preview generates normal proposal without being blocked by protection
+    opts = {"filenameStyle": "studio_performers_title"}
+    preview = preview_scene_filename(db, "s100", opts)
+    assert preview["status"] == "ready"
+    assert Path(preview["proposed_path"]).name == "Super Title - Super Studio - Performer One.mp4"
+    assert video.exists(), "Original file must remain untouched"
+
+    # 5. Safe batch preview also proposes normal rename
+    summary, report = preview_safe_filenames(db, opts)
+    assert summary["proposed"] == 1
+    assert summary["conflicts"] == 0
+    assert video.exists(), "Batch preview is strictly read-only"
+
+    # 6. Explicit manual rename works when called
+    moves = []
+    apply_res = apply_scene_filename(
+        db, "s100",
+        lambda file_id, folder, basename: moves.append((file_id, folder, basename)) or True,
+        opts
+    )
+    assert apply_res["status"] == "renamed"
+    assert len(moves) == 1
+    assert moves[0][2] == "Super Title - Super Studio - Performer One.mp4"

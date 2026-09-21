@@ -2018,8 +2018,6 @@
               requestAutomaticRenaming(e.target.checked);
             } else if (setting === "autoFilingEnabled") {
               updateSetting(setting, e.target.checked, e.target.checked ? "Automatic Filing proposals enabled." : "Automatic Filing proposals disabled.");
-            } else if (setting === "autoFilingPreserveFilename") {
-              updateSetting(setting, e.target.checked, e.target.checked ? "Filename preservation enabled." : "Filename preservation disabled.");
             } else {
               updateSetting(setting, e.target.checked);
             }
@@ -4331,9 +4329,6 @@
                 choices: [["import", "Immediately after import"], ["metadata", "After metadata has been added in Stash"]],
                 onChange: value => updateSetting("autoFilingTrigger", value, `When to suggest filing set to ${value === "metadata" ? "after metadata has been added" : "immediately after import"}.`)
               })),
-            React.createElement(Switch, { setting: "autoFilingPreserveFilename", defaultValue: true,
-              label: "Protect filed filenames from Automatic Renaming",
-              help: "Automatic Filing always keeps the current filename while moving the file. Keep this enabled to stop the separate Automatic Renaming feature from renaming it later." }),
             React.createElement("div", { style: { marginTop: "14px" } },
               React.createElement(ChoiceField, {
                 label: "Maximum Folder Discovery Depth",

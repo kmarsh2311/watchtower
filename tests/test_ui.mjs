@@ -358,15 +358,13 @@ test("Automatic Filing Beta UI uses Stash roots with optional overrides and coll
   assert.match(css, /\.lm-custom-mappings-container/);
 });
 
-test("Automatic Filing settings explain trigger and filename protection accurately", () => {
+test("Automatic Filing settings explain trigger accurately without redundant rename locks", () => {
   assert.match(javascript, /When to Suggest Filing/);
   assert.match(javascript, /autoFilingTrigger/);
   assert.match(javascript, /Immediately after import/);
   assert.match(javascript, /After metadata has been added in Stash/);
 
-  assert.match(javascript, /Protect filed filenames from Automatic Renaming/);
-  assert.match(javascript, /Automatic Filing always keeps the current filename/);
-  assert.match(javascript, /autoFilingPreserveFilename/);
+  assert.doesNotMatch(javascript, /autoFilingPreserveFilename/);
 });
 
 test("completed Incoming protection is shown as complete without recreating the snapshot", () => {
@@ -421,7 +419,6 @@ test("Automatic Filing save notifications cover all settings, removals, and erro
   // 3. Settings switches and choices toasts
   assert.match(javascript, /"Automatic Filing proposals enabled\."/);
   assert.match(javascript, /"Automatic Filing proposals disabled\."/);
-  assert.match(javascript, /"Filename preservation enabled\."/);
   assert.match(javascript, /"Match source priority updated\."/);
   assert.match(javascript, /When to suggest filing set to/);
   assert.match(javascript, /Folder discovery depth set to/);

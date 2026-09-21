@@ -758,6 +758,7 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
                     "ALTER TABLE filing_proposals ADD COLUMN in_nested_folder INTEGER NOT NULL DEFAULT 0")
         _safe_alter(connection, "filename_state", "rename_protected",
                     "ALTER TABLE filename_state ADD COLUMN rename_protected INTEGER NOT NULL DEFAULT 0")
+        connection.execute("UPDATE filename_state SET rename_protected=0 WHERE rename_protected!=0")
         _safe_alter(connection, "incoming_files", "filing_diagnostic",
                     "ALTER TABLE incoming_files ADD COLUMN filing_diagnostic TEXT")
         _safe_alter(connection, "file_checksum_cache", "file_id",
@@ -3999,13 +4000,7 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
             else:
                 state = _sync_filename_state(connection, state, row, current, performers, filename_options)
 
-            if state and (dict(state).get("rename_protected") or False):
-                base = str(state["base_stem"] or current.stem)
-                proposed = current
-                normalized_target = os.path.normcase(os.path.abspath(current))
-                target_counts[normalized_target] = target_counts.get(normalized_target, 0) + 1
-                provisional.append((row, current, proposed, base, normalized_target))
-                continue
+
 
             base = str(state["base_stem"] or "").strip()
             proposed_stem = _proposed_stem(base, row["studio"], performers, filename_options,
@@ -4023,11 +4018,7 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
         report = []
         summary = {"examined": len(provisional), "proposed": 0, "unchanged": 0, "conflicts": 0}
         for row, current, proposed, base, normalized_target in provisional:
-            st = connection.execute("SELECT rename_protected FROM filename_state WHERE file_id=?", (row["file_id"],)).fetchone()
-            is_prot = st and st["rename_protected"]
-            if is_prot:
-                status, reason = "unchanged", "Filename is protected from automatic renaming by Automatic Filing"
-            elif len(proposed.name.encode("utf-8")) > 255:
+            if len(proposed.name.encode("utf-8")) > 255:
                 status, reason = "conflict", "Proposed filename exceeds 255 UTF-8 bytes"
             elif target_counts[normalized_target] > 1:
                 status, reason = "conflict", "Safely skipped: Multiple files share the same filename target (collision protected)"
@@ -4059,10 +4050,8 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
     finally:
         connection.close()
 
-def preview_scene_filename(database_path: Path, scene_id: str, filename_options: dict | None = None, ignore_protection: bool = False) -> dict:
+def preview_scene_filename(database_path: Path, scene_id: str, filename_options: dict | None = None) -> dict:
     """Return the latest calculated filename proposal for one scene."""
-    opts = filename_options or {}
-    skip_protection = ignore_protection or opts.get("ignore_protection") is True
     connection = connect(database_path)
     try:
         row = connection.execute(
@@ -4080,20 +4069,6 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
         else:
             state = _sync_filename_state(connection, state, row, current, performers, filename_options)
         connection.commit()
-
-        if not skip_protection and state and (dict(state).get("rename_protected") or False):
-            return {
-                "scene_id": str(scene_id),
-                "file_id": row["file_id"],
-                "current_path": str(current),
-                "proposed_path": str(current),
-                "base_stem": state["base_stem"],
-                "status": "unchanged",
-                "reason": "Filename is protected from automatic renaming by Automatic Filing",
-                "associated_files": [],
-                "scene_date": _row_scene_date(row),
-                "action_performed": False
-            }
 
         proposed_stem = _proposed_stem(state["base_stem"], row["studio"], performers, filename_options,
                                         _row_scene_date(row), state["managed_date"],
@@ -4129,12 +4104,10 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
     finally:
         connection.close()
 
-def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename_options: dict | None = None, ignore_protection: bool = False) -> dict:
+def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename_options: dict | None = None) -> dict:
     """Apply one preflighted rename through a supplied Stash move callback."""
-    opts = filename_options or {}
-    skip_protection = ignore_protection or opts.get("ignore_protection") is True
     with rename_lock(database_path):
-        preview = preview_scene_filename(database_path, scene_id, filename_options, ignore_protection=skip_protection)
+        preview = preview_scene_filename(database_path, scene_id, filename_options)
         if preview.get("status") != "ready":
             return preview
         moved_sidecars = []
@@ -7469,18 +7442,7 @@ def apply_filing_proposal(
                     "UPDATE files SET path=?, basename=?, exists_on_disk=1, last_seen_at=? WHERE file_id=?",
                     (str(dest_video), dest_video.name, now, file_id)
                 )
-                if (config or {}).get("autoFilingPreserveFilename", True):
-                    existing_st = connection.execute("SELECT file_id FROM filename_state WHERE file_id=?", (file_id,)).fetchone()
-                    if existing_st:
-                        connection.execute("UPDATE filename_state SET rename_protected=1, updated_at=? WHERE file_id=?", (now, file_id))
-                    else:
-                        connection.execute(
-                            """INSERT INTO filename_state
-                               (file_id, base_stem, base_source, rename_protected, created_at, updated_at)
-                               SELECT ?, ?, 'automatic_filing', 1, ?, ?
-                               WHERE EXISTS (SELECT 1 FROM files WHERE file_id=?)""",
-                            (file_id, dest_video.stem, now, now, file_id)
-                        )
+
                 connection.execute(
                     "UPDATE incoming_files SET path=?, filing_diagnostic=NULL, last_checked_at=? WHERE path=? OR path=?",
                     (str(dest_video), now, str(src), str(dest_video))

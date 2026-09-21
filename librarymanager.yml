@@ -157,10 +157,6 @@ settings:
     displayName: When to Suggest Filing
     description: "Choose when Watchtower suggests filing: 'import' (immediately after video import) or 'metadata' (after a performer, studio, or tag is assigned in Stash)."
     type: STRING
-  autoFilingPreserveFilename:
-    displayName: Protect Filed Filenames from Automatic Renaming
-    description: "Automatic Filing keeps the current filename during the move. Enable this to prevent the separate Automatic Renaming feature from renaming it later."
-    type: BOOLEAN
   autoFilingMaxDiscoveryDepth:
     displayName: Maximum Folder Discovery Depth
     description: "Maximum folder depth (1 to 8, default: 4) when automatically searching destination roots for matching performer, studio, or category folders."

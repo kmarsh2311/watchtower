@@ -1443,9 +1443,7 @@ def main():
                 audit(database_path, "config", "filing match source", "updated", detail=f"Automatic filing match source set to {val}")
             elif key == "autoFilingTrigger":
                 audit(database_path, "config", "filing trigger", "updated", detail=f"Automatic filing trigger set to {val}")
-            elif key == "autoFilingPreserveFilename":
-                status = "enabled" if val else "disabled"
-                audit(database_path, "config", "filing preserve filename", status, detail=f"Automatic filing filename preservation was {status}")
+
             else:
                 audit(database_path, "config", str(key), "updated", detail=f"Setting '{key}' updated to {val}")
         message = json.dumps({"recorded": True})
@@ -1841,14 +1839,13 @@ def main():
             raise ValueError("Set Test Scene ID in the Stash Library Manager settings first")
         refresh_scene(stash, database_path, scene_id)
         if mode == "preview_test_rename":
-            result = preview_scene_filename(database_path, scene_id, active_config, ignore_protection=True)
+            result = preview_scene_filename(database_path, scene_id, active_config)
         else:
             result = apply_scene_filename(
                 database_path, scene_id,
                 lambda file_id, folder, basename: stash.move_files({"ids": [file_id], "destination_folder": folder,
                                                                     "destination_basename": basename}),
                 active_config,
-                ignore_protection=True,
             )
             result = recover_local_rename_cache(stash, database_path, scene_id, result)
             audit(database_path, "rename", "test scene rename", result.get("status", "unknown"),
