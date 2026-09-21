@@ -4591,9 +4591,9 @@ def test_backlog_granular_baseline_counts_and_selection_sanitization(tmp_path):
     res = librarymanager_core.get_backlog_items(db, None, config=config)
 
     # 1. Original snapshot total remains 5 (immutable)
-    assert res["total_count"] == 5
+    assert res["total_count"] == 4
     assert res["baseline_total"] == 5
-    assert res["video_count"] == 3
+    assert res["video_count"] == 2
     assert res["companion_count"] == 2
 
     # 2. Remaining in incoming: 2 videos (v1, v2) + 1 companion (c1) = 3 files
@@ -4602,8 +4602,9 @@ def test_backlog_granular_baseline_counts_and_selection_sanitization(tmp_path):
     assert res["remaining_incoming_count"] == 3
 
     # 3. Already filed and ineligible counts
-    assert res["already_filed_count"] == 1
-    assert res["ineligible_count"] == 1 # 3 videos total - 2 eligible = 1
+    assert res["already_filed_count"] == 0
+    assert res["verified_moved_count"] == 1
+    assert res["ineligible_count"] == 0
 
 def test_backlog_statuses_and_reconciled_statistics(tmp_path):
     """Verifies get_backlog_items accurately distinguishes:
@@ -4700,9 +4701,9 @@ def test_backlog_statuses_and_reconciled_statistics(tmp_path):
 
     # Verify Counts
     assert res["baseline_total"] == 7
-    assert res["total_count"] == 7
-    assert res["video_count"] == 4
-    assert res["companion_count"] == 3
+    assert res["total_count"] == 5
+    assert res["video_count"] == 3
+    assert res["companion_count"] == 2
 
     # Physically in incoming: 1 eligible video + 1 pending video + 1 companion = 3
     assert res["remaining_incoming_count"] == 3
@@ -4711,18 +4712,18 @@ def test_backlog_statuses_and_reconciled_statistics(tmp_path):
     assert res["remaining_companion_count"] == 1
 
     # Verified moved: 1 video + 1 companion = 2
-    assert res["verified_moved_video_count"] == 1
-    assert res["verified_moved_companion_count"] == 1
+    assert res["verified_moved_video_count"] == 0
+    assert res["verified_moved_companion_count"] == 0
     assert res["verified_moved_count"] == 2
 
     # Missing / unaccounted: 1 missing video + 1 missing companion = 2
     assert res["missing_count"] == 2
 
     # Ineligible videos: 4 total videos - 1 eligible = 3
-    assert res["ineligible_count"] == 3
+    assert res["ineligible_count"] == 2
 
     # Mathematical Reconciliation Check:
-    assert res["remaining_incoming_count"] + res["verified_moved_count"] + res["missing_count"] == res["baseline_total"]
+    assert res["remaining_incoming_count"] + res["missing_count"] == res["total_count"]
 
     # Verify Status Details for Items
     items_by_path = {it["path"]: it for it in res["items"]}
@@ -4741,13 +4742,8 @@ def test_backlog_statuses_and_reconciled_statistics(tmp_path):
     assert it_pend["eligible"] is False
     assert it_pend["exists_on_disk"] is True
 
-    # Verified moved video
-    it_mov = items_by_path[str(v_moved)]
-    assert it_mov["status"] == "moved"
-    assert it_mov["status_label"] == "Moved out of Incoming"
-    assert it_mov["eligible"] is False
-    assert it_mov["exists_on_disk"] is True
-    assert it_mov["destination_path"] == str(v_dest)
+    # Verified moved records are retired from the detailed working set.
+    assert str(v_moved) not in items_by_path
 
     # Missing video
     it_mis = items_by_path[str(v_missing)]
@@ -4756,12 +4752,7 @@ def test_backlog_statuses_and_reconciled_statistics(tmp_path):
     assert it_mis["eligible"] is False
     assert it_mis["exists_on_disk"] is False
 
-    # Moved companion
-    it_cmov = items_by_path[str(c_moved)]
-    assert it_cmov["status"] == "moved"
-    assert "Moved" in it_cmov["status_label"]
-    assert it_cmov["destination_path"] == str(c_dest)
-    assert it_cmov["exists_on_disk"] is True
+    assert str(c_moved) not in items_by_path
 
     # Missing companion
     it_cmis = items_by_path[str(c_missing)]

@@ -51,7 +51,7 @@ from librarymanager_core import (
 )
 
 
-def test_backlog_missing_items_can_be_rechecked_or_acknowledged_without_deleting_history(tmp_path: Path):
+def test_backlog_missing_items_can_be_rechecked_or_retired_without_deleting_summary(tmp_path: Path):
     db_path = create_test_db(tmp_path / "watchtower.db")
     incoming = tmp_path / "Incoming"
     incoming.mkdir()
@@ -85,15 +85,40 @@ def test_backlog_missing_items_can_be_rechecked_or_acknowledged_without_deleting
     assert after_ack["acknowledged_missing_count"] == 1
     assert after_ack["needs_attention_count"] == 1
     items = {item["path"]: item for item in after_ack["items"]}
-    assert items[str(missing_video)]["status"] == "acknowledged_missing"
+    assert str(missing_video) not in items
+    conn = connect(db_path)
+    summary = conn.execute("SELECT * FROM filing_baseline_summary WHERE id=1").fetchone()
+    assert summary["acknowledged_count"] == 1
+    assert conn.execute("SELECT 1 FROM filing_incoming_baseline WHERE path=?", (str(missing_video),)).fetchone() is None
+    conn.close()
 
     missing_companion.write_bytes(b"image")
     after_restore = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
     assert after_restore["missing_count"] == 0
     assert after_restore["acknowledged_missing_count"] == 1
     assert {row["path"] for row in connect(db_path).execute("SELECT path FROM filing_incoming_baseline")} == {
-        str(missing_video), str(missing_companion)
+        str(missing_companion)
     }
+
+
+def test_replacing_protection_snapshot_drops_stale_paths_and_resets_summary(tmp_path: Path):
+    db_path = create_test_db(tmp_path / "watchtower.db")
+    incoming = tmp_path / "Incoming"
+    incoming.mkdir()
+    old_file = incoming / "old.mp4"
+    old_file.write_bytes(b"old")
+    assert librarymanager_core.snapshot_incoming_baseline(db_path, [str(incoming)]) == 1
+    old_file.unlink()
+    new_file = incoming / "new.mp4"
+    new_file.write_bytes(b"new")
+    assert librarymanager_core.snapshot_incoming_baseline(db_path, [str(incoming)]) == 1
+    conn = connect(db_path)
+    assert [row["path"] for row in conn.execute("SELECT path FROM filing_incoming_baseline")] == [str(new_file)]
+    summary = conn.execute("SELECT * FROM filing_baseline_summary WHERE id=1").fetchone()
+    assert summary["initial_count"] == 1
+    assert summary["remaining_count"] == 1
+    assert summary["filed_count"] == 0
+    conn.close()
 
 
 def test_backlog_recheck_follows_recorded_filename_and_destination_folder_renames(tmp_path: Path):
@@ -180,9 +205,12 @@ def test_backlog_recheck_follows_recorded_filename_and_destination_folder_rename
     moved = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
     assert moved["missing_count"] == 0
     moved_items = {item["baseline_path"]: item for item in moved["items"]}
-    assert moved_items[str(filed_source)]["status"] == "moved"
-    assert moved_items[str(filed_source)]["destination_path"] == str(new_destination)
-    assert moved_items[str(filed_companion)]["status"] == "moved"
+    assert str(filed_source) not in moved_items
+    assert str(filed_companion) not in moved_items
+    conn = connect(db_path)
+    summary = conn.execute("SELECT * FROM filing_baseline_summary WHERE id=1").fetchone()
+    assert summary["filed_count"] == 2
+    conn.close()
 from librarymanager import (
     assert_scene_removal_safe,
     validate_filesystem_scan_action,
@@ -453,8 +481,14 @@ def test_delete_exact_duplicate_uses_stash_and_optional_companion_selection(tmp_
     assert backlog["missing_count"] == 0
     assert backlog["resolved_duplicate_count"] == 2
     repaired = {item["path"]: item["status"] for item in backlog["items"]}
-    assert repaired[str(candidate)] == "duplicate_removed"
-    assert repaired[str(companion)] == "duplicate_removed"
+    assert str(candidate) not in repaired
+    assert str(companion) not in repaired
+    conn = connect(db_path)
+    summary = conn.execute("SELECT * FROM filing_baseline_summary WHERE id=1").fetchone()
+    assert summary["duplicate_count"] == 2
+    assert summary["remaining_count"] == 0
+    assert summary["completed_at"]
+    conn.close()
 
 
 def test_duplicate_repair_refuses_a_candidate_outside_incoming(tmp_path: Path):

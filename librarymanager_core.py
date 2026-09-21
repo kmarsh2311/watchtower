@@ -309,6 +309,16 @@ CREATE TABLE IF NOT EXISTS filing_baseline_state (
     last_error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_filing_baseline_status ON filing_baseline_state(status);
+CREATE TABLE IF NOT EXISTS filing_baseline_summary (
+    id INTEGER PRIMARY KEY CHECK (id=1),
+    initial_count INTEGER NOT NULL DEFAULT 0,
+    remaining_count INTEGER NOT NULL DEFAULT 0,
+    filed_count INTEGER NOT NULL DEFAULT 0,
+    duplicate_count INTEGER NOT NULL DEFAULT 0,
+    acknowledged_count INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS filing_destination_dir_cache (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     root_path TEXT NOT NULL,
@@ -825,6 +835,13 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
         now = datetime.now().timestamp()
         baseline_count_row = connection.execute("SELECT COUNT(*) AS count FROM filing_incoming_baseline").fetchone()
         baseline_count = baseline_count_row["count"] if baseline_count_row else 0
+        baseline_state = connection.execute(
+            "SELECT status FROM filing_baseline_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        baseline_summary = connection.execute(
+            "SELECT initial_count,completed_at FROM filing_baseline_summary WHERE id=1"
+        ).fetchone()
+        baseline_established = bool(baseline_state and baseline_state["status"] == "complete")
         backlog_eligible_count = 0
         if baseline_count > 0:
             b_rows = connection.execute("SELECT path FROM filing_incoming_baseline").fetchall()
@@ -968,6 +985,9 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
             "failed": counts.get("failed", 0),
             "downloading": counts.get("downloading", 0),
             "baseline_count": baseline_count,
+            "baseline_established": baseline_established,
+            "baseline_completed": bool(baseline_summary and baseline_summary["completed_at"]),
+            "baseline_initial_count": int(baseline_summary["initial_count"] or 0) if baseline_summary else baseline_count,
             "backlog_eligible_count": backlog_eligible_count,
             "latest": dict(latest) if latest else None,
             "active": active,
@@ -5402,17 +5422,16 @@ def is_filing_baseline_established(database_path: Path, incoming_folders: list[s
     connection = connect(database_path)
     try:
         row = connection.execute(
-            "SELECT * FROM filing_baseline_state WHERE status='complete' ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM filing_baseline_state ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if not row:
-            latest = connection.execute(
-                "SELECT * FROM filing_baseline_state ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if latest and latest["status"] == "failed":
-                return False, f"Automatic filing baseline initialization failed: {latest['last_error'] or 'unknown error'}"
-            elif latest and latest["status"] == "in_progress":
-                return False, "Automatic filing baseline is still in progress"
             return False, "Automatic filing baseline has not been established"
+        if row["status"] == "failed":
+            return False, f"Automatic filing baseline initialization failed: {row['last_error'] or 'unknown error'}"
+        if row["status"] == "in_progress":
+            return False, "Automatic filing baseline is still in progress"
+        if row["status"] != "complete":
+            return False, f"Automatic filing baseline is not ready (status: {row['status']})"
 
         if incoming_folders:
             snapshotted_folders = set(json.loads(row["incoming_folders_json"] or "[]"))
@@ -5455,6 +5474,11 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
             (now, json.dumps(cleaned_folders))
         )
         run_id = cur.lastrowid
+        # A user-requested replacement must replace the old snapshot rather
+        # than accumulating paths which no longer exist in Incoming.
+        connection.execute("DELETE FROM filing_baseline_acknowledgements")
+        connection.execute("DELETE FROM filing_incoming_baseline")
+        connection.execute("DELETE FROM filing_baseline_summary")
         connection.commit()
 
         for folder_str in cleaned_folders:
@@ -5489,6 +5513,12 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
                WHERE id=?""",
             (utc_now(), count, run_id)
         )
+        connection.execute(
+            """INSERT INTO filing_baseline_summary(
+                   id,initial_count,remaining_count,updated_at
+               ) VALUES (1,?,?,?)""",
+            (count, count, utc_now()),
+        )
         connection.commit()
     except Exception as exc:
         if run_id:
@@ -5506,6 +5536,134 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
     finally:
         connection.close()
     return count
+
+
+def prune_resolved_filing_baseline(database_path: Path, config: dict | None = None) -> dict:
+    """Retire resolved protection rows while retaining aggregate audit totals."""
+    incoming_folders = get_configured_incoming_folders(config)
+    connection = connect(database_path)
+    retired = {"filed": 0, "duplicate": 0, "acknowledged": 0}
+    try:
+        baseline_rows = connection.execute(
+            "SELECT path FROM filing_incoming_baseline"
+        ).fetchall()
+        if not baseline_rows:
+            summary = connection.execute(
+                "SELECT * FROM filing_baseline_summary WHERE id=1"
+            ).fetchone()
+            return {"retired": retired, "remaining": 0, "completed": bool(summary and summary["completed_at"])}
+
+        connection.execute(
+            """INSERT OR IGNORE INTO filing_baseline_summary(
+                   id,initial_count,remaining_count,updated_at
+               ) VALUES (1,?,?,?)""",
+            (len(baseline_rows), len(baseline_rows), utc_now()),
+        )
+        acknowledged = {
+            row["path"] for row in connection.execute(
+                "SELECT path FROM filing_baseline_acknowledgements"
+            ).fetchall()
+        }
+        duplicate_paths = set()
+        for row in connection.execute(
+            """SELECT candidate_path,deleted_companions_json
+               FROM duplicate_file_repairs WHERE status='completed'"""
+        ).fetchall():
+            duplicate_paths.add(str(row["candidate_path"]))
+            try:
+                duplicate_paths.update(str(path) for path in json.loads(row["deleted_companions_json"] or "[]"))
+            except (TypeError, ValueError):
+                pass
+
+        proposals = {
+            str(row["source_path"]): dict(row)
+            for row in connection.execute(
+                """SELECT file_id,scene_id,source_path,proposed_path,status
+                   FROM filing_proposals WHERE status='completed'"""
+            ).fetchall()
+        }
+        current_files = {
+            str(row["file_id"]): dict(row)
+            for row in connection.execute(
+                "SELECT file_id,scene_id,path FROM files WHERE exists_on_disk=1"
+            ).fetchall()
+        }
+        relocated_paths = {}
+        for row in connection.execute(
+            """SELECT old_path,new_path FROM activity_log
+               WHERE old_path IS NOT NULL AND new_path IS NOT NULL
+                 AND status IN ('renamed','complete','updated') ORDER BY id"""
+        ).fetchall():
+            relocated_paths[str(row["old_path"])] = str(row["new_path"])
+
+        def is_inside_incoming(path_str: str) -> bool:
+            try:
+                return any(_is_subpath_of(Path(path_str).resolve(), Path(folder).resolve()) for folder in incoming_folders)
+            except OSError:
+                return False
+
+        retire_paths = {}
+        for baseline_row in baseline_rows:
+            path_str = str(baseline_row["path"])
+            if path_str in acknowledged:
+                retire_paths[path_str] = "acknowledged"
+                continue
+            if path_str in duplicate_paths:
+                retire_paths[path_str] = "duplicate"
+                continue
+            proposal = proposals.get(path_str)
+            if proposal and not Path(path_str).is_file():
+                destination = str(proposal.get("proposed_path") or "")
+                current = current_files.get(str(proposal.get("file_id") or ""))
+                if current and str(current.get("scene_id") or "") == str(proposal.get("scene_id") or ""):
+                    destination = str(current.get("path") or destination)
+                if destination and Path(destination).is_file():
+                    retire_paths[path_str] = "filed"
+                    continue
+            for source_path, proposal in proposals.items():
+                source = Path(source_path)
+                candidate = Path(path_str)
+                is_companion = (
+                    candidate.name.startswith(source.name + ".")
+                    or candidate.stem == source.stem
+                )
+                if Path(path_str).is_file() or not is_companion:
+                    continue
+                current = current_files.get(str(proposal.get("file_id") or ""))
+                destination_video = str((current or {}).get("path") or proposal.get("proposed_path") or "")
+                companion_destination = Path(destination_video).parent / Path(path_str).name
+                if destination_video and companion_destination.is_file():
+                    retire_paths[path_str] = "filed"
+                    break
+            relocated = relocated_paths.get(path_str)
+            visited = set()
+            while relocated and relocated in relocated_paths and relocated not in visited:
+                visited.add(relocated)
+                relocated = relocated_paths[relocated]
+            if not Path(path_str).is_file() and relocated and Path(relocated).is_file() and not is_inside_incoming(relocated):
+                retire_paths[path_str] = "filed"
+
+        for path_str, reason in retire_paths.items():
+            connection.execute("DELETE FROM filing_incoming_baseline WHERE path=?", (path_str,))
+            retired[reason] += 1
+        remaining = connection.execute(
+            "SELECT COUNT(*) AS count FROM filing_incoming_baseline"
+        ).fetchone()["count"]
+        completed_at = utc_now() if remaining == 0 else None
+        connection.execute(
+            """UPDATE filing_baseline_summary
+               SET remaining_count=?,
+                   filed_count=filed_count+?,
+                   duplicate_count=duplicate_count+?,
+                   acknowledged_count=acknowledged_count+?,
+                   completed_at=COALESCE(completed_at,?),updated_at=?
+               WHERE id=1""",
+            (remaining, retired["filed"], retired["duplicate"], retired["acknowledged"], completed_at, utc_now()),
+        )
+        connection.commit()
+        return {"retired": retired, "remaining": remaining, "completed": remaining == 0}
+    finally:
+        connection.close()
 
 
 def is_disqualified_from_filing(database_path: Path, file_path: str, file_size: int, oshash: str | None, file_id: str | None, scene_id: str | None, allow_baseline: bool = False, allow_refresh: bool = False) -> tuple[bool, str]:
@@ -7461,15 +7619,12 @@ def process_incoming_file_now(database_path: Path, file_path: str) -> dict:
 
 
 def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> dict:
-    """Retrieve all files in the Incoming baseline snapshot categorized into eligible videos and companion/non-video files.
-    - Accurately reconciles counts: baseline_total = remaining_incoming + verified_moved + missing.
-    - Distinguishes verified moves (where destination exists on disk), pending proposals, and missing files.
-    - Preserves existing scene IDs, baseline protection, and immutable snapshot.
-    """
+    """Return current Incoming work plus unresolved activation protection rows."""
     if config is None:
         config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
 
     incoming_folders = get_configured_incoming_folders(config)
+    prune_resolved_filing_baseline(database_path, config)
     connection = connect(database_path)
     try:
         rows = connection.execute(
@@ -7492,6 +7647,9 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
         missing_video_count = 0
         missing_companion_count = 0
         acknowledged_missing_count = 0
+        baseline_summary = connection.execute(
+            "SELECT * FROM filing_baseline_summary WHERE id=1"
+        ).fetchone()
 
         acknowledged_paths = {
             row["path"] for row in connection.execute(
@@ -7836,8 +7994,12 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             })
 
         remaining_incoming_count = sum(1 for it in items if it["exists_on_disk"] and it["is_inside_incoming"])
-        verified_moved_count = verified_moved_video_count + verified_moved_companion_count
-        resolved_duplicate_count = resolved_duplicate_video_count + resolved_duplicate_companion_count
+        archived_filed_count = int(baseline_summary["filed_count"] or 0) if baseline_summary else 0
+        archived_duplicate_count = int(baseline_summary["duplicate_count"] or 0) if baseline_summary else 0
+        archived_acknowledged_count = int(baseline_summary["acknowledged_count"] or 0) if baseline_summary else 0
+        verified_moved_count = verified_moved_video_count + verified_moved_companion_count + archived_filed_count
+        resolved_duplicate_count = resolved_duplicate_video_count + resolved_duplicate_companion_count + archived_duplicate_count
+        acknowledged_missing_count += archived_acknowledged_count
         missing_count = missing_video_count + missing_companion_count
         ineligible_count = max(0, video_count - eligible_count)
         needs_attention_count = sum(
@@ -7850,7 +8012,7 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
 
         return {
             "total_count": len(rows),
-            "baseline_total": len(rows),
+            "baseline_total": int(baseline_summary["initial_count"] or 0) if baseline_summary else len(rows),
             "video_count": video_count,
             "companion_count": companion_count,
             "remaining_companion_count": remaining_companion_count,
@@ -7876,7 +8038,7 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
 
 
 def acknowledge_backlog_missing(database_path: Path, file_paths: list[str]) -> dict:
-    """Acknowledge deliberately removed baseline paths without deleting history."""
+    """Retire deliberately removed paths while retaining aggregate history."""
     requested = sorted({str(path) for path in (file_paths or []) if str(path).strip()})
     if not requested:
         raise ValueError("At least one missing baseline path is required")

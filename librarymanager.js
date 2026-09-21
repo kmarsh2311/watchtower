@@ -1398,7 +1398,7 @@
       const baselinePath = item.baseline_path || item.path;
       const confirmed = window.confirm(
         `Stop showing this missing baseline item as needing attention?\n\n${item.path}\n\n` +
-        "Use this only if you intentionally deleted or moved it outside Watchtower. The original baseline history will be retained."
+        "Use this only if you intentionally deleted or moved it outside Watchtower. Only aggregate completion history will be retained."
       );
       if (!confirmed) return;
       setBusy(`backlog_ack:${item.path}`);
@@ -1409,7 +1409,7 @@
           throw new Error("The file is present again or is no longer an unresolved baseline item.");
         }
         await loadBacklog();
-        setNotice("Missing item acknowledged. Its baseline history was retained.");
+        setNotice("Missing item retired. Aggregate completion history was retained.");
       } catch (err) {
         setError(err?.message || "Could not acknowledge the missing item.");
       } finally {
@@ -4116,8 +4116,8 @@
 
       const handleProtectExistingIncoming = async () => {
         const existingCount = Number(incoming?.baseline_count || 0);
-        if (existingCount > 0 && !window.confirm(
-          `Replace the existing protection snapshot of ${existingCount} file(s)?\n\nWatchtower will record the files currently present in Incoming as pre-existing and will not automatically file them.`
+        if (incoming?.baseline_established === true && !window.confirm(
+          `Replace the existing protection snapshot${existingCount > 0 ? ` of ${existingCount} unresolved file(s)` : ""}?\n\nWatchtower will record the files currently present in Incoming as pre-existing and will not automatically file them.`
         )) return;
         setBusy("baseline");
         try {
@@ -4263,15 +4263,19 @@
             React.createElement("p", { className: "lm-help", style: { marginTop: "10px" } },
               "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."),
             React.createElement("div", { className: "lm-incoming-state ready", style: { marginTop: "16px" } },
-              React.createElement("strong", null, `Pre-existing files protected: ${Number(incoming?.baseline_count || 0).toLocaleString()}`),
-              React.createElement("span", null, "These files were already in Incoming when protection was recorded. Watchtower will not file or move them automatically."),
+              React.createElement("strong", null, incoming?.baseline_completed
+                ? "Original protection backlog complete"
+                : `Pre-existing files still protected: ${Number(incoming?.baseline_count || 0).toLocaleString()}`),
+              React.createElement("span", null, incoming?.baseline_completed
+                ? "Detailed snapshot paths were retired. Watchtower retained only aggregate completion information."
+                : "These unresolved files were already in Incoming when protection was recorded. Watchtower will not file or move them automatically."),
               React.createElement("button", {
                 type: "button",
                 className: "btn btn-outline-secondary btn-sm",
                 disabled: !!busy || multiStatus.valid_count < 1,
                 onClick: handleProtectExistingIncoming,
                 title: "Record files currently in Incoming as protected pre-existing files"
-              }, Number(incoming?.baseline_count || 0) > 0 ? "Replace Protection Snapshot…" : "Protect Files Already in Incoming")))),
+              }, incoming?.baseline_established === true ? "Replace Protection Snapshot…" : "Protect Files Already in Incoming")))),
         panel("Automatic Filing (Beta)", "Propose destination folders for new videos arriving in Incoming. Every move requires your review and approval.",
           React.createElement(React.Fragment, null,
             React.createElement(Switch, { setting: "autoFilingEnabled", defaultValue: false,

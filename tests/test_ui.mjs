@@ -349,6 +349,13 @@ test("Automatic Filing settings explain trigger and filename protection accurate
   assert.match(javascript, /autoFilingPreserveFilename/);
 });
 
+test("completed Incoming protection is shown as complete without recreating the snapshot", () => {
+  assert.match(javascript, /incoming\?\.baseline_completed/);
+  assert.match(javascript, /Original protection backlog complete/);
+  assert.match(javascript, /Detailed snapshot paths were retired/);
+  assert.match(javascript, /incoming\?\.baseline_established === true \? "Replace Protection Snapshot…"/);
+});
+
 test("Automatic Filing destination roots management supports adding up to 5 roots, editing, saving, and removing", () => {
   assert.match(javascript, /destinationRootsList\.length >= 5/);
   assert.match(javascript, /autoFilingDestinationRoots: next/);
@@ -969,7 +976,7 @@ test("Backlog separates current missing files from retained activity history", (
   assert.doesNotMatch(javascript, /Incoming files checked again\. Resolved items were removed/);
   assert.match(javascript, /operation\("acknowledge_backlog_missing"/);
   assert.match(javascript, /ACKNOWLEDGE REMOVAL…/);
-  assert.match(javascript, /The original baseline history will be retained/);
+  assert.match(javascript, /Only aggregate completion history will be retained/);
   assert.doesNotMatch(javascript, /"Protected Baseline"/);
   assert.doesNotMatch(javascript, /"Ineligible \/ Filed/);
   assert.doesNotMatch(javascript, /`All Files \(/);
