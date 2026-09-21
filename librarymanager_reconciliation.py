@@ -1094,8 +1094,16 @@ def _revalidate_grouped_move_members(database_path: Path | str, batch_id: int, p
             if source_result.get("exists") is True:
                 _set_member_result(connection, member["id"], "uncertain", "Original file is still present, so this is not a verified move")
                 continue
-            _set_member_result(connection, member["id"], "ready", "Destination metadata is stable and the original path is absent",
-                               destination_size=size, destination_mtime_ns=mtime_ns)
+            prior_reason = str(member["reason"] or "")
+            retain_stale_proof = "run Stash Clean" in prior_reason
+            _set_member_result(
+                connection, member["id"], "ready",
+                prior_reason if retain_stale_proof else "Destination metadata is stable and the original path is absent",
+                observed_file_id=member["observed_file_id"] if retain_stale_proof else None,
+                observed_scene_id=member["observed_scene_id"] if retain_stale_proof else None,
+                observed_path=member["observed_path"] if retain_stale_proof else None,
+                destination_size=size, destination_mtime_ns=mtime_ns,
+            )
             ready += 1
         _refresh_batch_counts(connection, batch_id)
         connection.commit()
@@ -1151,6 +1159,35 @@ def _verify_grouped_members(database_path: Path | str, batch_id: int, stash, pat
                 observed = same_path[0]
                 original = next((item for item in (scene.get("files") or [])
                                  if str(item.get("id")) == str(member["file_id"])), None)
+                prior_stale_proof = (
+                    original is None
+                    and "run Stash Clean" in str(member.get("reason") or "")
+                    and str(member.get("observed_file_id") or "") == str(observed.get("id") or "")
+                    and str(member.get("observed_scene_id") or "") == str(scene.get("id") or "")
+                    and _normalized_filesystem_path(member.get("observed_path")) == expected_key
+                )
+                if prior_stale_proof:
+                    try:
+                        owners_result = stash.call_GQL(
+                            _GROUPED_SCENE_BY_PATH_QUERY,
+                            {"path": str(observed.get("path") or expected_path)},
+                        )
+                        owners = {
+                            str(owner_scene.get("id"))
+                            for owner_scene in ((owners_result or {}).get("findScenes") or {}).get("scenes") or []
+                            if any(_normalized_filesystem_path(item.get("path")) == expected_key
+                                   for item in owner_scene.get("files") or [])
+                        }
+                    except Exception as exc:
+                        results.append((member, "uncertain", f"Could not verify destination ownership after Stash Clean: {exc}", {}))
+                        continue
+                    if owners == {str(member["scene_id"])}:
+                        results.append((member, "verified",
+                                        "Stale Stash database attachment removed; the verified playable file remains on the original scene",
+                                        {"observed_file_id": str(observed.get("id") or ""),
+                                         "observed_scene_id": str(scene.get("id") or ""),
+                                         "observed_path": observed.get("path")}))
+                        continue
                 original_fingerprints = {
                     (str(item.get("type") or "").lower(), str(item.get("value") or ""))
                     for item in ((original or {}).get("fingerprints") or [])
@@ -1221,21 +1258,23 @@ def _verify_grouped_members(database_path: Path | str, batch_id: int, stash, pat
         connection.execute("BEGIN IMMEDIATE")
         for member, state, reason, observed in results:
             if state == "verified":
-                local = connection.execute(
-                    "SELECT scene_id,path FROM files WHERE file_id=?",
-                    (str(member["file_id"]),),
-                ).fetchone()
-                allowed_paths = {
-                    _normalized_filesystem_path(member["old_path"]),
-                    _normalized_filesystem_path(member["expected_path"]),
-                }
-                if (not local or str(local["scene_id"]) != str(member["scene_id"])
-                        or _normalized_filesystem_path(local["path"]) not in allowed_paths):
-                    state = "uncertain"
-                    reason = "Local inventory identity changed during verification"
-                    observed = {}
+                stale_attachment_removed = reason.startswith("Stale Stash database attachment removed")
+                if not stale_attachment_removed:
+                    local = connection.execute(
+                        "SELECT scene_id,path FROM files WHERE file_id=?",
+                        (str(member["file_id"]),),
+                    ).fetchone()
+                    allowed_paths = {
+                        _normalized_filesystem_path(member["old_path"]),
+                        _normalized_filesystem_path(member["expected_path"]),
+                    }
+                    if (not local or str(local["scene_id"]) != str(member["scene_id"])
+                            or _normalized_filesystem_path(local["path"]) not in allowed_paths):
+                        state = "uncertain"
+                        reason = "Local inventory identity changed during verification"
+                        observed = {}
             _set_member_result(connection, member["id"], state, reason, **observed)
-            if state == "verified":
+            if state == "verified" and not reason.startswith("Stale Stash database attachment removed"):
                 connection.execute(
                     """UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=?,missing_since=NULL
                        WHERE file_id=? AND scene_id=?""",

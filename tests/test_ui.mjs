@@ -1013,9 +1013,11 @@ test("Phase 4 requires explicit Stash scan approval and keeps copy groups review
   assert.match(javascript, /Stash database attachments requiring review/);
   assert.match(javascript, /Verified successfully/);
   assert.match(javascript, /Click Diagnose Remaining first\. Do not run Stash Clean/);
-  assert.match(javascript, /Open the affected scene and confirm it plays from the new path/);
-  assert.match(javascript, /Do not dismiss the group before rechecking/);
+  assert.match(javascript, /Two valid choices: Recommended/);
+  assert.match(javascript, /dismiss this review and leave the missing database attachment/);
   assert.match(javascript, /DIAGNOSE \$\{uncertainMembers\.length\} REMAINING/);
-  assert.match(javascript, /RECHECK AFTER STASH CLEAN/);
+  assert.match(javascript, /RECHECK \/ UPDATE DIAGNOSIS/);
+  assert.match(javascript, /DISMISS AND LEAVE STALE RECORD/);
+  assert.match(javascript, /It may appear again in later missing-file checks/);
   assert.match(javascript, /const rechecking = batch\.state === "partially_verified"/);
 });

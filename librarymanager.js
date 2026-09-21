@@ -1873,7 +1873,13 @@
     }
 
     async function dismissGroupedReconciliation(batch) {
-      if (!window.confirm(`Dismiss this grouped review?\n\n${batch.source_prefix || "Unknown source"}\n→ ${batch.destination_prefix || "Unknown destination"}\n\nNo files or Stash records will be changed.`)) return;
+      const leavesStaleAttachment = (batch.members || []).some(member =>
+        String(member.reason || "").includes("run Stash Clean")
+      );
+      const consequence = leavesStaleAttachment
+        ? "The playable video will remain unchanged, but Stash will keep the missing old database attachment. It may appear again in later missing-file checks."
+        : "No files or Stash records will be changed.";
+      if (!window.confirm(`Dismiss this grouped review?\n\n${batch.source_prefix || "Unknown source"}\n→ ${batch.destination_prefix || "Unknown destination"}\n\n${consequence}`)) return;
       setBusy(`grouped:${batch.id}`); setError("");
       try {
         await operation("dismiss_grouped_reconciliation", { batch_id: batch.id });
@@ -2746,7 +2752,7 @@
               React.createElement("p", { className: "lm-terminal-attention-fix" },
                 isPartiallyVerified
                   ? (hasStashCleanGuidance
-                    ? "Recovery order: 1. Open the affected scene and confirm it plays from the new path. 2. In Stash, run Clean to remove the missing old attachment. 3. Return here and click Recheck After Stash Clean. Do not dismiss the group before rechecking."
+                    ? "Two valid choices: Recommended — confirm the scene plays, run Stash Clean, then click Recheck / Update Diagnosis. Or dismiss this review and leave the missing database attachment in Stash; the playable video is unaffected."
                     : "Watchtower has not yet established why these records failed verification. Click Diagnose Remaining first. Do not run Stash Clean or dismiss the group yet.")
                   : isMoveGroup
                   ? "Approval asks Stash to scan the destination folder; Watchtower then verifies every original scene and file identity."
@@ -2760,14 +2766,16 @@
                 }, busy === `grouped-execute:${batch.id}`
                   ? "VERIFYING…"
                   : (isResumable ? "⟳ RESUME VERIFICATION" : (isPartiallyVerified
-                    ? (hasStashCleanGuidance ? "⟳ RECHECK AFTER STASH CLEAN" : `⌕ DIAGNOSE ${uncertainMembers.length} REMAINING`)
+                    ? (hasStashCleanGuidance ? "⟳ RECHECK / UPDATE DIAGNOSIS" : `⌕ DIAGNOSE ${uncertainMembers.length} REMAINING`)
                     : "✓ SCAN & VERIFY MOVE"))),
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn dismiss",
                   disabled: !!busy || isResumable,
                   onClick: () => dismissGroupedReconciliation(batch)
-                }, busy === `grouped:${batch.id}` ? "DISMISSING…" : "✕ DISMISS GROUP")));
+                }, busy === `grouped:${batch.id}` ? "DISMISSING…" : (hasStashCleanGuidance
+                  ? "✕ DISMISS AND LEAVE STALE RECORD"
+                  : "✕ DISMISS GROUP"))));
           }),
 
           attentionEvents.map((event, idx) => {

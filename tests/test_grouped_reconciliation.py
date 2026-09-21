@@ -810,6 +810,27 @@ def test_phase4_explains_stale_same_scene_attachment_and_rechecks_without_rescan
     assert rechecked["state"] == "partially_verified"
     assert recheck_stash.scan_calls == []
 
+    cleaned_stash = _successful_grouped_stash(expected)
+    cleaned_stash.scene_files["phase4-scene-1"] = [{
+        "id": "replacement-file-id", "path": str(new_path), "basename": new_path.name,
+        "size": size, "fingerprints": fingerprints,
+    }]
+    cleaned = execute_grouped_move_reconciliation(
+        database, batch["id"], cleaned_stash, owner="stale-cleaned-recheck"
+    )
+    assert cleaned["state"] == "resolved"
+    resolved_stale = next(member for member in cleaned["members"] if member["scene_id"] == "phase4-scene-1")
+    assert "Stale Stash database attachment removed" in resolved_stale["reason"]
+    assert cleaned_stash.scan_calls == []
+    connection = connect(database)
+    try:
+        stale_inventory = connection.execute(
+            "SELECT path FROM files WHERE file_id='phase4-file-1'"
+        ).fetchone()
+        assert stale_inventory["path"] == str(old_path)
+    finally:
+        connection.close()
+
 
 def test_grouped_path_identity_normalizes_equivalent_unicode(tmp_path):
     from librarymanager_reconciliation import _normalized_filesystem_path
