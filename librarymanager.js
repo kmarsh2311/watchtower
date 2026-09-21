@@ -199,6 +199,7 @@
   const sectionSeparators = [["dash", "Dash"], ["comma", "Comma"], ["space", "Space"], ["underscore", "Underscore"]];
   const performerSeparators = [["comma", "Comma"], ["space", "Space"], ["dash", "Dash"], ["ampersand", "And sign (&)"]];
   const datePositions = [["beginning", "Beginning (Recommended)"], ["end", "End"]];
+  const qualityPositions = [["end", "End (Recommended)"], ["beginning", "Beginning"]];
   const performerCountLimits = [
     [0, "All tagged performers"],
     [1, "First 1 performer only"],
@@ -268,7 +269,7 @@
         const [gqlRes, backendRaw] = await Promise.all([
           (!previewResult || previewResult.sceneId !== String(id))
             ? gql(`query FetchPreviewScene($id: ID!) {
-                findScene(id: $id) { id title studio { name } performers { name } files { path basename } paths { screenshot preview } }
+                findScene(id: $id) { id title studio { name } performers { name } files { path basename height width } paths { screenshot preview } }
               }`, { id })
             : Promise.resolve({ findScene: previewResult }),
           operation("preview_test_rename", { scene_id: id, config: config }).catch(err => ({ error: err.message }))
@@ -320,6 +321,8 @@
       config.includePerformers,
       config.includeSceneDate,
       config.filenameDatePosition,
+      config.includeVideoQuality,
+      config.filenameQualityPosition,
       config.cleanPerformerOnlyTitles,
       config.stripStudioFromTitle,
       config.stripPerformersFromTitle,
@@ -1681,6 +1684,8 @@
           includePerformers: true,
           includeSceneDate: false,
           filenameDatePosition: "beginning",
+          includeVideoQuality: false,
+          filenameQualityPosition: "end",
           cleanPerformerOnlyTitles: true,
           stripStudioFromTitle: true,
           stripPerformersFromTitle: true,
@@ -2054,6 +2059,10 @@
     const exampleDate = "2026-09-14";
     if (config.includeSceneDate === true) {
       config.filenameDatePosition === "end" ? exampleMainParts.push(exampleDate) : exampleMainParts.unshift(exampleDate);
+    }
+    const exampleQuality = "[1080p]";
+    if (config.includeVideoQuality === true) {
+      config.filenameQualityPosition === "beginning" ? exampleMainParts.unshift(exampleQuality) : exampleMainParts.push(exampleQuality);
     }
     const exampleFilename = exampleMainParts.join(filenameSectionCharacters[config.filenameSectionSeparator] || " - ") + ".mp4";
     const activity = (data?.activity || []).filter(row => {
@@ -3837,6 +3846,23 @@
                     checked: (config.filenameDatePosition || "beginning") === value,
                     onChange: () => updateSetting("filenameDatePosition", value)
                   }),
+                  label.replace(" (Recommended)", ""))))),
+              React.createElement("div", { className: "lm-quality-setting" },
+                React.createElement(Switch, { setting: "includeVideoQuality",
+                  label: "Include Video Quality",
+                  help: "Add resolution such as [1080p] to future filenames." }),
+                config.includeVideoQuality === true && React.createElement("div", {
+                  className: "lm-quality-position-options",
+                  role: "radiogroup",
+                  "aria-label": "Video quality position"
+                }, qualityPositions.map(([value, label]) => React.createElement("label", { key: value },
+                  React.createElement("input", {
+                    type: "radio",
+                    name: "librarymanager-quality-position",
+                    value,
+                    checked: (config.filenameQualityPosition || "end") === value,
+                    onChange: () => updateSetting("filenameQualityPosition", value)
+                  }),
                   label.replace(" (Recommended)", ""))))))),
           React.createElement("div", { className: "lm-filename-example" },
             React.createElement("small", null, "Example filename"),
@@ -4734,6 +4760,8 @@
               React.createElement("li", null, React.createElement("strong", null, "Include Performers in Filename (includePerformers): "), "Appends or prepends tagged performer names according to your chosen ordering and performer separator."),
               React.createElement("li", null, React.createElement("strong", null, "Include Scene Date in Filename (includeSceneDate): "), "Adds the scene date from Stash in the fixed YYYY-MM-DD format. Missing dates are omitted."),
               React.createElement("li", null, React.createElement("strong", null, "Scene Date Position (filenameDatePosition): "), "Places the optional scene date at the beginning or end of the configured filename."),
+              React.createElement("li", null, React.createElement("strong", null, "Include Video Quality (includeVideoQuality): "), "Adds the video resolution tag such as [1080p] or [2160p]. Omitted when height is unavailable."),
+              React.createElement("li", null, React.createElement("strong", null, "Video Quality Position (filenameQualityPosition): "), "Places the optional resolution tag at the beginning or end of the configured filename."),
               React.createElement("li", null, React.createElement("strong", null, "Maximum Performers in Filename (maxPerformersInFilename): "), "Limits the number of performer names included in the filename (e.g. first 2). Set to 0 to include all tagged performers.")
             ),
 

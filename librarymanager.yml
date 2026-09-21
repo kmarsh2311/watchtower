@@ -57,6 +57,14 @@ settings:
     displayName: Scene Date Position
     description: Place the optional YYYY-MM-DD scene date at the beginning or end of the filename.
     type: STRING
+  includeVideoQuality:
+    displayName: Include Video Quality
+    description: Add video resolution tags such as [1080p] or [2160p] to filenames when available.
+    type: BOOLEAN
+  filenameQualityPosition:
+    displayName: Video Quality Position
+    description: Place the optional resolution tag at the beginning or end of the filename.
+    type: STRING
   maxPerformersInFilename:
     displayName: Maximum Performers in Filename
     description: Limit the number of performers included in filenames (e.g. first 2). Set to 0 for all.

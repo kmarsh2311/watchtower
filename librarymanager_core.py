@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS files (
     performers_json TEXT NOT NULL DEFAULT '[]',
     size INTEGER,
     duration REAL,
+    height INTEGER,
     fingerprints_json TEXT NOT NULL DEFAULT '[]',
     scene_metadata_json TEXT NOT NULL DEFAULT '{}',
     exists_on_disk INTEGER NOT NULL,
@@ -106,6 +107,7 @@ CREATE TABLE IF NOT EXISTS filename_state (
     manual_studio TEXT,
     manual_performers_json TEXT NOT NULL DEFAULT '[]',
     managed_date TEXT,
+    managed_quality TEXT,
     rename_protected INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -730,6 +732,10 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
                     "ALTER TABLE filename_state ADD COLUMN manual_performers_json TEXT NOT NULL DEFAULT '[]'")
         _safe_alter(connection, "filename_state", "managed_date",
                     "ALTER TABLE filename_state ADD COLUMN managed_date TEXT")
+        _safe_alter(connection, "filename_state", "managed_quality",
+                    "ALTER TABLE filename_state ADD COLUMN managed_quality TEXT")
+        _safe_alter(connection, "files", "height",
+                    "ALTER TABLE files ADD COLUMN height INTEGER")
         _safe_alter(connection, "incoming_files", "attempts",
                     "ALTER TABLE incoming_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
         _safe_alter(connection, "incoming_files", "settle_seconds",
@@ -1727,6 +1733,15 @@ def flatten_scene_files(scenes):
             file_id = file_record.get("id")
             if not path or file_id is None:
                 continue
+            height = None
+            raw_height = file_record.get("height")
+            if raw_height is not None:
+                try:
+                    h_val = int(raw_height)
+                    if h_val > 0:
+                        height = h_val
+                except (ValueError, TypeError):
+                    pass
             yield {
                 "file_id": str(file_id),
                 "scene_id": str(scene.get("id")),
@@ -1737,6 +1752,7 @@ def flatten_scene_files(scenes):
                 "performers_json": json.dumps(performers, ensure_ascii=False),
                 "size": file_record.get("size"),
                 "duration": file_record.get("duration"),
+                "height": height,
                 "fingerprints_json": json.dumps(file_record.get("fingerprints") or [], sort_keys=True),
                 "scene_metadata_json": json.dumps(metadata, ensure_ascii=False, sort_keys=True),
             }
@@ -1872,13 +1888,13 @@ def inventory(database_path: Path, scenes, progress_callback=None) -> dict:
                     )
 
             connection.execute(
-                """INSERT INTO files(file_id,scene_id,path,basename,title,studio,performers_json,size,duration,
+                """INSERT INTO files(file_id,scene_id,path,basename,title,studio,performers_json,size,duration,height,
                        fingerprints_json,scene_metadata_json,exists_on_disk,first_seen_at,last_seen_at,missing_since)
-                   VALUES (:file_id,:scene_id,:path,:basename,:title,:studio,:performers_json,:size,:duration,
+                   VALUES (:file_id,:scene_id,:path,:basename,:title,:studio,:performers_json,:size,:duration,:height,
                        :fingerprints_json,:scene_metadata_json,:exists_on_disk,:first_seen_at,:last_seen_at,:missing_since)
                    ON CONFLICT(file_id) DO UPDATE SET scene_id=excluded.scene_id,path=excluded.path,
                        basename=excluded.basename,title=excluded.title,studio=excluded.studio,
-                       performers_json=excluded.performers_json,size=excluded.size,duration=excluded.duration,
+                       performers_json=excluded.performers_json,size=excluded.size,duration=excluded.duration,height=excluded.height,
                        fingerprints_json=excluded.fingerprints_json,scene_metadata_json=excluded.scene_metadata_json,
                        exists_on_disk=excluded.exists_on_disk,
                        last_seen_at=excluded.last_seen_at,missing_since=excluded.missing_since""",
@@ -1941,13 +1957,13 @@ def refresh_scene_inventory(database_path: Path, scene: dict) -> int:
                 missing_since = None if exists else (previous["missing_since"] if previous else now)
 
             connection.execute(
-                """INSERT INTO files(file_id,scene_id,path,basename,title,studio,performers_json,size,duration,
+                """INSERT INTO files(file_id,scene_id,path,basename,title,studio,performers_json,size,duration,height,
                        fingerprints_json,scene_metadata_json,exists_on_disk,first_seen_at,last_seen_at,missing_since)
-                   VALUES (:file_id,:scene_id,:path,:basename,:title,:studio,:performers_json,:size,:duration,
+                   VALUES (:file_id,:scene_id,:path,:basename,:title,:studio,:performers_json,:size,:duration,:height,
                        :fingerprints_json,:scene_metadata_json,:exists_on_disk,:first_seen_at,:last_seen_at,:missing_since)
                    ON CONFLICT(file_id) DO UPDATE SET scene_id=excluded.scene_id,path=excluded.path,
                        basename=excluded.basename,title=excluded.title,studio=excluded.studio,
-                       performers_json=excluded.performers_json,size=excluded.size,duration=excluded.duration,
+                       performers_json=excluded.performers_json,size=excluded.size,duration=excluded.duration,height=excluded.height,
                        fingerprints_json=excluded.fingerprints_json,scene_metadata_json=excluded.scene_metadata_json,
                        exists_on_disk=excluded.exists_on_disk,last_seen_at=excluded.last_seen_at,
                        missing_since=excluded.missing_since""",
@@ -1973,18 +1989,22 @@ def _row_scene_date(row) -> str:
     return ""
 
 
-def scene_naming_signature(database_path: Path, scene_id: str, include_date: bool = False):
+def scene_naming_signature(database_path: Path, scene_id: str, include_date: bool = False, include_quality: bool = False):
     """Return only metadata that is allowed to influence a filename."""
     connection = connect(database_path)
     try:
         row = connection.execute(
-            "SELECT title,studio,performers_json,scene_metadata_json FROM files WHERE scene_id=? ORDER BY file_id LIMIT 1",
+            "SELECT title,studio,performers_json,scene_metadata_json,height FROM files WHERE scene_id=? ORDER BY file_id LIMIT 1",
             (str(scene_id),),
         ).fetchone()
         if not row:
             return None
         signature = (row["title"] or "", row["studio"] or "", row["performers_json"] or "[]")
-        return signature + (_row_scene_date(row),) if include_date else signature
+        if include_date:
+            signature = signature + (_row_scene_date(row),)
+        if include_quality:
+            signature = signature + (_row_video_quality(row),)
+        return signature
     finally:
         connection.close()
 
@@ -3671,11 +3691,12 @@ def _sync_filename_state(connection, state, row, current: Path, performers: list
             base = _strip_managed_metadata(base, studios_to_strip, performers_to_strip, opts)
 
     managed_date = str(state["managed_date"] or "").strip() or _row_scene_date(row)
+    managed_quality = str(dict(state).get("managed_quality") or "").strip() or _row_video_quality(row)
     connection.execute(
         """UPDATE filename_state SET base_stem=?,base_source=?,source_title=?,manual_studio=?,
-           manual_performers_json=?,managed_date=?,updated_at=? WHERE file_id=?""",
+           manual_performers_json=?,managed_date=?,managed_quality=?,updated_at=? WHERE file_id=?""",
         (base, source, source_title, current_studio, json.dumps(performers, ensure_ascii=False),
-         managed_date or None, now, row["file_id"]),
+         managed_date or None, managed_quality or None, now, row["file_id"]),
     )
     return connection.execute("SELECT * FROM filename_state WHERE file_id=?", (row["file_id"],)).fetchone()
 
@@ -3715,9 +3736,10 @@ def _create_filename_state(connection, row, current: Path, performers: list[str]
 
     connection.execute(
         """INSERT INTO filename_state(file_id,base_stem,base_source,source_title,last_generated_stem,
-           manual_studio,manual_performers_json,managed_date,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+           manual_studio,manual_performers_json,managed_date,managed_quality,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (row["file_id"], clean_base, source, title or None, None, studio,
-         json.dumps(performers, ensure_ascii=False), _row_scene_date(row) or None, now, now),
+         json.dumps(performers, ensure_ascii=False), _row_scene_date(row) or None,
+         _row_video_quality(row) or None, now, now),
     )
     return connection.execute("SELECT * FROM filename_state WHERE file_id=?", (row["file_id"],)).fetchone()
 
@@ -3765,9 +3787,57 @@ def filename_format_options(config: dict | None = None) -> dict:
     return {
         "order": order,
         "date_position": "end" if str(config.get("filenameDatePosition") or "beginning").lower() == "end" else "beginning",
+        "quality_position": "beginning" if str(config.get("filenameQualityPosition") or "end").lower() == "beginning" else "end",
         "section_separator": section_separators.get(str(config.get("filenameSectionSeparator") or "dash"), " - "),
         "performer_separator": performer_separators.get(str(config.get("filenamePerformerSeparator") or "comma"), ", "),
     }
+
+
+def _validated_video_quality(quality: int | str | None) -> str:
+    """Return canonical quality token like '[1080p]' or empty string."""
+    if quality is None:
+        return ""
+    if isinstance(quality, int):
+        return f"[{quality}p]" if quality > 0 else ""
+    s = str(quality).strip()
+    if not s:
+        return ""
+    m = re.match(r"^\[?(\d+)[pP]?\]?$", s)
+    if m:
+        try:
+            val = int(m.group(1))
+            return f"[{val}p]" if val > 0 else ""
+        except ValueError:
+            pass
+    return ""
+
+
+def _strip_matching_video_quality(text: str, quality: str | int | None) -> str:
+    """Remove matching resolution token at a clear title boundary without guessing at other resolutions."""
+    cleaned = str(text or "").strip()
+    tok = _validated_video_quality(quality)
+    if not cleaned or not tok:
+        return cleaned
+    num = tok.strip("[]pP")
+    prefix = re.compile(rf"^(?:\[{num}[pP]\]|\({num}[pP]\)|{num}[pP])(?:\s*[-–—_,.:]+\s*|\s+|$)", re.IGNORECASE)
+    suffix = re.compile(rf"(?:^|\s+|\s*[-–—_,.:]+\s*)(?:\[{num}[pP]\]|\({num}[pP]\)|{num}[pP])$", re.IGNORECASE)
+    cleaned = prefix.sub("", cleaned, count=1)
+    cleaned = suffix.sub("", cleaned, count=1)
+    return cleaned.strip(" -–—_,.:")
+
+
+def _row_video_quality(row) -> str:
+    """Extract validated video quality token e.g. '[1080p]' from a files table row or record."""
+    try:
+        if not row:
+            return ""
+        row_dict = dict(row)
+        height = row_dict.get("height")
+        if height is not None:
+            return _validated_video_quality(height)
+    except (ValueError, TypeError):
+        pass
+    return ""
 
 
 def _validated_scene_date(scene_date: str | None) -> str:
@@ -3848,7 +3918,8 @@ def _is_only_metadata_or_connectors(text: str, studio: str | None, performers: l
 
 
 def _proposed_stem(base: str, studio: str | None, performers: list[str], options: dict | None = None,
-                   scene_date: str | None = None, previous_scene_date: str | None = None) -> str:
+                   scene_date: str | None = None, previous_scene_date: str | None = None,
+                   video_quality: str | int | None = None, previous_video_quality: str | int | None = None) -> str:
     """Build one canonical filename from the stored base + current Stash metadata."""
     formatting = filename_format_options(options)
     opts = options or {}
@@ -3860,6 +3931,14 @@ def _proposed_stem(base: str, studio: str | None, performers: list[str], options
         if previous_date and previous_date != date_val:
             title_val = _strip_matching_scene_date(title_val, previous_date)
         title_val = _strip_matching_scene_date(title_val, date_val)
+    
+    quality_val = _validated_video_quality(video_quality) if opts.get("includeVideoQuality") is True else ""
+    if quality_val:
+        if previous_video_quality:
+            prev_quality = _validated_video_quality(previous_video_quality)
+            if prev_quality and prev_quality != quality_val:
+                title_val = _strip_matching_video_quality(title_val, prev_quality)
+        title_val = _strip_matching_video_quality(title_val, quality_val)
     
     include_studio = opts.get("includeStudio") is not False
     studio_val = str(studio or "").strip() if include_studio else ""
@@ -3890,6 +3969,14 @@ def _proposed_stem(base: str, studio: str | None, performers: list[str], options
     parts = [values[field] for field in formatting["order"] if values[field]]
     if date_val:
         parts.append(date_val) if formatting["date_position"] == "end" else parts.insert(0, date_val)
+    if quality_val:
+        if formatting["quality_position"] == "beginning":
+            if date_val and formatting["date_position"] == "beginning":
+                parts.insert(1, quality_val)
+            else:
+                parts.insert(0, quality_val)
+        else:
+            parts.append(quality_val)
     proposed = formatting["section_separator"].join(parts)
     return _sanitize_filename_stem(proposed, opts)
 
@@ -3922,7 +4009,8 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
 
             base = str(state["base_stem"] or "").strip()
             proposed_stem = _proposed_stem(base, row["studio"], performers, filename_options,
-                                            _row_scene_date(row), state["managed_date"])
+                                            _row_scene_date(row), state["managed_date"],
+                                            _row_video_quality(row), dict(state).get("managed_quality"))
             # If all metadata and the clean base are empty, preserve the current stem rather than
             # proposing an invalid/empty filename.
             if not proposed_stem:
@@ -4006,7 +4094,8 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
             }
 
         proposed_stem = _proposed_stem(state["base_stem"], row["studio"], performers, filename_options,
-                                        _row_scene_date(row), state["managed_date"])
+                                        _row_scene_date(row), state["managed_date"],
+                                        _row_video_quality(row), dict(state).get("managed_quality"))
         if not proposed_stem:
             proposed_stem = current.stem
         proposed = current.with_name(proposed_stem + current.suffix)
@@ -4033,6 +4122,7 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
         return {"scene_id": str(scene_id), "file_id": row["file_id"], "current_path": str(current),
                 "proposed_path": str(proposed), "base_stem": state["base_stem"], "status": status,
                 "reason": reason, "associated_files": sidecars, "scene_date": _row_scene_date(row),
+                "video_quality": _row_video_quality(row),
                 "action_performed": False}
     finally:
         connection.close()
@@ -4062,8 +4152,8 @@ def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename
             try:
                 connection = connect(database_path)
                 connection.execute(
-                    "UPDATE filename_state SET last_generated_stem=?,managed_date=?,updated_at=? WHERE file_id=?",
-                    (proposed.stem, preview.get("scene_date") or None, utc_now(), preview["file_id"]),
+                    "UPDATE filename_state SET last_generated_stem=?,managed_date=?,managed_quality=?,updated_at=? WHERE file_id=?",
+                    (proposed.stem, preview.get("scene_date") or None, preview.get("video_quality") or None, utc_now(), preview["file_id"]),
                 )
                 connection.execute(
                     "UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=? WHERE file_id=?",

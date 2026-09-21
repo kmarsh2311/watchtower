@@ -162,6 +162,24 @@ test("scene date naming is optional, ISO-only, and positioned at either edge", (
   assert.doesNotMatch(javascript, /Date Format/);
 });
 
+test("video quality naming is optional, standard resolution format, and positioned at either edge", () => {
+  assert.match(manifest, /includeVideoQuality:[\s\S]*resolution/);
+  assert.match(manifest, /filenameQualityPosition:[\s\S]*beginning or end/);
+  assert.match(javascript, /setting: "includeVideoQuality"/);
+  assert.match(javascript, /const qualityPositions = \[\["end", "End \(Recommended\)"\], \["beginning", "Beginning"\]\]/);
+  assert.match(javascript, /className: "lm-quality-position-options"/);
+  assert.match(javascript, /role: "radiogroup"/);
+  assert.match(javascript, /name: "librarymanager-quality-position"/);
+  assert.match(javascript, /type: "radio"/);
+  assert.match(javascript, /config\.includeVideoQuality === true && React\.createElement/);
+  assert.match(css, /\.lm-quality-position-options\{[^}]*display:flex/);
+  assert.match(css, /\.lm-quality-setting\{[^}]*border-bottom:/);
+  assert.match(css, /\.lm-quality-setting>\.lm-switch-row\{border-bottom:0\}/);
+  assert.ok(javascript.indexOf('className: "lm-date-setting"') < javascript.indexOf('className: "lm-quality-setting"'),
+    "includeVideoQuality is placed after includeSceneDate in the rules grid");
+  assert.match(javascript, /config\.filenameQualityPosition === "beginning" \? exampleMainParts\.unshift\(exampleQuality\) : exampleMainParts\.push\(exampleQuality\)/);
+});
+
 test("completed inventory automatically preserves onboarding completion across reloads without showing wizard", () => {
   assert.match(javascript, /hasCompletedInventory/);
   assert.match(javascript, /payload\?\.inventory\?\.status === "complete"/);

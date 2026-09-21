@@ -47,7 +47,7 @@ query LibraryManagerInventory($filter: FindFilterType) {
       galleries { id title }
       stash_ids { endpoint stash_id }
       groups { group { id name } scene_index }
-      files { id path basename size duration fingerprints { type value } }
+      files { id path basename size duration width height video_codec fingerprints { type value } }
     }
   }
 }
@@ -63,7 +63,7 @@ query LibraryManagerScene($id: ID!) {
     galleries { id title }
     stash_ids { endpoint stash_id }
     groups { group { id name } scene_index }
-    files { id path basename size duration fingerprints { type value } }
+    files { id path basename size duration width height video_codec fingerprints { type value } }
   }
 }
 """
@@ -1018,9 +1018,9 @@ def process_rename_queue(stash, database_path):
                     continue
                 break
             try:
-                before = scene_naming_signature(database_path, scene_id, config.get("includeSceneDate") is True)
+                before = scene_naming_signature(database_path, scene_id, config.get("includeSceneDate") is True, config.get("includeVideoQuality") is True)
                 refresh_scene(stash, database_path, scene_id)
-                after = scene_naming_signature(database_path, scene_id, config.get("includeSceneDate") is True)
+                after = scene_naming_signature(database_path, scene_id, config.get("includeSceneDate") is True, config.get("includeVideoQuality") is True)
                 if before == after:
                     preview = preview_scene_filename(database_path, scene_id, config)
                     if preview.get("status") == "unchanged":
