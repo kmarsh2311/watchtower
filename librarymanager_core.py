@@ -4059,8 +4059,10 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
     finally:
         connection.close()
 
-def preview_scene_filename(database_path: Path, scene_id: str, filename_options: dict | None = None) -> dict:
+def preview_scene_filename(database_path: Path, scene_id: str, filename_options: dict | None = None, ignore_protection: bool = False) -> dict:
     """Return the latest calculated filename proposal for one scene."""
+    opts = filename_options or {}
+    skip_protection = ignore_protection or opts.get("ignore_protection") is True
     connection = connect(database_path)
     try:
         row = connection.execute(
@@ -4079,7 +4081,7 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
             state = _sync_filename_state(connection, state, row, current, performers, filename_options)
         connection.commit()
 
-        if state and (dict(state).get("rename_protected") or False):
+        if not skip_protection and state and (dict(state).get("rename_protected") or False):
             return {
                 "scene_id": str(scene_id),
                 "file_id": row["file_id"],
@@ -4127,10 +4129,12 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
     finally:
         connection.close()
 
-def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename_options: dict | None = None) -> dict:
+def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename_options: dict | None = None, ignore_protection: bool = False) -> dict:
     """Apply one preflighted rename through a supplied Stash move callback."""
+    opts = filename_options or {}
+    skip_protection = ignore_protection or opts.get("ignore_protection") is True
     with rename_lock(database_path):
-        preview = preview_scene_filename(database_path, scene_id, filename_options)
+        preview = preview_scene_filename(database_path, scene_id, filename_options, ignore_protection=skip_protection)
         if preview.get("status") != "ready":
             return preview
         moved_sidecars = []

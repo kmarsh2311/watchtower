@@ -1841,13 +1841,14 @@ def main():
             raise ValueError("Set Test Scene ID in the Stash Library Manager settings first")
         refresh_scene(stash, database_path, scene_id)
         if mode == "preview_test_rename":
-            result = preview_scene_filename(database_path, scene_id, active_config)
+            result = preview_scene_filename(database_path, scene_id, active_config, ignore_protection=True)
         else:
             result = apply_scene_filename(
                 database_path, scene_id,
                 lambda file_id, folder, basename: stash.move_files({"ids": [file_id], "destination_folder": folder,
                                                                     "destination_basename": basename}),
                 active_config,
+                ignore_protection=True,
             )
             result = recover_local_rename_cache(stash, database_path, scene_id, result)
             audit(database_path, "rename", "test scene rename", result.get("status", "unknown"),

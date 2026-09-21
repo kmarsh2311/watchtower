@@ -204,5 +204,46 @@ class QualityFilenameTokenTests(unittest.TestCase):
             self.assertEqual(sig_without_quality, scene_naming_signature(database, "10", include_quality=False))
 
 
+    def test_13_regression_720p_real_scene_preview_and_protection_override(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "test.sqlite"
+            video = Path(temp_dir) / "Onlyfans Cole Bentley Billy Essex.mp4"
+            video.write_bytes(b"content")
+            scene = {
+                "id": "6393",
+                "title": "",
+                "files": [{
+                    "id": "13154",
+                    "path": str(video),
+                    "basename": video.name,
+                    "width": 404,
+                    "height": 720,
+                    "size": 192500752,
+                    "fingerprints": []
+                }],
+            }
+            inventory(database, [scene])
+            preview_scene_filename(database, "6393")
+            
+            from librarymanager_core import connect
+            conn = connect(database)
+            conn.execute("UPDATE filename_state SET rename_protected=1 WHERE file_id='13154'")
+            conn.commit()
+            conn.close()
+
+            options = {"includeVideoQuality": True, "filenameQualityPosition": "end"}
+
+            # Normal background preview respects rename_protected
+            preview_protected = preview_scene_filename(database, "6393", options, ignore_protection=False)
+            self.assertEqual(preview_protected["status"], "unchanged")
+            self.assertEqual(Path(preview_protected["proposed_path"]).name, "Onlyfans Cole Bentley Billy Essex.mp4")
+
+            # UI Real-Scene preview with ignore_protection=True calculates the simulated proposal with [720p]
+            preview_ui = preview_scene_filename(database, "6393", options, ignore_protection=True)
+            self.assertEqual(preview_ui["status"], "ready")
+            self.assertEqual(preview_ui["video_quality"], "[720p]")
+            self.assertEqual(Path(preview_ui["proposed_path"]).name, "Onlyfans Cole Bentley Billy Essex - [720p].mp4")
+
+
 if __name__ == "__main__":
     unittest.main()
