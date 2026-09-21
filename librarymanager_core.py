@@ -1631,6 +1631,50 @@ def is_file_on_unavailable_root(path_str: str, unavailable_roots=None) -> bool:
     return False
 
 
+def get_authoritative_unavailable_roots(database_path: Path = None, extra_roots: list = None) -> list[str]:
+    """Return the list of configured or monitored roots that are currently offline or unreachable.
+    Probes filesystem directly; discards stale monitor status entries if the root is now accessible.
+    """
+    candidates = set()
+    if extra_roots:
+        for r in extra_roots:
+            if r and str(r).strip():
+                try:
+                    candidates.add(str(Path(r).expanduser()))
+                except Exception:
+                    candidates.add(str(r))
+
+    if database_path:
+        try:
+            conn = connect(database_path)
+            try:
+                status_row = conn.execute(
+                    "SELECT unavailable_roots_json FROM filesystem_monitor_status WHERE id=1"
+                ).fetchone()
+                if status_row and status_row["unavailable_roots_json"]:
+                    for r in json.loads(status_row["unavailable_roots_json"]):
+                        if r and str(r).strip():
+                            try:
+                                candidates.add(str(Path(r).expanduser()))
+                            except Exception:
+                                candidates.add(str(r))
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    unavailable = []
+    for cand in candidates:
+        try:
+            p = Path(cand)
+            if not p.is_dir():
+                unavailable.append(cand)
+        except (OSError, ValueError):
+            unavailable.append(cand)
+
+    return sorted(unavailable)
+
+
 def inventory(database_path: Path, scenes, progress_callback=None) -> dict:
     now = utc_now()
     connection = connect(database_path)
@@ -7624,6 +7668,7 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
         config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
 
     incoming_folders = get_configured_incoming_folders(config)
+    unavailable_roots = get_authoritative_unavailable_roots(database_path, incoming_folders)
     prune_resolved_filing_baseline(database_path, config)
     connection = connect(database_path)
     try:
@@ -7842,6 +7887,11 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                         status_label = "Removal Acknowledged"
                         destination_path = None
                         exists_on_disk = False
+                    elif is_file_on_unavailable_root(path_str, unavailable_roots) or is_file_on_unavailable_root(baseline_path, unavailable_roots):
+                        status_code = "root_unavailable"
+                        status_label = f"{ext.replace('.', '').upper() if ext else 'Non-video'} Companion (Folder Unavailable)"
+                        destination_path = None
+                        exists_on_disk = False
                     else:
                         missing_companion_count += 1
                         status_code = "missing_on_disk"
@@ -7966,6 +8016,11 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                 status_code = "acknowledged_missing"
                 status_label = "Removal Acknowledged"
                 exists_on_disk = False
+            elif is_file_on_unavailable_root(path_str, unavailable_roots) or is_file_on_unavailable_root(baseline_path, unavailable_roots):
+                status_code = "root_unavailable"
+                status_label = "Incoming Folder Unavailable"
+                exists_on_disk = False
+                diag = "Incoming folder unavailable. Reconnect the disk, then recheck."
             else:
                 missing_video_count += 1
                 status_code = "missing_on_disk"
@@ -8031,17 +8086,31 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             "acknowledged_missing_count": acknowledged_missing_count,
             "needs_attention_count": needs_attention_count,
             "ineligible_count": ineligible_count,
+            "unavailable_roots": unavailable_roots,
+            "unavailable_root_count": len(unavailable_roots),
             "items": items
         }
     finally:
         connection.close()
 
 
-def acknowledge_backlog_missing(database_path: Path, file_paths: list[str]) -> dict:
+def acknowledge_backlog_missing(
+    database_path: Path,
+    file_paths: list[str],
+    config: dict = None
+) -> dict:
     """Retire deliberately removed paths while retaining aggregate history."""
     requested = sorted({str(path) for path in (file_paths or []) if str(path).strip()})
     if not requested:
         raise ValueError("At least one missing baseline path is required")
+    incoming_folders = get_configured_incoming_folders(config or {})
+    unavailable_roots = get_authoritative_unavailable_roots(database_path, incoming_folders)
+    for path_str in requested:
+        if is_file_on_unavailable_root(path_str, unavailable_roots):
+            raise ValueError(
+                f"Cannot acknowledge removal: incoming folder is currently unavailable for '{path_str}'. "
+                "Reconnect the disk, then recheck."
+            )
     acknowledged = []
     skipped = []
     connection = connect(database_path)

@@ -1042,3 +1042,12 @@ test("Phase 4 requires explicit Stash scan approval and keeps copy groups review
   assert.match(javascript, /It may appear again in later missing-file checks/);
   assert.match(javascript, /const rechecking = batch\.state === "partially_verified"/);
 });
+
+test("Organiser displays unavailable root warning banner and restricts actions for offline folders", () => {
+  assert.match(javascript, /lm-backlog-unavailable-root-banner/);
+  assert.match(javascript, /Incoming folder unavailable\. Reconnect the disk, then recheck\./);
+  assert.match(javascript, /item\.status === "root_unavailable"/);
+  assert.match(javascript, /"Folder unavailable"/);
+  assert.match(javascript, /"root_unavailable"/);
+  assert.match(css, /\.item-status-pill\.decision\.unavailable/);
+});

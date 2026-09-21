@@ -3109,6 +3109,12 @@ a.lm-activity-scene-pill:hover {
   color: #cbd5e1;
   border: 1px solid rgba(148, 163, 184, 0.25);
 }
+.item-status-pill.decision.unavailable,
+.item-status-pill.root_unavailable {
+  background: rgba(234, 179, 8, 0.15);
+  color: #facc15;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
 .item-status-pill.already_filed,
 .item-status-pill.moved,
 .item-status-pill.duplicate_removed {

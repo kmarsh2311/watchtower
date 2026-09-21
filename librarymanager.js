@@ -5256,6 +5256,33 @@
           ) :
 
           React.createElement("div", null,
+            (backlogData?.unavailable_roots || []).length > 0 && React.createElement("div", {
+              className: "lm-backlog-unavailable-root-banner",
+              style: {
+                background: "rgba(234, 179, 8, 0.12)",
+                border: "1px solid rgba(234, 179, 8, 0.4)",
+                borderRadius: "6px",
+                padding: "10px 14px",
+                marginBottom: "12px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "12px"
+              }
+            },
+              React.createElement("div", null,
+                React.createElement("strong", { style: { color: "#facc15", display: "block", marginBottom: "2px", fontSize: "0.88rem" } }, "⚠️ Incoming folder unavailable"),
+                React.createElement("span", { style: { fontSize: "0.82rem", color: "#e2e8f0" } }, "Incoming folder unavailable. Reconnect the disk, then recheck."),
+                React.createElement("small", { style: { display: "block", color: "#94a3b8", marginTop: "2px", fontSize: "0.76rem" } }, (backlogData.unavailable_roots || []).join(", "))
+              ),
+              React.createElement(Button, {
+                size: "sm",
+                variant: "outline-warning",
+                disabled: busy === "backlog_recheck",
+                onClick: handleRecheckBacklog,
+                style: { whiteSpace: "nowrap", fontSize: "0.76rem" }
+              }, busy === "backlog_recheck" ? "CHECKING…" : "↻ Recheck Files")
+            ),
             React.createElement("div", { className: "lm-backlog-controls" },
               React.createElement("div", { className: "lm-backlog-tabs" },
                 React.createElement("button", { className: backlogTab === "eligible" ? "active" : "", onClick: () => setBacklogTab("eligible") }, `Ready to Evaluate (${backlogData?.eligible_count ?? 0})`),
@@ -5301,7 +5328,7 @@
                 .filter(item => {
                   if (backlogTab === "eligible") return item.eligible;
                   if (backlogTab === "companions") return item.status === "companion";
-                  if (backlogTab === "attention") return ["missing_on_disk", "moved_destination_missing", "needs_recovery", "duplicate_candidate", "exact_duplicate"].includes(item.status);
+                  if (backlogTab === "attention") return ["missing_on_disk", "moved_destination_missing", "needs_recovery", "duplicate_candidate", "exact_duplicate", "root_unavailable"].includes(item.status);
                   if (backlogTab === "history") return ["moved", "duplicate_removed", "acknowledged_missing"].includes(item.status);
                   return true;
                 })
@@ -5311,10 +5338,11 @@
                   const diagnosticParts = String(item.diagnostic || "").split("|").map(part => part.trim()).filter(Boolean);
                   const needsDestination = !item.destination_path && diagnosticParts.some(part => /no destination|destination folder not found/i.test(part));
                   const decisionLabel = item.duplicate_info ? "Duplicate review" :
+                    item.status === "root_unavailable" ? "Folder unavailable" :
                     !item.eligible ? (item.status_label || "Not ready") :
                     item.destination_path ? "Destination found" :
                     needsDestination ? "Destination needed" : "Ready to evaluate";
-                  const decisionClass = item.duplicate_info ? "duplicate" : item.destination_path ? "destination-found" : needsDestination ? "destination-needed" : "ready";
+                  const decisionClass = item.duplicate_info ? "duplicate" : item.status === "root_unavailable" ? "unavailable" : item.destination_path ? "destination-found" : needsDestination ? "destination-needed" : "ready";
                   return React.createElement("div", {
                     key: item.path || idx,
                     className: `lm-backlog-item ${item.eligible ? "eligible" : "ineligible"} ${isChecked ? "selected" : ""}`,
@@ -5387,6 +5415,18 @@
                           }, busy === `duplicate_verify:${item.path}` ? "VERIFYING…" :
                              busy === `duplicate_delete:${item.path}` ? "DELETING…" :
                              item.duplicate_info.checksum_status === "verified" ? "DELETE EXACT DUPLICATE…" : "VERIFY EXACT DUPLICATE")
+                        )
+                      ) : item.status === "root_unavailable" ? React.createElement("div", { className: "lm-missing-file-help" },
+                        React.createElement("p", { style: { color: "#facc15" } },
+                          "Incoming folder unavailable. Reconnect the disk, then recheck."
+                        ),
+                        React.createElement("div", { className: "lm-backlog-item-actions" },
+                          React.createElement("button", {
+                            type: "button",
+                            className: "lm-terminal-btn retry",
+                            disabled: !busy,
+                            onClick: event => { event.stopPropagation(); handleRecheckBacklog(); }
+                          }, "↻ RECHECK FILES")
                         )
                       ) : ["missing_on_disk", "moved_destination_missing"].includes(item.status) ? React.createElement("div", { className: "lm-missing-file-help" },
                         React.createElement("p", null,

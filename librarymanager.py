@@ -1938,7 +1938,9 @@ def main():
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "acknowledge_backlog_missing":
         paths = (plugin_input.get("args") or {}).get("paths") or []
-        result = acknowledge_backlog_missing(database_path, paths)
+        stash = StashInterface(plugin_input["server_connection"]) if "server_connection" in plugin_input else None
+        config = filing_config_with_library_roots(stash) if stash else None
+        result = acknowledge_backlog_missing(database_path, paths, config=config)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "evaluate_backlog_batch":
         args = plugin_input.get("args") or {}
