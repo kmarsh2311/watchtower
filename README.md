@@ -79,7 +79,11 @@ Watchtower tracks changes made externally in Finder, File Explorer, or command-l
 #### 📋 Operational Modes Summary:
 * **Fully Automatic**: Unambiguous single-file moves on active monitored library roots, companion sidecar re-linking, and settling timers.
 * **Review & Approval Required**: Entire folder renames, multi-file folder relocations, cross-volume transfers, and duplicate copy groups.
-* **Safeguarded Limitations**: Offline/unmounted network drives are protected from destructive sweeps and display warning banners until reconnected; ambiguous duplicate files with identical sizes remain in Needs Attention for manual selection.
+
+#### ⚠️ Documented Edge Cases & Boundaries:
+* **Offline / Unmounted Storage**: If a drive disconnects during an external move, Watchtower retains the in-flight state without destructive sweeps. Full reconciliation is gated until the drive reconnects.
+* **External Re-encoding / Content Alteration**: If a file's binary content or size changes during an external move (e.g., external transcoding), `OSHash` and size verification will intentionally fail, and the item will be routed to `partial_review` rather than risking incorrect metadata assignment.
+* **Multi-Destination Folder Splitting**: If a folder's contents are scattered across multiple disparate directories simultaneously, items that do not share a common destination prefix are evaluated as individual file movements rather than a single folder batch.
 
 ---
 

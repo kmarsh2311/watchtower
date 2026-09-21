@@ -10,6 +10,7 @@
 - **Duplicate & Copy Group Safety**: Classifies copied folders as duplicate content (`folder_copy`) rather than moves, preserving original scene identities and requiring explicit user review before any new scene ingest.
 - **Daemon Restart & Crash Resilience**: All grouped batches and member states are durably tracked in SQLite. Interrupted or in-flight reconciliations automatically recover and resume upon Watchtower restart.
 - **Single-File Move Automation**: Unambiguous single-file moves on the same monitored library root continue to reconnect automatically in real-time.
+- **Explicit Boundary Handling**: Documented behavior for offline mounts (gated until reconnect), externally re-encoded files (routed to partial review on checksum mismatch), and multi-destination folder splits.
 
 ### 📁 Backlog Organiser & Ingest Reliability (Work Package A)
 - **Dynamic Backlog Working Set**: The Backlog Organiser dynamically tracks real-time unresolved files, retiring completed or moved items immediately.
@@ -19,7 +20,7 @@
 - **Cached Dynamic Directory Discovery**: Substantially accelerated folder discovery through intelligent TTL-bounded caching.
 
 ### 🏷️ Video Quality Filename Token (Work Package B)
-- **Optional Canonical Quality Token**: Added `includeVideoQuality` option to embed standard resolution tags (e.g. `[1080p]`, `[720p]`, `[4K]`) into filenames.
+- **Optional Canonical Quality Token**: Added `includeVideoQuality` option to embed standard resolution tags (e.g. `[1080p]`, `[720p]`, `[2160p]`) into filenames.
 - **Configurable Token Placement**: Choose `start` (prefix) or `end` (suffix) positioning with responsive inline UI controls.
 - **Zero-Rescan Ingestion Resolution**: Stored video dimensions from Stash's files table supply the resolution immediately for canonical filenames and read-only test previews without requiring full library rescans.
 
