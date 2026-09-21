@@ -525,6 +525,8 @@ test("Backlog Organiser UI: selection, stats badges, confirmation modal, progres
   assert.match(javascript, /Destination needed/);
   assert.match(css, /\.lm-backlog-stat-group/);
   assert.match(css, /\.lm-backlog-item-details/);
+  assert.match(css, /\.lm-backlog-stat \.stat-label[\s\S]*min-height: 2\.5em/);
+  assert.match(css, /\.lm-backlog-stat \.stat-sub[\s\S]*min-height: 2\.6em/);
 });
 
 test("backlog evaluation preserves filenames and exact reasons behind summary counts", () => {
