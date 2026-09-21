@@ -2685,6 +2685,24 @@
             const isMoveGroup = batch.operation_type === "folder_move" || batch.operation_type === "bulk_move";
             const isResumable = batch.state === "scanning" || batch.state === "verifying";
             const isPartiallyVerified = batch.state === "partially_verified";
+            const hasStashCleanGuidance = uncertainMembers.some(member =>
+              String(member.reason || "").includes("run Stash Clean")
+            );
+            const renderGroupedMember = member => React.createElement("div", {
+              className: `lm-grouped-member ${member.state === "verified" ? "ready" : "uncertain"}`,
+              key: `grouped-${batch.id}-member-${member.id}`
+            },
+              React.createElement("div", null,
+                React.createElement("a", {
+                  href: `/scenes/${member.scene_id}`,
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                  className: "lm-terminal-link"
+                }, `Open Scene #${member.scene_id}`),
+                ` • File #${member.file_id} • ${member.state.toUpperCase()}`),
+              React.createElement("div", { className: "lm-grouped-path" }, `Old: ${member.old_path}`),
+              React.createElement("div", { className: "lm-grouped-path" }, `Expected: ${member.expected_path || "No verified destination path"}`),
+              React.createElement("div", { className: "lm-grouped-reason" }, member.reason || "No additional detail"));
             const operationLabel = ({
               folder_move: "FOLDER MOVED",
               bulk_move: "FILES MOVED",
@@ -2709,27 +2727,20 @@
                   : `${readyMembers.length} path${readyMembers.length === 1 ? "" : "s"} match the inferred folder mapping. ${uncertainMembers.length
                     ? `${uncertainMembers.length} item${uncertainMembers.length === 1 ? " remains" : "s remain"} uncertain and will not be reconciled automatically.`
                     : "All tracked paths are ready for a later verified reconciliation step."}`),
-              React.createElement("details", { className: "lm-grouped-members" },
+              isPartiallyVerified && React.createElement("div", { className: "lm-grouped-members" },
+                React.createElement("strong", null, `Items requiring review (${uncertainMembers.length})`),
+                React.createElement("div", { className: "lm-grouped-member-list" }, uncertainMembers.map(renderGroupedMember))),
+              isPartiallyVerified && React.createElement("details", { className: "lm-grouped-members" },
+                React.createElement("summary", null, `Verified successfully (${verifiedMembers.length})`),
+                React.createElement("div", { className: "lm-grouped-member-list" }, verifiedMembers.map(renderGroupedMember))),
+              !isPartiallyVerified && React.createElement("details", { className: "lm-grouped-members" },
                 React.createElement("summary", null, `Review ${members.length} tracked item${members.length === 1 ? "" : "s"}`),
-                React.createElement("div", { className: "lm-grouped-member-list" },
-                  members.map(member => React.createElement("div", {
-                    className: `lm-grouped-member ${member.state === "ready" ? "ready" : "uncertain"}`,
-                    key: `grouped-${batch.id}-member-${member.id}`
-                  },
-                    React.createElement("div", null,
-                      React.createElement("a", {
-                        href: `/scenes/${member.scene_id}`,
-                        target: "_blank",
-                        rel: "noopener noreferrer",
-                        className: "lm-terminal-link"
-                      }, `Scene #${member.scene_id}`),
-                      ` • File #${member.file_id} • ${member.state.toUpperCase()}`),
-                    React.createElement("div", { className: "lm-grouped-path" }, member.old_path),
-                    React.createElement("div", { className: "lm-grouped-path" }, `→ ${member.expected_path || "No verified destination path"}`),
-                    React.createElement("div", { className: "lm-grouped-reason" }, member.reason || "No additional detail"))))),
+                React.createElement("div", { className: "lm-grouped-member-list" }, members.map(renderGroupedMember))),
               React.createElement("p", { className: "lm-terminal-attention-fix" },
                 isPartiallyVerified
-                  ? "The destination scan completed. Expand the tracked items to review the remaining Stash scene/file identity conflicts."
+                  ? (hasStashCleanGuidance
+                    ? "Recovery order: 1. Open the affected scene and confirm it plays from the new path. 2. In Stash, run Clean to remove the missing old attachment. 3. Return here and click Recheck After Stash Clean. Do not dismiss the group before rechecking."
+                    : "Watchtower has not yet established why these records failed verification. Click Diagnose Remaining first. Do not run Stash Clean or dismiss the group yet.")
                   : isMoveGroup
                   ? "Approval asks Stash to scan the destination folder; Watchtower then verifies every original scene and file identity."
                   : "Copy groups are review-only and cannot trigger a Stash scan."),
@@ -2741,7 +2752,9 @@
                   onClick: () => executeGroupedReconciliation(batch)
                 }, busy === `grouped-execute:${batch.id}`
                   ? "VERIFYING…"
-                  : (isResumable ? "⟳ RESUME VERIFICATION" : (isPartiallyVerified ? "⟳ RECHECK AFTER STASH CLEAN" : "✓ SCAN & VERIFY MOVE"))),
+                  : (isResumable ? "⟳ RESUME VERIFICATION" : (isPartiallyVerified
+                    ? (hasStashCleanGuidance ? "⟳ RECHECK AFTER STASH CLEAN" : `⌕ DIAGNOSE ${uncertainMembers.length} REMAINING`)
+                    : "✓ SCAN & VERIFY MOVE"))),
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn dismiss",

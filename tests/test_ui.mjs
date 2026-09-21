@@ -975,7 +975,7 @@ test("Phase 3 presents one expandable grouped review without destructive actions
   assert.match(javascript, /data\?\.grouped_reconciliation \|\| \[\]/);
   assert.match(javascript, /FOLDER MOVED/);
   assert.match(javascript, /Review .* tracked item/);
-  assert.match(javascript, /Scene #\$\{member\.scene_id\}/);
+  assert.match(javascript, /Open Scene #\$\{member\.scene_id\}/);
   assert.match(javascript, /File #\$\{member\.file_id\}/);
   assert.match(javascript, /member\.reason \|\| "No additional detail"/);
   assert.match(javascript, /Copy groups are review-only and cannot trigger a Stash scan/);
@@ -1001,7 +1001,12 @@ test("Phase 4 requires explicit Stash scan approval and keeps copy groups review
   assert.match(javascript, /SCAN & VERIFY MOVE/);
   assert.match(javascript, /Grouped verification completed: \$\{verifiedCount\} verified, \$\{remainingCount\} still need review/);
   assert.match(javascript, /tracked file records were verified in Stash/);
-  assert.match(javascript, /The destination scan completed\. Expand the tracked items/);
+  assert.match(javascript, /Items requiring review/);
+  assert.match(javascript, /Verified successfully/);
+  assert.match(javascript, /Click Diagnose Remaining first\. Do not run Stash Clean/);
+  assert.match(javascript, /Open the affected scene and confirm it plays from the new path/);
+  assert.match(javascript, /Do not dismiss the group before rechecking/);
+  assert.match(javascript, /DIAGNOSE \$\{uncertainMembers\.length\} REMAINING/);
   assert.match(javascript, /RECHECK AFTER STASH CLEAN/);
   assert.match(javascript, /const rechecking = batch\.state === "partially_verified"/);
 });
