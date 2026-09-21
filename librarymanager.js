@@ -138,6 +138,11 @@
     return data.configurePlugin;
   }
 
+  function startMonitorAndRemember(operationFn, updateSettingFn) {
+    return operationFn("ensure_monitor").then(result =>
+      Promise.resolve(updateSettingFn("autoStartMonitor", true)).then(() => result));
+  }
+
   async function runTask(name) {
     const allowed = new Set([
       ...Object.values(readOnlyTasks), "Preview Configured Test Rename", "Apply Configured Test Rename",
@@ -2553,8 +2558,7 @@
                   setError("");
                   try {
                     await operation("stop_monitor");
-                    await updateSetting("autoStartMonitor", true);
-                    await operation("ensure_monitor");
+                    await startMonitorAndRemember(operation, updateSetting);
                     await refresh();
                     setNotice("Filesystem watcher restarted successfully.");
                   } catch (err) {
@@ -2597,8 +2601,7 @@
                   setError("");
                   try {
                     await operation("stop_monitor");
-                    await updateSetting("autoStartMonitor", true);
-                    await operation("ensure_monitor");
+                    await startMonitorAndRemember(operation, updateSetting);
                     await refresh();
                     setNotice("Filesystem watcher restarted successfully.");
                   } catch (err) {
@@ -2639,8 +2642,7 @@
                 setBusy("start_monitor");
                 setError("");
                 try {
-                  await updateSetting("autoStartMonitor", true);
-                  await operation("ensure_monitor");
+                  await startMonitorAndRemember(operation, updateSetting);
                   await refresh();
                   setNotice("Filesystem watcher started successfully.");
                 } catch (err) {

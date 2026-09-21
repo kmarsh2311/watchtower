@@ -496,6 +496,21 @@ def configure_system_startup(enabled, server_connection, database_path):
 configure_macos_startup = configure_system_startup
 
 
+def monitor_process_launch_options(platform=None):
+    """Return platform-specific options that isolate the long-running monitor.
+
+    ``start_new_session`` only provides the required isolation on POSIX.  A
+    native Windows child otherwise remains attached to Stash's console and can
+    receive the console control event used to finish a plugin operation.
+    """
+    platform = platform or sys.platform
+    if platform == "win32":
+        detached_process = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        new_process_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        return {"creationflags": detached_process | new_process_group}
+    return {"start_new_session": True}
+
+
 def start_filesystem_monitor(stash, database_path, server_connection=None):
     current = filesystem_monitor_summary(database_path)
     if current.get("state") in ("running", "starting") and current.get("pid"):
@@ -542,14 +557,16 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
     }), encoding="utf-8")
     runtime_path.chmod(0o600)
     log_handle = open(log_path, "ab", buffering=0)
-    process = subprocess.Popen(
-        [sys.executable, str(Path(__file__).with_name("librarymanager_monitor.py")),
-         "--database", str(database_path), "--control", str(control_path),
-         "--token", token, "--roots-json", json.dumps(roots), "--runtime", str(runtime_path)],
-        stdin=subprocess.DEVNULL, stdout=log_handle, stderr=log_handle,
-        start_new_session=True, close_fds=True,
-    )
-    log_handle.close()
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).with_name("librarymanager_monitor.py")),
+             "--database", str(database_path), "--control", str(control_path),
+             "--token", token, "--roots-json", json.dumps(roots), "--runtime", str(runtime_path)],
+            stdin=subprocess.DEVNULL, stdout=log_handle, stderr=log_handle,
+            close_fds=True, **monitor_process_launch_options(),
+        )
+    finally:
+        log_handle.close()
     # StashInterface initialization can take several seconds on a busy or newly
     # upgraded Stash instance. Do not report a failed restart while the child
     # is still starting successfully in the background.

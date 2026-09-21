@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import librarymanager_core
 import librarymanager_monitor
+import librarymanager
 
 from librarymanager_core import (build_merge_preview, build_resolution_plan, inventory,
                                  opensubtitles_hash, preview_safe_filenames, preview_scene_filename,
@@ -26,13 +27,47 @@ from librarymanager_core import _should_strip_metadata_from_title
 from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             contact_sheet_scope_name, get_configured_incoming_folders,
                             incoming_folder_status, incoming_folders_status,
-                            maybe_auto_restart_monitor, read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
+                            maybe_auto_restart_monitor, monitor_process_launch_options,
+                            read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
                             start_filesystem_monitor, write_inventory_progress)
 from librarymanager_monitor import (CompletedDownloadWorker, claim_monitor_ownership, relocate_companions_transactionally,
                                     reload_monitor_if_code_changed, tracked_move)
 
 
 class InventoryTests(unittest.TestCase):
+    def test_windows_monitor_launch_is_detached_from_stash_console(self):
+        with patch.object(librarymanager.subprocess, "DETACHED_PROCESS", 0x08, create=True), \
+                patch.object(librarymanager.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True):
+            options = monitor_process_launch_options("win32")
+        self.assertEqual(options, {"creationflags": 0x208})
+        self.assertNotIn("start_new_session", options)
+
+    def test_posix_monitor_launch_starts_new_session(self):
+        self.assertEqual(monitor_process_launch_options("darwin"), {"start_new_session": True})
+
+    def test_monitor_start_passes_windows_isolation_to_child_process(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            database = root / "inventory.sqlite3"
+            process = MagicMock()
+            process.poll.return_value = None
+            stopped = {"state": "stopped", "pid": None}
+            running = {"state": "running", "pid": 4321, "is_stale": False}
+            stash = MagicMock()
+            stash.find_plugin_config.return_value = {}
+            with patch("librarymanager.fetch_library_roots", return_value=[str(root)]), \
+                    patch("librarymanager.filesystem_monitor_summary", side_effect=[stopped, running]), \
+                    patch("librarymanager.monitor_process_launch_options",
+                          return_value={"creationflags": 0x208}), \
+                    patch("librarymanager.subprocess.Popen", return_value=process) as popen, \
+                    patch("librarymanager.time.sleep"):
+                result = start_filesystem_monitor(stash, database, {})
+
+            self.assertEqual(result["state"], "running")
+            launch_options = popen.call_args.kwargs
+            self.assertEqual(launch_options["creationflags"], 0x208)
+            self.assertNotIn("start_new_session", launch_options)
+
     def test_detached_monitor_reloads_when_installed_code_changes(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

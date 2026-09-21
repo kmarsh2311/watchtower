@@ -40,6 +40,30 @@ function loadNamedFunction(name) {
   throw new Error(`Could not parse ${name}`);
 }
 
+test("watcher auto-start preference is saved only after startup succeeds", async () => {
+  const startMonitorAndRemember = loadNamedFunction("startMonitorAndRemember");
+  const calls = [];
+  const result = await startMonitorAndRemember(
+    async (mode) => { calls.push(["operation", mode]); return { state: "running" }; },
+    async (key, value) => { calls.push(["setting", key, value]); }
+  );
+  assert.deepEqual(result, { state: "running" });
+  assert.deepEqual(calls, [
+    ["operation", "ensure_monitor"],
+    ["setting", "autoStartMonitor", true]
+  ]);
+
+  const failedCalls = [];
+  await assert.rejects(
+    startMonitorAndRemember(
+      async () => { failedCalls.push("operation"); throw new Error("monitor failed"); },
+      async () => { failedCalls.push("setting"); }
+    ),
+    /monitor failed/
+  );
+  assert.deepEqual(failedCalls, ["operation"]);
+});
+
 test("Command Centre presents unresolved changes as actions, not completed work", () => {
   assert.match(javascript, /NEEDS ATTENTION/);
   assert.match(javascript, /Video deletion detected/);
