@@ -86,8 +86,10 @@ def test_likely_transcoder_name_rules_are_conservative():
 
 def test_compatibility_remains_explicitly_opt_in():
     stash = MagicMock()
-    assert MoveWorker(Path('/tmp/unused'), stash, True, False, False).transcoder_compatibility is False
-    assert MoveWorker(Path('/tmp/unused'), stash, True, False, True).transcoder_compatibility is True
+    with tempfile.TemporaryDirectory() as td:
+        database = Path(td) / 'db.sqlite3'
+        assert MoveWorker(database, stash, True, False, False).transcoder_compatibility is False
+        assert MoveWorker(database, stash, True, False, True).transcoder_compatibility is True
 
 
 def test_delete_first_waits_for_decision_window_then_submits_one_candidate():
