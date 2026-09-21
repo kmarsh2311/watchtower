@@ -5063,7 +5063,6 @@
             React.createElement("details", { className: "lm-backlog-history-summary" },
               React.createElement("summary", null, "Activity summary"),
               React.createElement("p", null,
-                `${(backlogData?.baseline_total ?? backlogData?.total_count ?? 0).toLocaleString()} files recorded in the original snapshot · `,
                 `${(backlogData?.verified_moved_count ?? 0).toLocaleString()} verified as filed · `,
                 `${(backlogData?.resolved_duplicate_count ?? 0).toLocaleString()} verified incoming copies removed · `,
                 `${(backlogData?.acknowledged_missing_count ?? 0).toLocaleString()} removals acknowledged`
@@ -5258,8 +5257,7 @@
                 React.createElement("button", { className: backlogTab === "eligible" ? "active" : "", onClick: () => setBacklogTab("eligible") }, `Ready to Evaluate (${backlogData?.eligible_count ?? 0})`),
                 React.createElement("button", { className: backlogTab === "companions" ? "active" : "", onClick: () => setBacklogTab("companions") }, `Companions (${backlogData?.remaining_companion_count ?? backlogData?.companion_count ?? 0})`),
                 React.createElement("button", { className: backlogTab === "attention" ? "active" : "", onClick: () => setBacklogTab("attention") }, `Needs Attention (${backlogData?.needs_attention_count ?? ((backlogData?.missing_count ?? 0) + (backlogData?.duplicate_review_count ?? 0))})`),
-                React.createElement("button", { className: backlogTab === "history" ? "active" : "", onClick: () => setBacklogTab("history") }, "History"),
-                React.createElement("button", { className: backlogTab === "all" ? "active" : "", onClick: () => setBacklogTab("all") }, `All Files (${backlogData?.total_count ?? 0})`)
+                React.createElement("button", { className: backlogTab === "history" ? "active" : "", onClick: () => setBacklogTab("history") }, "History")
               ),
               React.createElement("div", { style: { display: "flex", gap: "8px", alignItems: "center" } },
                 React.createElement(Button, {
@@ -5276,7 +5274,7 @@
                   value: backlogSearch,
                   onChange: (e) => setBacklogSearch(e.target.value)
                 }),
-                backlogTab === "eligible" || backlogTab === "all" ? React.createElement(React.Fragment, null,
+                backlogTab === "eligible" ? React.createElement(React.Fragment, null,
                   React.createElement(Button, {
                     size: "sm",
                     variant: "outline-info",

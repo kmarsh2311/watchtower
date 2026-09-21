@@ -972,6 +972,8 @@ test("Backlog separates current missing files from retained activity history", (
   assert.match(javascript, /The original baseline history will be retained/);
   assert.doesNotMatch(javascript, /"Protected Baseline"/);
   assert.doesNotMatch(javascript, /"Ineligible \/ Filed/);
+  assert.doesNotMatch(javascript, /`All Files \(/);
+  assert.doesNotMatch(javascript, /files recorded in the original snapshot/);
 });
 
 test("Exact duplicate repair requires verification and keeps companion deletion optional", () => {
