@@ -677,7 +677,12 @@ configure_macos_startup = configure_system_startup
 
 
 def monitor_process_launch_options(platform=None):
-    """Return platform-specific options that isolate the long-running monitor."""
+    """Return platform-specific options that isolate the long-running monitor.
+
+    ``start_new_session`` only provides the required isolation on POSIX.  A
+    native Windows child otherwise remains attached to Stash's console and can
+    receive the console control event used to finish a plugin operation.
+    """
     platform = platform or sys.platform
     if platform == "win32":
         detached_process = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)

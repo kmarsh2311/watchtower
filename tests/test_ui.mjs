@@ -48,7 +48,10 @@ test("watcher auto-start preference is saved only after startup succeeds", async
     async (key, value) => { calls.push(["setting", key, value]); }
   );
   assert.deepEqual(result, { state: "running" });
-  assert.deepEqual(calls, [["operation", "ensure_monitor"], ["setting", "autoStartMonitor", true]]);
+  assert.deepEqual(calls, [
+    ["operation", "ensure_monitor"],
+    ["setting", "autoStartMonitor", true]
+  ]);
   const failedCalls = [];
   await assert.rejects(
     startMonitorAndRemember(

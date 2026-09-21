@@ -1985,6 +1985,7 @@ def _windows_pid_alive(pid: int) -> bool:
 
     handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
     if not handle:
+        # Access denied still proves that the process exists.
         return ctypes.get_last_error() == 5
     try:
         exit_code = wintypes.DWORD()

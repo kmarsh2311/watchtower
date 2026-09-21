@@ -86,7 +86,7 @@ def test_plugin_reload_while_monitor_already_running_creates_no_duplicate_startu
         running_summary = {"state": "running", "pid": 9999, "is_stale": False, "raw_state": "running"}
 
         with patch("librarymanager.filesystem_monitor_summary", return_value=running_summary), \
-             patch("librarymanager.os.kill"):
+             patch("librarymanager._is_pid_alive", return_value=True):
             res = start_filesystem_monitor(stash, db)
 
         # Probing confirms process is alive; no new process spawned

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.12 — 2026-09-21
+
+- Isolate the native Windows filesystem monitor from Stash's console so plugin-operation cleanup cannot interrupt the watcher or terminate Stash.
+- Replace Unix-style PID signal probes with non-destructive Windows process-handle checks, preventing liveness checks from terminating the watcher or an unrelated reused PID.
+- Save Automatically Start Filesystem Monitor only after watcher startup succeeds, preventing failed starts from enabling an automatic retry loop.
+- Preserve the existing detached monitor behaviour on macOS and Linux.
+
 ## 1.0.11 — 2026-09-19
 
 - File-move reliability & transient retry: bounded retries with exponential backoff for transient filesystem permission and lock errors (EPERM, EACCES, EBUSY) during moved file verification, preserving moves for safe later retry rather than abandoning them.

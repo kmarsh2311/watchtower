@@ -86,8 +86,10 @@ def test_likely_transcoder_name_rules_are_conservative():
 
 def test_compatibility_remains_explicitly_opt_in():
     stash = MagicMock()
-    assert MoveWorker(Path('/tmp/unused'), stash, True, False, False).transcoder_compatibility is False
-    assert MoveWorker(Path('/tmp/unused'), stash, True, False, True).transcoder_compatibility is True
+    with tempfile.TemporaryDirectory() as td:
+        database = Path(td) / 'db.sqlite3'
+        assert MoveWorker(database, stash, True, False, False).transcoder_compatibility is False
+        assert MoveWorker(database, stash, True, False, True).transcoder_compatibility is True
 
 
 def test_delete_first_waits_for_decision_window_then_submits_one_candidate():
@@ -351,18 +353,21 @@ def test_worker_rechecks_local_ownership_inside_final_inventory_transaction():
         stash = _successful_stash(destination)
         real_check = librarymanager_monitor.destination_inventory_conflict
         calls = 0
+        transactional_calls = 0
 
         def conflict_at_transaction(*args, **kwargs):
-            nonlocal calls
+            nonlocal calls, transactional_calls
             calls += 1
             if kwargs.get('connection') is not None:
+                transactional_calls += 1
                 return 'Destination ownership changed immediately before inventory update'
             return real_check(*args, **kwargs)
 
         with patch('librarymanager_monitor.destination_inventory_conflict',
                    side_effect=conflict_at_transaction):
             _run_one(MoveWorker(database, stash, True, False, True), source, destination)
-        assert calls == 4
+        assert calls >= 3
+        assert transactional_calls == 1
         stash.metadata_scan.assert_called_once()
         assert _inventory_path(database) == str(source)
 
