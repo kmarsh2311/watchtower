@@ -763,6 +763,8 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
         _safe_alter(connection, "file_checksum_cache", "inode",
                     "ALTER TABLE file_checksum_cache ADD COLUMN inode INTEGER")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_checksum_cache_file_id ON file_checksum_cache(file_id)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_filesystem_events_status ON filesystem_events(status)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_status ON filesystem_reconciliation_runs(status)")
         connection.execute(
             """UPDATE inventory_runs SET stash_scene_count=(SELECT COUNT(DISTINCT scene_id) FROM files)
                WHERE status='complete' AND stash_scene_count=0"""
@@ -778,6 +780,91 @@ def connect(database_path: Path) -> sqlite3.Connection:
     connection.execute("PRAGMA foreign_keys=ON")
     _ensure_schema(connection, database_path)
     return connection
+
+
+def prune_operational_records(database_path: Path) -> dict:
+    """Safely bound historical operational tables without pruning pending/actionable records.
+    - Preserves all pending proposals, active incoming files, and unreviewed events indefinitely.
+    - Limits historical completed/resolved logs to recent bounded counts for diagnosis/audit.
+    - Runs incrementally without expensive full-table scans on every refresh.
+    """
+    connection = connect(database_path)
+    pruned = {}
+    try:
+        # 1. Resolved filesystem events (keep pending indefinitely, bound resolved to 2,000)
+        cur = connection.execute(
+            """DELETE FROM filesystem_events
+               WHERE status != 'pending'
+                 AND rowid NOT IN (
+                     SELECT rowid FROM filesystem_events
+                     WHERE status != 'pending'
+                     ORDER BY rowid DESC LIMIT 2000
+                 )"""
+        )
+        pruned["filesystem_events"] = cur.rowcount
+
+        # 2. Resolved filing proposals (keep pending and needs_recovery indefinitely, bound resolved to 1,000)
+        cur = connection.execute(
+            """DELETE FROM filing_proposals
+               WHERE status NOT IN ('pending', 'needs_recovery')
+                 AND id NOT IN (
+                     SELECT id FROM filing_proposals
+                     WHERE status NOT IN ('pending', 'needs_recovery')
+                     ORDER BY id DESC LIMIT 1000
+                 )"""
+        )
+        pruned["filing_proposals"] = cur.rowcount
+
+        # 3. Reconciliation runs and proposals (keep active/running, bound completed runs to 50)
+        connection.execute(
+            """DELETE FROM filesystem_reconciliation_proposals
+               WHERE run_id IN (
+                   SELECT id FROM filesystem_reconciliation_runs
+                   WHERE status != 'running'
+                     AND id NOT IN (
+                         SELECT id FROM filesystem_reconciliation_runs
+                         ORDER BY id DESC LIMIT 50
+                     )
+               )"""
+        )
+        cur = connection.execute(
+            """DELETE FROM filesystem_reconciliation_runs
+               WHERE status != 'running'
+                 AND id NOT IN (
+                     SELECT id FROM filesystem_reconciliation_runs
+                     ORDER BY id DESC LIMIT 50
+                 )"""
+        )
+        pruned["reconciliation_runs"] = cur.rowcount
+
+        # 4. Duplicate repairs (bound completed to 1,000)
+        cur = connection.execute(
+            """DELETE FROM duplicate_file_repairs
+               WHERE status != 'processing'
+                 AND candidate_path NOT IN (
+                     SELECT candidate_path FROM duplicate_file_repairs
+                     WHERE status != 'processing'
+                     ORDER BY rowid DESC LIMIT 1000
+                 )"""
+        )
+        pruned["duplicate_repairs"] = cur.rowcount
+
+        # 5. Stale incoming files (keep active states indefinitely, bound imported/ignored to 1,000)
+        cur = connection.execute(
+            """DELETE FROM incoming_files
+               WHERE status IN ('imported', 'ignored')
+                 AND path NOT IN (
+                     SELECT path FROM incoming_files
+                     WHERE status IN ('imported', 'ignored')
+                     ORDER BY rowid DESC LIMIT 1000
+                 )"""
+        )
+        pruned["incoming_files"] = cur.rowcount
+
+        connection.commit()
+        return pruned
+    finally:
+        connection.close()
 
 
 def record_activity(database_path: Path, category: str, action: str, status: str, *, severity: str = "info",
