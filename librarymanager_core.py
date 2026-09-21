@@ -417,6 +417,49 @@ COMPANION_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".gif", ".nfo", ".json", ".xml", ".sub", ".idx",
     ".csm.jpg", ".csm.png", ".csm.webp",
 }
+TEMPORARY_DOWNLOAD_EXTENSIONS = {
+    ".part", ".partial", ".crdownload", ".download", ".tmp", ".temp", ".!qb", ".mega", ".aria2",
+}
+ACTIVE_INCOMING_LIFECYCLE_STATUSES = {
+    "waiting", "downloading", "scanning", "generating_sheet", "renaming",
+}
+
+
+def is_temporary_download(path) -> bool:
+    """Return True if the file path represents a temporary or partial browser/downloader file."""
+    if not path:
+        return False
+    try:
+        p = Path(path)
+        name = p.name.lower()
+        suffix = p.suffix.lower()
+        if suffix in TEMPORARY_DOWNLOAD_EXTENSIONS:
+            return True
+        if name.startswith(".com.google.chrome.") or name.startswith("com.google.chrome."):
+            return True
+        if name.startswith("unconfirmed ") and (name.endswith(".crdownload") or ".crdownload" in name):
+            return True
+        if name.endswith(".crdownload"):
+            return True
+        for ext in TEMPORARY_DOWNLOAD_EXTENSIONS:
+            if name.endswith(ext):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def is_actionable_incoming_file(path, active_status: str | None = None) -> bool:
+    """Return True if path is a completed, settled video or companion file ready for organiser action."""
+    if not path or is_temporary_download(path):
+        return False
+    if active_status and active_status in ACTIVE_INCOMING_LIFECYCLE_STATUSES:
+        return False
+    try:
+        ext = Path(path).suffix.lower()
+        return ext in VIDEO_EXTENSIONS or ext in COMPANION_EXTENSIONS
+    except Exception:
+        return False
 
 
 def is_verified_companion_destination(connection, destination_path: str, source_path: str | None = None) -> bool:
@@ -7750,6 +7793,16 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                 candidate = renamed_paths[candidate]
             return candidate if Path(candidate).is_file() else original_path
 
+        # Read active incoming lifecycle states to avoid displaying half-downloaded or settling files
+        active_incoming_states = {}
+        diagnostics_by_path = {}
+        for inc_row in connection.execute(
+            "SELECT path, filing_diagnostic, status FROM incoming_files"
+        ).fetchall():
+            active_incoming_states[inc_row["path"]] = inc_row["status"]
+            if inc_row["filing_diagnostic"]:
+                diagnostics_by_path[inc_row["path"]] = inc_row["filing_diagnostic"]
+
         # The immutable baseline protects original files, but it must not freeze
         # the organiser's working list forever. Add files that currently exist
         # in Incoming without hashing them or scanning any library destination.
@@ -7765,6 +7818,8 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                     current_path = Path(root) / filename
                     current_path_str = str(current_path)
                     if current_path_str in represented_current_paths:
+                        continue
+                    if not is_actionable_incoming_file(current_path, active_incoming_states.get(current_path_str)):
                         continue
                     try:
                         stat = current_path.stat()
@@ -7809,12 +7864,7 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             ):
                 verified_moved_proposals_by_src[src] = proposal
 
-        diagnostics_by_path = {}
-        for inc_row in connection.execute(
-            "SELECT path, filing_diagnostic, status FROM incoming_files"
-        ).fetchall():
-            if inc_row["filing_diagnostic"]:
-                diagnostics_by_path[inc_row["path"]] = inc_row["filing_diagnostic"]
+
 
         for row in rows:
             baseline_path = row["path"]

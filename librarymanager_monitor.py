@@ -379,7 +379,8 @@ from librarymanager_core import (
     evaluate_filing_proposal, snapshot_incoming_baseline, is_filing_baseline_established, invalidate_stale_filing_proposals,
     is_verified_companion_destination,
     expect_filesystem_create, expect_filesystem_move, fingerprint_value,
-    is_file_on_unavailable_root,
+    is_file_on_unavailable_root, is_temporary_download, is_actionable_incoming_file,
+    TEMPORARY_DOWNLOAD_EXTENSIONS, ACTIVE_INCOMING_LIFECYCLE_STATUSES,
                                  opensubtitles_hash, record_activity, record_filesystem_event, record_monitor_lifecycle,
                                  resolve_filesystem_event, refresh_scene_inventory, utc_now,
                                  process_next_checksum_job, reset_checksum_jobs_for_monitor_restart, _is_pid_alive)
