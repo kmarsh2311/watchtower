@@ -245,5 +245,56 @@ class QualityFilenameTokenTests(unittest.TestCase):
             self.assertEqual(Path(preview_ui["proposed_path"]).name, "Onlyfans Cole Bentley Billy Essex - [720p].mp4")
 
 
+    def test_14_preview_is_strictly_readonly_and_preserves_disk_and_protection(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            database = Path(temp_dir) / "test.sqlite"
+            video = Path(temp_dir) / "Onlyfans Cole Bentley Billy Essex.mp4"
+            video.write_bytes(b"sample video content")
+            scene = {
+                "id": "6393",
+                "title": "",
+                "files": [{
+                    "id": "13154",
+                    "path": str(video),
+                    "basename": video.name,
+                    "width": 404,
+                    "height": 720,
+                    "size": 20,
+                    "fingerprints": []
+                }],
+            }
+            inventory(database, [scene])
+            preview_scene_filename(database, "6393")
+
+            # Mark file as rename_protected (Automatic Filing preserve filename)
+            from librarymanager_core import connect
+            conn = connect(database)
+            conn.execute("UPDATE filename_state SET rename_protected=1 WHERE file_id='13154'")
+            conn.commit()
+            conn.close()
+
+            options = {"includeVideoQuality": True, "filenameQualityPosition": "end"}
+
+            # 1. Preview operation (Test / Search) MUST be strictly read-only
+            preview_res = preview_scene_filename(database, "6393", options, ignore_protection=True)
+            self.assertEqual(preview_res["action_performed"], False)
+            self.assertTrue(video.exists(), "Original file on disk must NOT be renamed by preview")
+            proposed_path = Path(preview_res["proposed_path"])
+            self.assertEqual(proposed_path.name, "Onlyfans Cole Bentley Billy Essex - [720p].mp4")
+            self.assertFalse(proposed_path.exists(), "Proposed path must NOT exist on disk during read-only preview")
+
+            # 2. Background automatic rename MUST NOT touch the protected file
+            moves_called = []
+            apply_res = apply_scene_filename(
+                database, "6393",
+                lambda file_id, folder, basename: moves_called.append((file_id, folder, basename)) or True,
+                options,
+                ignore_protection=False
+            )
+            self.assertEqual(apply_res["status"], "unchanged")
+            self.assertEqual(len(moves_called), 0, "Move callback must NOT be called for protected file")
+            self.assertTrue(video.exists(), "Original file remains untouched")
+
+
 if __name__ == "__main__":
     unittest.main()
