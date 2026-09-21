@@ -37,6 +37,7 @@ from librarymanager_core import (
     save_filing_folder_mapping,
     delete_filing_folder_mapping,
     resolve_filing_destinations,
+    resolve_tag_filing_destinations,
 )
 
 
@@ -543,6 +544,111 @@ def test_conservative_performer_alias_matching():
     assert res["matched"] is True and res["entity"]["name"] == "May"
 
 
+def test_single_word_alias_does_not_claim_a_different_multiword_name():
+    performers = [
+        {"id": "98", "name": "Example Performer", "alias_list": ["Sam"]},
+    ]
+
+    embedded = match_performer_for_filing(
+        {}, "A Release - First Person & Sam Taylor.mp4", performers,
+        match_source="filename_only",
+    )
+    assert embedded["matched"] is False
+
+    standalone = match_performer_for_filing(
+        {}, "Sam - Solo Scene.mp4", performers,
+        match_source="filename_only",
+    )
+    assert standalone["matched"] is True
+    assert standalone["entity"]["id"] == "98"
+
+
+def test_verified_tag_folder_matching_is_general_and_preserves_ambiguity(test_env):
+    root = test_env["dest_root"]
+    exact = root / "Fan Sites"
+    plural = root / "Femboys"
+    category = root / "BDSM & Fetish"
+    descriptor = root / "Blondes"
+    second_category = root / "BDSM Collection"
+    for folder in (exact, plural, category, descriptor, second_category):
+        folder.mkdir(parents=True, exist_ok=True)
+    librarymanager_core.invalidate_destination_dir_cache()
+
+    paths, status = resolve_tag_filing_destinations(
+        [str(root)], {"id": "1", "name": "fansites", "aliases": []}
+    )
+    assert paths == [exact]
+    assert status == "ok"
+
+    paths, status = resolve_tag_filing_destinations(
+        [str(root)], {"id": "2", "name": "femboy", "aliases": []}
+    )
+    assert paths == [plural]
+    assert status == "ok"
+
+    paths, status = resolve_tag_filing_destinations(
+        [str(root)], {"id": "3", "name": "Blonde Hair", "aliases": []}
+    )
+    assert paths == [descriptor]
+    assert status == "ok"
+
+    paths, status = resolve_tag_filing_destinations(
+        [str(root)], {"id": "4", "name": "BDSM", "aliases": []}
+    )
+    assert paths == [second_category]
+    assert status == "ok"
+
+
+def test_combined_mode_offers_verified_tag_folder_without_false_alias(test_env):
+    db = test_env["db"]
+    incoming = test_env["incoming"]
+    root = test_env["dest_root"]
+    tag_folder = root / "Fan Sites"
+    tag_folder.mkdir(parents=True, exist_ok=True)
+    librarymanager_core.invalidate_destination_dir_cache()
+
+    snapshot_incoming_baseline(db, [str(incoming)])
+    video = incoming / "A Release - First Person & Sam Taylor.mp4"
+    video.write_bytes(b"TAG_DESTINATION_TEST" * 1000)
+
+    conn = connect(db)
+    now = utc_now()
+    conn.execute(
+        "INSERT INTO files (file_id, scene_id, path, basename, exists_on_disk, first_seen_at, last_seen_at) VALUES ('tag-file', 'tag-scene', ?, ?, 1, ?, ?)",
+        (str(video), video.name, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    scene = {
+        "id": "tag-scene",
+        "title": video.stem,
+        "files": [{"id": "tag-file", "path": str(video)}],
+        "performers": [],
+        "studio": None,
+        "tags": [{"id": "tag-1", "name": "fansites", "aliases": []}],
+    }
+    stash = MagicMock()
+    stash.call_GQL.side_effect = lambda query, variables=None: (
+        {"allPerformers": [{"id": "98", "name": "Example Performer", "alias_list": ["Sam"]}]}
+        if "allPerformers" in query else {"allStudios": []}
+    )
+    config = {
+        "autoFilingEnabled": True,
+        "autoFilingOrganizeBy": "both",
+        "autoFilingMatchSource": "metadata_first",
+        "autoFilingDestinationRoots": [str(root)],
+        "incomingFolders": [str(incoming)],
+    }
+
+    proposal = evaluate_filing_proposal(db, stash, str(video), scene, config)
+    assert proposal is not None
+    assert proposal["destination_folder"] == str(tag_folder.resolve())
+    assert proposal["organize_by"] == "tag"
+    assert proposal["matched_entity_name"] == "fansites"
+    assert proposal["matched_entity_id"] == "tag-1"
+
+
 def test_conservative_studio_alias_matching():
     studios = [
         {"id": "10", "name": "Evil Angel", "aliases": ["EA", "Evil"]},
@@ -593,6 +699,34 @@ def test_destination_folder_matching(test_env):
     assert "Ambiguous" in reason
     (dest_root / "Jane-Doe").rmdir()
     librarymanager_core.invalidate_destination_dir_cache(dest_root)
+
+
+def test_destination_folder_matching_ignores_joined_word_separators(test_env):
+    """A Stash entity like 8teenBoy matches an existing 8Teen Boy folder conservatively."""
+    dest_root = test_env["dest_root"]
+    joined_folder = dest_root / "8Teen Boy"
+    joined_folder.mkdir()
+    librarymanager_core.invalidate_destination_dir_cache(dest_root)
+
+    paths, status = resolve_filing_destinations([str(dest_root)], "8teenBoy")
+
+    assert status == "ok"
+    assert paths == [joined_folder]
+
+
+def test_joined_word_folder_matching_preserves_ambiguity(test_env):
+    """Separator-insensitive collisions are returned for explicit user choice."""
+    dest_root = test_env["dest_root"]
+    first = dest_root / "8Teen Boy"
+    second = dest_root / "8-Teen-Boy"
+    first.mkdir()
+    second.mkdir()
+    librarymanager_core.invalidate_destination_dir_cache(dest_root)
+
+    paths, status = resolve_filing_destinations([str(dest_root)], "8teenBoy")
+
+    assert status == "multiple_destinations"
+    assert set(paths) == {first, second}
 
 
 # ---------------------------------------------------------------------------
@@ -3147,8 +3281,8 @@ def test_filing_diagnostic_persistence_and_both_mode_explanations(test_env):
 
     assert row["status"] == "imported"
     assert row["detail"] == "Added as Stash scene 6392"  # Preserved!
-    # Diagnostic explains performer ambiguity and no studio match independently
-    assert "Performer: Multiple performers" in row["filing_diagnostic"]
+    # A single-word alias embedded in prose is rejected; the canonical identity remains explicit.
+    assert "Performer: Performer 'David' identified" in row["filing_diagnostic"]
     assert "Studio: No matching studio found" in row["filing_diagnostic"]
 
     # 2. Test when neither matches at all
@@ -3166,7 +3300,7 @@ def test_filing_diagnostic_persistence_and_both_mode_explanations(test_env):
     conn = connect(db)
     row2 = conn.execute("SELECT filing_diagnostic FROM incoming_files WHERE path=?", (str(v2),)).fetchone()
     conn.close()
-    assert row2["filing_diagnostic"] == "No matching performer or studio found."
+    assert row2["filing_diagnostic"] == "No identity found: no matching performer, studio, or tag."
 
 
 def test_retry_filing_proposal_workflow(test_env):
@@ -3215,7 +3349,7 @@ def test_retry_filing_proposal_workflow(test_env):
     from librarymanager_core import retry_filing_proposal
     res1 = retry_filing_proposal(db, mock_stash, str(v), config=config)
     assert res1["success"] is False
-    assert "No matching performer or studio found" in res1["message"]
+    assert "no matching performer, studio, or tag" in res1["message"].lower()
 
     # 3. User assigns Helix Studios (ID 39) in Stash
     updated_scene = {
@@ -3310,8 +3444,8 @@ def test_already_filed_and_non_incoming_scenes_excluded_from_retry(test_env):
     mock_stash.call_GQL.return_value = {"findScene": {"id": "6386", "files": [{"id": "f6386", "path": str(filed_video)}]}}
 
     res = librarymanager_core.retry_filing_proposal(db, mock_stash, str(filed_video), config=config)
-    assert res["success"] is False
-    assert ("already been successfully filed" in res["error"] or "not located inside any configured Incoming folder" in res["error"])
+    assert res.get("already_filed") is True or res["success"] is False
+    assert ("already complete" in res.get("message", "") or "already been successfully filed" in res.get("error", "") or "not located inside any configured Incoming folder" in res.get("error", ""))
 
 
 def test_retry_filing_reuses_destination_directory_cache_without_rescanning(test_env):
@@ -4590,3 +4724,362 @@ def test_backlog_statuses_and_reconciled_statistics(tmp_path):
     assert it_cmis["status"] == "missing_on_disk"
     assert "Missing" in it_cmis["status_label"]
     assert it_cmis["exists_on_disk"] is False
+
+
+def test_successful_filing_clears_incoming_diagnostic(test_env):
+    db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
+    destination = root / "Alex Drake"
+    destination.mkdir()
+    snapshot_incoming_baseline(db, [str(incoming)])
+    refresh_destination_dir_cache(db, [str(root)], max_depth=4)
+    video = incoming / "scene-clear.mp4"
+    video.write_bytes(b"video")
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO files(file_id,scene_id,path,basename,performers_json,size,
+                              fingerprints_json,scene_metadata_json,exists_on_disk,first_seen_at,last_seen_at)
+           VALUES('clear-file','clear-scene',?,'scene-clear.mp4','[\"Alex Drake\"]',5,'[]','{}',1,'before','before')""",
+        (str(video),),
+    )
+    conn.execute(
+        """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,status,filing_diagnostic)
+           VALUES(?,'before','before','imported','Proposal ready: performer Alex Drake')""",
+        (str(video),),
+    )
+    conn.commit()
+    conn.close()
+    stash = MagicMock()
+    stash.call_GQL.side_effect = lambda query, variables=None: (
+        {"findScene": {"id": "clear-scene", "files": [
+            {"id": "clear-file", "path": str(video)}]}}
+        if "findScene" in query else
+        {"allPerformers": [{"id": "p1", "name": "Alex Drake", "alias_list": []}]}
+    )
+    stash.move_files.return_value = True
+    scene = {"id": "clear-scene", "files": [{"id": "clear-file", "path": str(video)}],
+             "performers": [{"id": "p1", "name": "Alex Drake"}], "studio": None, "tags": []}
+    config = {"autoFilingEnabled": True, "autoFilingOrganizeBy": "performer",
+              "autoFilingDestinationRoots": [str(root)], "incomingFolders": [str(incoming)]}
+    proposal = evaluate_filing_proposal(db, stash, str(video), scene, config, allow_baseline=True)
+    assert proposal
+    result = apply_filing_proposal(db, stash, proposal["id"], config=config)
+    assert result["status"] == "completed"
+    conn = connect(db)
+    row = conn.execute("SELECT last_error,status FROM filing_proposals WHERE id=?", (proposal["id"],)).fetchone()
+    incoming_row = conn.execute("SELECT filing_diagnostic FROM incoming_files").fetchone()
+    conn.close()
+    assert row["status"] == "completed" and row["last_error"] is None
+    assert incoming_row["filing_diagnostic"] is None
+
+
+def test_stale_pending_proposal_recognises_verified_destination(test_env):
+    db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
+    source = incoming / "already-moved.mp4"
+    destination = root / "Jane Doe" / source.name
+    destination.write_bytes(b"moved")
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO filing_proposals(id,file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,match_source,
+            reason,status,created_at,updated_at)
+            VALUES(901,'verified-file','verified-scene',?,?,?,'already-moved.mp4','performer','p1',
+                   'Jane Doe','metadata','Matched performer','pending','before','before')""",
+        (str(source), str(destination), str(destination.parent)),
+    )
+    conn.execute(
+        """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,status,filing_diagnostic)
+           VALUES(?,'before','before','imported','Proposal ready: performer Jane Doe')""",
+        (str(destination),),
+    )
+    conn.commit()
+    conn.close()
+    stash = MagicMock()
+    stash.call_GQL.return_value = {"findScene": {"id": "verified-scene", "files": [
+        {"id": "verified-file", "path": str(destination)}]}}
+    assert invalidate_stale_filing_proposals(db, stash=stash) == []
+    conn = connect(db)
+    proposal = conn.execute("SELECT status,last_error FROM filing_proposals WHERE id=901").fetchone()
+    diagnostic = conn.execute("SELECT filing_diagnostic FROM incoming_files").fetchone()[0]
+    conn.close()
+    assert proposal["status"] == "completed" and proposal["last_error"] is None
+    assert diagnostic is None
+
+
+def test_retry_recognises_already_completed_destination(test_env):
+    db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
+    source = incoming / "retry-complete.mp4"
+    destination = root / "Jane Doe" / source.name
+    destination.write_bytes(b"complete")
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO filing_proposals(id,file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,match_source,
+            reason,status,created_at,updated_at)
+            VALUES(902,'retry-file','retry-scene',?,?,?,'retry-complete.mp4','performer','p1',
+                   'Jane Doe','metadata','Matched performer','invalid','before','before')""",
+        (str(source), str(destination), str(destination.parent)),
+    )
+    conn.execute(
+        """INSERT INTO files(file_id,scene_id,path,basename,fingerprints_json,scene_metadata_json,
+                              exists_on_disk,first_seen_at,last_seen_at)
+           VALUES('retry-file','retry-scene',?,'retry-complete.mp4','[]','{}',1,'before','before')""",
+        (str(destination),),
+    )
+    conn.execute(
+        """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,status,filing_diagnostic)
+           VALUES(?,'before','before','imported','Proposal ready: performer Jane Doe')""",
+        (str(destination),),
+    )
+    conn.commit()
+    conn.close()
+    stash = MagicMock()
+    stash.call_GQL.return_value = {"findScene": {"id": "retry-scene", "files": [
+        {"id": "retry-file", "path": str(destination)}]}}
+    config = {"autoFilingEnabled": True, "incomingFolders": [str(incoming)]}
+    result = retry_filing_proposal(db, stash, str(destination), config=config)
+    assert result["success"] is True and result["already_filed"] is True
+
+
+def test_retry_pending_proposal_is_review_state_not_filing_error(test_env):
+    db, incoming = test_env["db"], test_env["incoming"]
+    video = incoming / "pending-review.mp4"
+    video.write_bytes(b"pending")
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO filing_proposals(id,file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,match_source,
+            reason,status,created_at,updated_at)
+            VALUES(903,'pending-file','pending-scene',?,'','','pending-review.mp4','performer','p1',
+                   'Jane Doe','metadata','Matched performer','pending','before','before')""",
+        (str(video),),
+    )
+    conn.commit()
+    conn.close()
+    result = retry_filing_proposal(
+        db, MagicMock(), str(video),
+        config={"autoFilingEnabled": True, "incomingFolders": [str(incoming)]},
+    )
+    assert result["success"] is False
+    assert result["proposal_pending"] is True
+    assert "ready for review" in result["message"]
+
+
+def test_parenthetical_collection_folder_matches_primary_performer(test_env):
+    folder = test_env["dest_root"] / "The Kyle Polaski (Michal Stranik, Damien Porch) Collection"
+    folder.mkdir()
+    paths, status = resolve_filing_destinations(
+        [str(test_env["dest_root"])], "Kyle Polaski", database_path=test_env["db"]
+    )
+    assert status == "ok"
+    assert paths == [folder]
+
+
+def test_combined_filing_offers_performer_and_tag_destinations(test_env):
+    db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
+    snapshot_incoming_baseline(db, [str(incoming)])
+    performer_folder = root / "The Kyle Polaski (Michal Stranik) Collection"
+    tag_folder = root / "Blondes"
+    performer_folder.mkdir()
+    tag_folder.mkdir()
+    video = incoming / "Kyle Polaski Blonde.mp4"
+    video.write_bytes(b"combined")
+    stash = MagicMock()
+    stash.call_GQL.side_effect = lambda query, variables=None: {
+        "{ allPerformers { id name disambiguation alias_list } }": {
+            "allPerformers": [{"id": "p84", "name": "Kyle Polaski", "alias_list": []}]},
+        "{ allStudios { id name aliases } }": {"allStudios": []},
+    }.get(query, {})
+    scene = {"id": "combined-scene", "files": [{"id": "combined-file", "path": str(video)}],
+             "performers": [{"id": "p84", "name": "Kyle Polaski"}], "studio": None,
+             "tags": [{"id": "t1", "name": "Blonde Hair"}]}
+    config = {"autoFilingEnabled": True, "autoFilingOrganizeBy": "both",
+              "autoFilingDestinationRoots": [str(root)], "incomingFolders": [str(incoming)]}
+    proposal = evaluate_filing_proposal(db, stash, str(video), scene, config, allow_baseline=True)
+    destinations = {item["destination_folder"] for item in proposal["candidate_destinations"]}
+    assert destinations == {str(performer_folder), str(tag_folder)}
+
+
+def test_refresh_choices_fetches_current_metadata_and_invalidates_empty_match(test_env):
+    db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
+    snapshot_incoming_baseline(db, [str(incoming)])
+    video = incoming / "refresh-current.mp4"
+    video.write_bytes(b"refresh")
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO filing_proposals(id,file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,match_source,
+            reason,status,created_at,updated_at)
+            VALUES(904,'refresh-file','refresh-scene',?,'/old/path','/old','refresh-current.mp4',
+                   'performer','p1','Old Name','metadata','Matched performer','pending','before','before')""",
+        (str(video),),
+    )
+    conn.commit()
+    conn.close()
+    stash = MagicMock()
+    stash.call_GQL.return_value = {"findScene": {"id": "refresh-scene", "title": "Cleared",
+        "files": [{"id": "refresh-file", "path": str(video)}], "performers": [],
+        "studio": None, "tags": []}}
+    config = {"autoFilingEnabled": True, "autoFilingOrganizeBy": "both",
+              "autoFilingDestinationRoots": [str(root)], "incomingFolders": [str(incoming)]}
+    result = retry_filing_proposal(
+        db, stash, str(video), config=config, allow_refresh=True, proposal_id=904
+    )
+    assert result["success"] is False
+    conn = connect(db)
+    row = conn.execute("SELECT status,last_error FROM filing_proposals WHERE id=904").fetchone()
+    conn.close()
+    assert row["status"] == "invalid" and row["last_error"]
+
+
+def test_dashboard_refresh_does_not_flash_completed_destination_as_unresolved(test_env):
+    """Manual dashboard Refresh must apply configured Incoming roots just like live polling."""
+    db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
+    destination = root / "Jane Doe" / "scene-5541.mp4"
+    destination.write_bytes(b"already filed")
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO files(file_id,scene_id,path,basename,fingerprints_json,scene_metadata_json,
+                              exists_on_disk,first_seen_at,last_seen_at)
+           VALUES('11218','5541',?,'scene-5541.mp4','[]','{}',1,'before','before')""",
+        (str(destination),),
+    )
+    conn.execute(
+        """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,status,detail,filing_diagnostic)
+           VALUES(?,'before','before','imported','Stash scene',NULL)""",
+        (str(destination),),
+    )
+    conn.execute(
+        """INSERT INTO filing_proposals(id,file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,
+            match_source,reason,status,last_error,created_at,updated_at)
+            VALUES(95541,'11218','5541',?,?,?,'scene-5541.mp4','performer','p1','Jane Doe',
+                   'metadata','Matched performer','invalid','Historical source missing','before','before')""",
+        (str(incoming / "scene-5541.mp4"), str(destination), str(destination.parent)),
+    )
+    conn.commit()
+    conn.close()
+    config = {"autoFilingEnabled": True, "incomingFolders": [str(incoming)]}
+    stash = MagicMock()
+    stash.find_plugin_config.return_value = config
+
+    snapshot = librarymanager_core.dashboard_data(db, stash=stash)
+
+    assert all(item["path"] != str(destination) for item in snapshot["incoming"]["active"])
+    assert snapshot["filing_proposals"] == []
+
+
+def test_incoming_snapshot_prioritises_pending_approval_over_invalid_history(test_env):
+    """A pending proposal belongs under Filing Proposals even if a newer invalid row exists."""
+    db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
+    video = incoming / "awaiting-approval.mp4"
+    video.write_bytes(b"pending")
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO files(file_id,scene_id,path,basename,fingerprints_json,scene_metadata_json,
+                              exists_on_disk,first_seen_at,last_seen_at)
+           VALUES('approval-file','approval-scene',?,'awaiting-approval.mp4','[]','{}',1,'before','before')""",
+        (str(video),),
+    )
+    conn.execute(
+        """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,status,detail,filing_diagnostic)
+           VALUES(?,'before','before','imported','Stash scene','Proposal ready: performer Jane Doe')""",
+        (str(video),),
+    )
+    proposal_values = (str(video), str(root / "Jane Doe" / video.name), str(root / "Jane Doe"))
+    conn.execute(
+        """INSERT INTO filing_proposals(id,file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,
+            match_source,reason,status,created_at,updated_at)
+            VALUES(95542,'approval-file','approval-scene',?,?,?,'awaiting-approval.mp4',
+                   'performer','p1','Jane Doe','metadata','Matched performer','pending','before','before')""",
+        proposal_values,
+    )
+    conn.execute(
+        """INSERT INTO filing_proposals(id,file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,
+            match_source,reason,status,last_error,created_at,updated_at)
+            VALUES(95543,'approval-file','approval-scene',?,?,?,'awaiting-approval.mp4',
+                   'performer','p1','Jane Doe','metadata','Matched performer','invalid',
+                   'Historical failure','after','after')""",
+        proposal_values,
+    )
+    conn.commit()
+    conn.close()
+
+    summary = librarymanager_core.incoming_summary(
+        db, config={"autoFilingEnabled": True, "incomingFolders": [str(incoming)]}
+    )
+    item = next(entry for entry in summary["active"] if entry["path"] == str(video))
+    assert item["has_pending_proposal"] is True
+    assert item["filing_status"] == "pending"
+
+
+def test_backlog_counts_identity_verified_stale_proposal_as_moved(test_env):
+    """A stale proposal status must not make a verified destination video and JPG look missing."""
+    db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
+    source = incoming / "verified-move.mp4"
+    source_sheet = incoming / "verified-move.mp4.jpg"
+    source.write_bytes(b"verified video")
+    source_sheet.write_bytes(b"verified sheet")
+    snapshot_incoming_baseline(db, [str(incoming)])
+    destination_dir = root / "Jane Doe"
+    destination = destination_dir / source.name
+    destination_sheet = destination_dir / source_sheet.name
+    source.replace(destination)
+    source_sheet.replace(destination_sheet)
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO files(file_id,scene_id,path,basename,title,fingerprints_json,
+                              scene_metadata_json,exists_on_disk,first_seen_at,last_seen_at)
+           VALUES('verified-id','verified-scene',?,'verified-move.mp4','Verified move',
+                  '[]','{}',1,'before','before')""",
+        (str(destination),),
+    )
+    conn.execute(
+        """INSERT INTO filing_proposals(file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,
+            match_source,reason,status,last_error,created_at,updated_at)
+            VALUES('verified-id','verified-scene',?,?,?,'verified-move.mp4','performer','p1',
+                   'Jane Doe','metadata','Matched performer','invalid','Old source missing','before','after')""",
+        (str(source), str(destination), str(destination_dir)),
+    )
+    conn.commit()
+    conn.close()
+
+    backlog = librarymanager_core.get_backlog_items(
+        db, config={"incomingFolders": [str(incoming)]}
+    )
+    by_path = {item["path"]: item for item in backlog["items"]}
+    assert backlog["missing_count"] == 0
+    assert backlog["verified_moved_count"] == 2
+    assert by_path[str(source)]["status"] == "moved"
+    assert by_path[str(source)]["scene_id"] == "verified-scene"
+    assert by_path[str(source_sheet)]["status"] == "moved"
+
+
+def test_backlog_metadata_refresh_preserves_scene_identity(test_env, monkeypatch):
+    db, incoming = test_env["db"], test_env["incoming"]
+    video = incoming / "metadata-refresh.mp4"
+    video.write_bytes(b"refresh metadata")
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO files(file_id,scene_id,path,basename,fingerprints_json,scene_metadata_json,
+                              exists_on_disk,first_seen_at,last_seen_at)
+           VALUES('metadata-file','metadata-scene',?,'metadata-refresh.mp4','[]','{}',1,'before','before')""",
+        (str(video),),
+    )
+    conn.commit()
+    conn.close()
+    received = {}
+
+    def fake_retry(database_path, stash, file_path, **kwargs):
+        received.update(kwargs)
+        return {"success": False, "error": "No destination folder found"}
+
+    monkeypatch.setattr(librarymanager_core, "retry_filing_proposal", fake_retry)
+    result = librarymanager_core.evaluate_backlog_batch(
+        db, MagicMock(), [str(video)], config={}, allow_refresh=True
+    )
+    assert received["allow_refresh"] is True
+    assert result["results"][0]["file_id"] == "metadata-file"
+    assert result["results"][0]["scene_id"] == "metadata-scene"

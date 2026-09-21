@@ -2912,6 +2912,13 @@ a.lm-activity-scene-pill:hover {
 .lm-backlog-stat.moved .stat-val {
   color: #38bdf8;
 }
+.lm-backlog-stat.duplicate-removed {
+  border-color: rgba(167, 139, 250, 0.35);
+  background: rgba(167, 139, 250, 0.06);
+}
+.lm-backlog-stat.duplicate-removed .stat-val {
+  color: #c4b5fd;
+}
 .lm-backlog-stat.ineligible {
   border-color: rgba(245, 158, 11, 0.25);
 }
@@ -3016,7 +3023,8 @@ a.lm-activity-scene-pill:hover {
   border: 1px solid rgba(148, 163, 184, 0.25);
 }
 .item-status-pill.already_filed,
-.item-status-pill.moved {
+.item-status-pill.moved,
+.item-status-pill.duplicate_removed {
   background: rgba(56, 189, 248, 0.15);
   color: #38bdf8;
   border: 1px solid rgba(56, 189, 248, 0.3);
@@ -3069,6 +3077,67 @@ a.lm-activity-scene-pill:hover {
   border-radius: 6px;
   padding: 16px;
   margin: 10px 0;
+}
+
+.lm-backlog-result-details {
+  margin-top: 14px;
+  border-top: 1px solid rgba(148, 163, 184, 0.2);
+  padding-top: 12px;
+}
+.lm-backlog-result-details h5 {
+  margin: 0 0 4px;
+  color: #e2e8f0;
+  font-size: .9rem;
+}
+.lm-backlog-result-help {
+  margin: 0 0 10px;
+  color: #94a3b8;
+  font-size: .78rem;
+}
+.lm-backlog-result-group {
+  margin: 7px 0;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 5px;
+  background: rgba(15, 23, 42, 0.45);
+}
+.lm-backlog-result-group summary {
+  cursor: pointer;
+  padding: 8px 10px;
+  color: #e2e8f0;
+  font-size: .82rem;
+  font-weight: 700;
+}
+.lm-backlog-result-group.destination_not_found summary { color: #fbbf24; }
+.lm-backlog-result-group.errors summary { color: #f87171; }
+.lm-backlog-result-list {
+  display: grid;
+  gap: 6px;
+  padding: 0 8px 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.lm-backlog-result-item {
+  padding: 8px 10px;
+  border-left: 2px solid rgba(56, 189, 248, 0.55);
+  background: rgba(255, 255, 255, 0.035);
+}
+.lm-backlog-result-item strong {
+  display: block;
+  color: #f8fafc;
+  overflow-wrap: anywhere;
+}
+.lm-backlog-result-item p {
+  margin: 4px 0;
+  color: #cbd5e1;
+  font-size: .8rem;
+  overflow-wrap: anywhere;
+}
+.lm-backlog-result-item code {
+  display: block;
+  color: #7dd3fc;
+  font-size: .72rem;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 
@@ -3167,3 +3236,140 @@ a.lm-activity-scene-pill:hover {
   font-weight: 600;
   text-transform: uppercase;
 }
+
+/* ==========================================================================
+   Watchtower File Reconciliation (Phase 1) Duplicate & Move Styles
+   ========================================================================== */
+
+.lm-terminal-attention-item.duplicate {
+  border-left-color: #5bb5ff;
+  background: rgba(91, 181, 255, 0.08);
+}
+
+.lm-terminal-badge.duplicate {
+  background: rgba(91, 181, 255, 0.2);
+  color: #8ed0ff;
+  border: 1px solid rgba(91, 181, 255, 0.4);
+}
+
+.lm-terminal-attention-detail.duplicate {
+  color: #8ed0ff;
+}
+
+.lm-terminal-btn.view-scene {
+  background: rgba(91, 181, 255, 0.15);
+  color: #8ed0ff;
+  border: 1px solid rgba(91, 181, 255, 0.3);
+  padding: .35rem .65rem;
+  font-size: .78rem;
+  border-radius: 3px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.lm-terminal-btn.view-scene:hover {
+  background: rgba(91, 181, 255, 0.3);
+  color: #fff;
+}
+
+.lm-terminal-link {
+  color: #5bb5ff;
+  text-decoration: underline;
+}
+
+.lm-terminal-link:hover {
+  color: #8ed0ff;
+}
+
+/* Filing proposal scene link and action menu */
+.lm-filing-scene-link {
+  color: #38bdf8;
+  text-decoration: none;
+  font-weight: 700;
+  border-bottom: 1px dotted rgba(56, 189, 248, 0.5);
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.lm-filing-scene-link:hover {
+  color: #7dd3fc;
+  border-bottom-color: #38bdf8;
+}
+.lm-filing-dropdown-item:hover {
+  background: rgba(56, 189, 248, 0.15) !important;
+  color: #38bdf8 !important;
+}
+
+.lm-backlog-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.55rem;
+}
+
+.lm-duplicate-review-evidence {
+  margin-top: .55rem;
+  padding: .6rem .7rem;
+  border: 1px solid rgba(91, 181, 255, .3);
+  border-radius: 4px;
+  background: rgba(91, 181, 255, .06);
+  overflow-wrap: anywhere;
+}
+
+.lm-duplicate-review-evidence p {
+  margin: .18rem 0;
+}
+
+.lm-duplicate-companion-choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: .25rem .45rem;
+  align-items: start;
+  margin-top: .55rem;
+  color: #d7e8f8;
+}
+
+.lm-duplicate-companion-choice small {
+  grid-column: 2;
+  color: #8fa6ba;
+  overflow-wrap: anywhere;
+}
+
+/* Grouped external-file reconciliation review */
+.lm-terminal-attention-item.grouped-reconciliation {
+  border-left-color: #38bdf8;
+  background: linear-gradient(90deg, rgba(14, 116, 144, .13), rgba(3, 12, 18, .72) 38%);
+}
+.lm-grouped-members {
+  margin: .7rem 0;
+  border: 1px solid rgba(56, 189, 248, .28);
+  border-radius: 6px;
+  background: rgba(2, 10, 16, .46);
+}
+.lm-grouped-members > summary {
+  padding: .55rem .7rem;
+  color: #7dd3fc;
+  cursor: pointer;
+  font-weight: 600;
+}
+.lm-grouped-member-list {
+  max-height: 19rem;
+  overflow: auto;
+  border-top: 1px solid rgba(56, 189, 248, .2);
+}
+.lm-grouped-member {
+  padding: .65rem .75rem;
+  border-bottom: 1px solid rgba(148, 163, 184, .14);
+  color: #cbd5e1;
+}
+.lm-grouped-member:last-child { border-bottom: 0; }
+.lm-grouped-member.uncertain { border-left: 3px solid #f59e0b; }
+.lm-grouped-member.ready { border-left: 3px solid #22c55e; }
+.lm-grouped-path,
+.lm-grouped-reason {
+  margin-top: .2rem;
+  overflow-wrap: anywhere;
+  color: #94a3b8;
+  font-size: .78rem;
+}
+.lm-grouped-reason { color: #fbbf24; }

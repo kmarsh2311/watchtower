@@ -25,9 +25,15 @@ from librarymanager_core import (
                                  preview_manual_filename, preview_scene_filename, reconcile_missing_files, refresh_scene_inventory,
                                  release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
                                  reconcile_filesystem_events, pending_filesystem_events,
-                                 pending_transcoder_candidates, promote_transcoder_candidate, utc_now)
+                                 pending_transcoder_candidates, promote_transcoder_candidate, utc_now,
+                                 find_duplicate_scene_file, inspect_backlog_duplicate,
+                                 get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
+                                 cancel_expected_filesystem_delete, _is_pid_alive)
 from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch
 
+
+from librarymanager_reconciliation import (dismiss_review_batch, execute_grouped_move_reconciliation,
+                                           list_review_batches)
 
 QUERY = """
 query LibraryManagerInventory($filter: FindFilterType) {
@@ -80,6 +86,11 @@ query LibraryManagerStudioScenes($id: ID!) {
 
 ROOTS_QUERY = "query LibraryManagerRoots { configuration { general { stashes { path } } } }"
 SCENE_COUNT_QUERY = "query LibraryManagerSceneCount { findScenes(filter: {per_page: 1}) { count } }"
+DELETE_FILES_MUTATION = """
+mutation LibraryManagerDeleteFiles($ids: [ID!]!) {
+  deleteFiles(ids: $ids)
+}
+"""
 
 
 def current_scene_count(stash):
@@ -222,6 +233,175 @@ def require_bulk_dismissal(resolution):
     """Bulk review is acknowledgement-only; corrective actions require per-item checks."""
     if str(resolution or "dismiss") != "dismiss":
         raise ValueError("Bulk review can only dismiss changes; resolve corrective actions one item at a time")
+
+
+def validate_filesystem_scan_action(database_path: Path, event: dict, resolution: str):
+    """Fail closed before any Stash scan for duplicate or external-move review."""
+    destination = event.get("destination_path") or event.get("source_path")
+    if not destination or not Path(destination).is_file():
+        raise ValueError("The destination file no longer exists, so Stash cannot scan it")
+
+    evidence = find_duplicate_scene_file(database_path, destination, allow_compute=False)
+    candidates = (evidence or {}).get("all_candidates") or ([evidence] if evidence else [])
+    if any(candidate and candidate.get("is_external_move") for candidate in candidates):
+        raise ValueError(
+            "External moves are review-only until Watchtower has a verified relinking workflow; no Stash scan was started"
+        )
+    if evidence and evidence.get("checksum_status") != "verified":
+        raise ValueError("Checksum verification is still pending; no Stash scan was started")
+    if resolution == "keep_both" and not evidence:
+        raise ValueError("The additional file is no longer a verified duplicate; no Stash scan was started")
+    return destination, evidence
+
+
+def delete_verified_backlog_duplicate(
+    database_path: Path,
+    stash,
+    candidate_path: str,
+    config: dict,
+    expected_scene_id: str,
+    expected_file_id: str,
+    expected_retained_file_id: str,
+    expected_sha256: str,
+    selected_companions=None,
+) -> dict:
+    """Delete one explicitly selected, fully verified duplicate through Stash."""
+    info = inspect_backlog_duplicate(
+        database_path, stash, candidate_path, config, request_verification=False
+    )
+    if not info or info.get("checksum_status") != "verified":
+        raise ValueError("The files are not currently verified as exact SHA-256 duplicates")
+    expected = {
+        "scene_id": str(expected_scene_id or ""),
+        "candidate_file_id": str(expected_file_id or ""),
+        "retained_file_id": str(expected_retained_file_id or ""),
+        "sha256": str(expected_sha256 or "").lower(),
+    }
+    actual = {
+        "scene_id": str(info.get("scene_id") or ""),
+        "candidate_file_id": str(info.get("candidate_file_id") or ""),
+        "retained_file_id": str(info.get("retained_file_id") or ""),
+        "sha256": str(info.get("sha256") or "").lower(),
+    }
+    if expected != actual:
+        raise ValueError("The scene, file ownership, or checksum changed; deletion was blocked")
+
+    available_companions = {item["path"]: item for item in (info.get("companions") or [])}
+    selected = selected_companions or []
+    selected_paths = set()
+    for requested in selected:
+        requested_path = str((requested or {}).get("path") or "")
+        current = available_companions.get(requested_path)
+        if not current:
+            raise ValueError("A selected companion is no longer an exact companion inside the incoming folder")
+        expected_snapshot = tuple(int((requested or {}).get(key, -1)) for key in ("size", "mtime_ns", "device", "inode"))
+        current_snapshot = tuple(int(current.get(key, -2)) for key in ("size", "mtime_ns", "device", "inode"))
+        if expected_snapshot != current_snapshot:
+            raise ValueError(f"Companion changed after confirmation: {Path(requested_path).name}")
+        selected_paths.add(requested_path)
+
+    now = utc_now()
+    connection = connect(database_path)
+    try:
+        connection.execute(
+            """INSERT INTO duplicate_file_repairs(
+                   candidate_path,candidate_file_id,scene_id,retained_file_id,retained_path,
+                   sha256,deleted_companions_json,status,detail,created_at,completed_at
+               ) VALUES (?,?,?,?,?,?,'[]','processing',?,?,NULL)
+               ON CONFLICT(candidate_path) DO UPDATE SET
+                   candidate_file_id=excluded.candidate_file_id,scene_id=excluded.scene_id,
+                   retained_file_id=excluded.retained_file_id,retained_path=excluded.retained_path,
+                   sha256=excluded.sha256,deleted_companions_json='[]',status='processing',
+                   detail=excluded.detail,created_at=excluded.created_at,completed_at=NULL""",
+            (candidate_path, actual["candidate_file_id"], actual["scene_id"],
+             actual["retained_file_id"], info["retained_path"], actual["sha256"],
+             "Awaiting Stash file deletion", now),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    try:
+        expect_filesystem_delete(database_path, candidate_path)
+        response = stash.call_GQL(DELETE_FILES_MUTATION, {"ids": [actual["candidate_file_id"]]})
+        if not (response or {}).get("deleteFiles"):
+            raise RuntimeError("Stash did not confirm deletion of the selected file")
+        if Path(candidate_path).exists():
+            raise RuntimeError("Stash returned success but the selected file still exists on disk")
+        post_scene = stash.find_scene(int(actual["scene_id"]))
+        post_files = {
+            str(item.get("id")): item
+            for item in ((post_scene or {}).get("files") or [])
+            if item and item.get("id") is not None
+        }
+        retained_after = post_files.get(actual["retained_file_id"])
+        if not retained_after or os.path.normcase(os.path.realpath(retained_after.get("path") or "")) != os.path.normcase(os.path.realpath(info["retained_path"])):
+            raise RuntimeError("Stash did not retain the verified organised file on the scene")
+        if actual["candidate_file_id"] in post_files:
+            raise RuntimeError("Stash still reports the deleted incoming file on the scene")
+        # Stash may implement deletion as an atomic rename to a temporary .delete path.
+        # If that watcher event raced with this operation, it belongs to this verified
+        # repair and must not be presented as an unexplained scene deletion.
+        resolve_filesystem_event(database_path, "deleted", candidate_path)
+    except Exception as exc:
+        cancel_expected_filesystem_delete(database_path, candidate_path)
+        connection = connect(database_path)
+        try:
+            connection.execute(
+                "UPDATE duplicate_file_repairs SET status='failed',detail=? WHERE candidate_path=?",
+                (str(exc), candidate_path),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        raise
+
+    deleted_companions = []
+    companion_errors = []
+    for companion_path in sorted(selected_paths):
+        companion = available_companions[companion_path]
+        expected_snapshot = tuple(int(companion[key]) for key in ("size", "mtime_ns", "device", "inode"))
+        if get_file_stat_snapshot(companion_path) != expected_snapshot:
+            companion_errors.append(f"{Path(companion_path).name}: changed or unavailable")
+            continue
+        try:
+            expect_filesystem_delete(database_path, companion_path)
+            Path(companion_path).unlink()
+            deleted_companions.append(companion_path)
+        except OSError as exc:
+            cancel_expected_filesystem_delete(database_path, companion_path)
+            companion_errors.append(f"{Path(companion_path).name}: {exc}")
+
+    detail = f"Deleted verified duplicate {Path(candidate_path).name}; retained {info['retained_path']}"
+    if deleted_companions:
+        detail += f"; deleted {len(deleted_companions)} selected companion(s)"
+    if companion_errors:
+        detail += "; companion cleanup incomplete: " + "; ".join(companion_errors)
+
+    connection = connect(database_path)
+    try:
+        connection.execute(
+            """UPDATE duplicate_file_repairs
+               SET status='completed',deleted_companions_json=?,detail=?,completed_at=?
+               WHERE candidate_path=?""",
+            (json.dumps(deleted_companions), detail, utc_now(), candidate_path),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    audit(database_path, "duplicate", "exact duplicate deleted", "completed",
+          scene_id=actual["scene_id"], file_id=actual["candidate_file_id"],
+          old_path=candidate_path, new_path=info["retained_path"], detail=detail,
+          metadata={"deleted_companions": deleted_companions, "companion_errors": companion_errors})
+    return {
+        "success": True,
+        "scene_id": actual["scene_id"],
+        "deleted_path": candidate_path,
+        "retained_path": info["retained_path"],
+        "deleted_companions": deleted_companions,
+        "companion_errors": companion_errors,
+        "message": detail,
+    }
 
 
 def dashboard_reports():
@@ -496,16 +676,21 @@ def configure_system_startup(enabled, server_connection, database_path):
 configure_macos_startup = configure_system_startup
 
 
+def monitor_process_launch_options(platform=None):
+    """Return platform-specific options that isolate the long-running monitor."""
+    platform = platform or sys.platform
+    if platform == "win32":
+        detached_process = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        new_process_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        return {"creationflags": detached_process | new_process_group}
+    return {"start_new_session": True}
+
+
 def start_filesystem_monitor(stash, database_path, server_connection=None):
     current = filesystem_monitor_summary(database_path)
     if current.get("state") in ("running", "starting") and current.get("pid"):
-        try:
-            os.kill(int(current["pid"]), 0)
+        if _is_pid_alive(int(current["pid"])):
             return {**current, "message": "Filesystem monitor is already running or starting"}
-        except PermissionError:
-            return {**current, "message": "Filesystem monitor is already running or starting"}
-        except OSError:
-            pass
     roots = fetch_library_roots(stash)
     if not roots:
         raise ValueError("Stash has no configured library roots")
@@ -542,14 +727,16 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
     }), encoding="utf-8")
     runtime_path.chmod(0o600)
     log_handle = open(log_path, "ab", buffering=0)
-    process = subprocess.Popen(
-        [sys.executable, str(Path(__file__).with_name("librarymanager_monitor.py")),
-         "--database", str(database_path), "--control", str(control_path),
-         "--token", token, "--roots-json", json.dumps(roots), "--runtime", str(runtime_path)],
-        stdin=subprocess.DEVNULL, stdout=log_handle, stderr=log_handle,
-        start_new_session=True, close_fds=True,
-    )
-    log_handle.close()
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(Path(__file__).with_name("librarymanager_monitor.py")),
+             "--database", str(database_path), "--control", str(control_path),
+             "--token", token, "--roots-json", json.dumps(roots), "--runtime", str(runtime_path)],
+            stdin=subprocess.DEVNULL, stdout=log_handle, stderr=log_handle,
+            close_fds=True, **monitor_process_launch_options(),
+        )
+    finally:
+        log_handle.close()
     # StashInterface initialization can take several seconds on a busy or newly
     # upgraded Stash instance. Do not report a failed restart while the child
     # is still starting successfully in the background.
@@ -915,7 +1102,7 @@ def main():
             for sid in target_scene_ids:
                 try:
                     scene_res = stash.call_GQL(
-                        "query FindSceneForFiling($id: ID!) { findScene(id: $id) { id title files { id path } performers { id name disambiguation alias_list } studio { id name aliases } } }",
+                        "query FindSceneForFiling($id: ID!) { findScene(id: $id) { id title files { id path } performers { id name disambiguation alias_list } studio { id name aliases } tags { id name aliases } } }",
                         {"id": str(sid)}
                     )
                     sc = (scene_res or {}).get("findScene")
@@ -1258,12 +1445,15 @@ def main():
                    f"{len(result.get('roots', []))} roots; {result.get('pending_events', 0)} recorded events; "
                    f"heartbeat {result.get('heartbeat_at')}.")
     elif mode == "monitor_health":
+        stash = StashInterface(plugin_input["server_connection"]) if plugin_input.get("server_connection") else None
+        config = (stash.find_plugin_config("librarymanager") if stash and hasattr(stash, "find_plugin_config") else {}) or {}
         result = filesystem_monitor_summary(database_path)
         result.pop("token", None)
-        result["incoming"] = incoming_summary(database_path)
+        result["incoming"] = incoming_summary(database_path, config=config)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "live_status":
         stash = StashInterface(plugin_input["server_connection"])
+        config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
         maybe_auto_restart_monitor(stash, database_path, plugin_input.get("server_connection") or {})
         # Auto-prune any failed incoming files that were deleted from disk
         connection = connect(database_path)
@@ -1306,14 +1496,19 @@ def main():
         is_running = monitor_summary.get("state") == "running" and not monitor_summary.get("is_stale") and monitor_summary.get("pid_alive")
         annotate_pending_events_processing_state(pending, monitor_summary.get("active_moves", []), monitor_running=is_running, database_path=database_path)
 
+        # Reconcile proposals first so Incoming and Filing Proposals come from
+        # the same authoritative filing state in this response.
+        filing_proposals = get_pending_filing_proposals(database_path, stash=stash)
+        incoming = incoming_summary(database_path, config=config)
         result = {
             "monitor": monitor_summary,
-            "incoming": incoming_summary(database_path),
+            "incoming": incoming,
             "active_jobs": active_jobs,
             "activity": recent_activity(database_path, 250),
             "pending_events": pending,
+            "grouped_reconciliation": list_review_batches(database_path),
             "transcoder_candidates": pending_transcoder_candidates(database_path),
-            "filing_proposals": get_pending_filing_proposals(database_path),
+            "filing_proposals": filing_proposals,
             "server_time": time.time(),
             "current_scene_count": current_scene_count(stash),
         }
@@ -1403,6 +1598,33 @@ def main():
             connection.close()
         audit(database_path, "incoming", "batch dismiss", "dismissed", detail=f"User dismissed {count} failed incoming video alert(s)")
         message = json.dumps({"status": "dismissed", "count": count, "detail": f"Dismissed {count} failed incoming alert(s)"}, ensure_ascii=False)
+    elif mode == "execute_grouped_reconciliation":
+        arguments = plugin_input.get("args") or {}
+        batch_id = arguments.get("batch_id")
+        if batch_id in (None, ""):
+            raise ValueError("Grouped reconciliation batch ID is required")
+        stash = StashInterface(plugin_input["server_connection"])
+        result = execute_grouped_move_reconciliation(
+            database_path, int(batch_id), stash, owner=f"plugin-{os.getpid()}-{uuid.uuid4().hex}",
+        )
+        audit(database_path, "reconciliation", "grouped Stash scan", result.get("state", "review"),
+              old_path=result.get("source_prefix"), new_path=result.get("destination_prefix"),
+              detail=result.get("reason") or "Grouped reconciliation verification completed",
+              metadata={"batch_id": result.get("id"), "tracked_count": result.get("tracked_count"),
+                        "verified_count": result.get("verified_count"),
+                        "uncertain_count": result.get("uncertain_count")})
+        message = json.dumps({"status": result.get("state"), "batch": result}, ensure_ascii=False)
+    elif mode == "dismiss_grouped_reconciliation":
+        arguments = plugin_input.get("args") or {}
+        batch_id = arguments.get("batch_id")
+        if batch_id in (None, ""):
+            raise ValueError("Grouped reconciliation batch ID is required")
+        result = dismiss_review_batch(database_path, int(batch_id))
+        audit(database_path, "filesystem", "grouped reconciliation", "dismissed",
+              old_path=result.get("source_prefix"), new_path=result.get("destination_prefix"),
+              detail="User dismissed grouped review; no filesystem or Stash action was taken",
+              metadata={"batch_id": result.get("id"), "tracked_count": result.get("tracked_count")})
+        message = json.dumps({"status": "dismissed", "batch": result}, ensure_ascii=False)
     elif mode == "resolve_all_filesystem_events":
         arguments = plugin_input.get("args") or {}
         resolution = str(arguments.get("resolution") or "dismiss")
@@ -1434,7 +1656,7 @@ def main():
         arguments = plugin_input.get("args") or {}
         event_key = str(arguments.get("event_key") or "")
         resolution = str(arguments.get("resolution") or "")
-        if not event_key or resolution not in ("dismiss", "remove_stash_scene", "scan_destination"):
+        if not event_key or resolution not in ("dismiss", "remove_stash_scene", "scan_destination", "keep_both"):
             raise ValueError("Choose a valid review action")
         connection = connect(database_path)
         try:
@@ -1458,22 +1680,32 @@ def main():
         elif resolution == "remove_stash_scene":
             if not scene_id:
                 raise ValueError("Watchtower cannot identify a Stash scene for this deleted file")
-            scene = stash.find_scene(int(scene_id))
+            try:
+                scene = stash.find_scene(int(scene_id))
+            except Exception as err:
+                raise RuntimeError(f"Could not verify Stash scene {scene_id} status: {err}") from err
+
             if scene:
                 assert_scene_removal_safe(scene, event["source_path"])
-                stash.destroy_scene(int(scene_id), delete_file=False)
-                detail = f"Removed stale Stash scene {scene_id}; the video file was already absent"
+                try:
+                    stash.destroy_scene(int(scene_id), delete_file=False)
+                    detail = f"Removed stale Stash scene {scene_id}; the video file was already absent"
+                except Exception as err:
+                    raise RuntimeError(f"Failed to remove Stash scene {scene_id}: {err}") from err
             else:
-                detail = f"Stash scene {scene_id} was already removed"
+                detail = f"Stash confirmed scene {scene_id} was already deleted"
         else:
-            destination = event.get("destination_path") or event.get("source_path")
-            if not destination or not Path(destination).is_file():
-                raise ValueError("The destination file no longer exists, so Stash cannot scan it")
+            destination, evidence = validate_filesystem_scan_action(
+                database_path, event, resolution
+            )
             try:
                 job_id = stash.metadata_scan(paths=[destination])
                 if not stash.wait_for_job(job_id, timeout=180):
                     raise ValueError(f"Stash scan job {job_id} did not finish within 3 minutes")
-                detail = f"Stash scan job {job_id} checked {destination}"
+                if resolution == "keep_both":
+                    detail = f"User confirmed keeping both files; Stash scan job {job_id} checked {destination}"
+                else:
+                    detail = f"Stash scan job {job_id} checked {destination}"
             except Exception:
                 # Mark the event as failed rather than leaving it permanently pending
                 # (e.g. network interruption, Stash restart during the scan wait).
@@ -1539,7 +1771,12 @@ def main():
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
         roots = fetch_library_roots(stash)
-        payload = dashboard_data(database_path, (plugin_input.get("args") or {}).get("limit", 250), stash=stash)
+        payload = dashboard_data(
+            database_path,
+            (plugin_input.get("args") or {}).get("limit", 250),
+            stash=stash,
+            config=config,
+        )
         payload["monitor"].pop("token", None)
         payload["library_roots"] = [{"path": root, "exists": os.path.exists(root)} for root in roots]
         payload["incoming_folder"] = incoming_folder_status(config, roots)
@@ -1688,9 +1925,41 @@ def main():
     elif mode == "evaluate_backlog_batch":
         args = plugin_input.get("args") or {}
         paths = args.get("paths") or []
+        refresh_metadata = args.get("refresh_metadata") is True
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
-        result = evaluate_backlog_batch(database_path, stash, paths, config=config)
+        result = evaluate_backlog_batch(
+            database_path, stash, paths, config=config, allow_refresh=refresh_metadata
+        )
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "inspect_backlog_duplicate":
+        args = plugin_input.get("args") or {}
+        candidate_path = str(args.get("path") or "")
+        if not candidate_path:
+            raise ValueError("Duplicate candidate path required")
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        result = inspect_backlog_duplicate(
+            database_path, stash, candidate_path, config,
+            request_verification=args.get("request_verification") is True,
+        )
+        if not result:
+            raise ValueError("Watchtower could not find a same-scene duplicate for this incoming file")
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "delete_backlog_duplicate":
+        args = plugin_input.get("args") or {}
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        result = delete_verified_backlog_duplicate(
+            database_path, stash,
+            candidate_path=str(args.get("path") or ""),
+            config=config,
+            expected_scene_id=str(args.get("scene_id") or ""),
+            expected_file_id=str(args.get("file_id") or ""),
+            expected_retained_file_id=str(args.get("retained_file_id") or ""),
+            expected_sha256=str(args.get("sha256") or ""),
+            selected_companions=args.get("companions") or [],
+        )
         message = json.dumps(result, ensure_ascii=False)
     else:
         raise ValueError(f"Unsupported Library Manager mode: {mode}")

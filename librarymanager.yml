@@ -123,15 +123,15 @@ settings:
     type: NUMBER
   autoFilingEnabled:
     displayName: Enable Automatic Filing Proposals
-    description: Propose destination folders for newly arrived videos in incoming folders based on performer or studio matching. Disabled by default.
+    description: Propose destination folders for newly arrived videos in incoming folders based on performer, studio, or verified tag matching. Disabled by default.
     type: BOOLEAN
   autoFilingOrganizeBy:
     displayName: Automatic Filing Organization
-    description: "Choose whether to organize new incoming videos by 'performer', 'studio', or 'both' (Performer or Studio (Let me choose))."
+    description: "Choose whether to organize new incoming videos by 'performer', 'studio', or combined Performer, Studio or Tag review mode."
     type: STRING
   autoFilingDestinationRoots:
     displayName: Automatic Filing Destination Roots
-    description: Up to five destination root directories containing your existing performer or studio folders (e.g. /Media/Performers/Example Folder).
+    description: Up to five destination root directories containing your existing performer, studio, or category folders.
     type: STRING
   autoFilingDestinationRoot:
     displayName: Automatic Filing Destination Root
@@ -143,7 +143,7 @@ settings:
     type: STRING
   autoFilingTrigger:
     displayName: When to Suggest Filing
-    description: "Choose when Watchtower suggests filing: 'import' (immediately after video import) or 'metadata' (after a performer or studio is assigned in Stash)."
+    description: "Choose when Watchtower suggests filing: 'import' (immediately after video import) or 'metadata' (after a performer, studio, or tag is assigned in Stash)."
     type: STRING
   autoFilingPreserveFilename:
     displayName: Preserve Original Filename
@@ -151,7 +151,7 @@ settings:
     type: BOOLEAN
   autoFilingMaxDiscoveryDepth:
     displayName: Maximum Folder Discovery Depth
-    description: "Maximum folder depth (1 to 8, default: 4) when automatically searching destination roots for matching performer or studio folders."
+    description: "Maximum folder depth (1 to 8, default: 4) when automatically searching destination roots for matching performer, studio, or category folders."
     type: NUMBER
   generateContactSheets:
     displayName: Generate Visual Contact Sheets (CSM)

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import librarymanager_core
 import librarymanager_monitor
+import librarymanager
 
 from librarymanager_core import (build_merge_preview, build_resolution_plan, inventory,
                                  opensubtitles_hash, preview_safe_filenames, preview_scene_filename,
@@ -26,13 +27,31 @@ from librarymanager_core import _should_strip_metadata_from_title
 from librarymanager import (assert_scene_removal_safe, automatic_scene_allowed,
                             contact_sheet_scope_name, get_configured_incoming_folders,
                             incoming_folder_status, incoming_folders_status,
-                            maybe_auto_restart_monitor, read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
+                            maybe_auto_restart_monitor, monitor_process_launch_options, read_inventory_progress, refresh_scene_contact_sheet, require_bulk_dismissal,
                             start_filesystem_monitor, write_inventory_progress)
 from librarymanager_monitor import (CompletedDownloadWorker, claim_monitor_ownership, relocate_companions_transactionally,
                                     reload_monitor_if_code_changed, tracked_move)
 
 
 class InventoryTests(unittest.TestCase):
+    def test_windows_monitor_launch_is_detached_from_stash_console(self):
+        with patch.object(librarymanager.subprocess, "DETACHED_PROCESS", 0x08, create=True), \
+                patch.object(librarymanager.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, create=True):
+            options = monitor_process_launch_options("win32")
+        self.assertEqual(options, {"creationflags": 0x208})
+        self.assertNotIn("start_new_session", options)
+
+    def test_posix_monitor_launch_starts_new_session(self):
+        self.assertEqual(monitor_process_launch_options("darwin"), {"start_new_session": True})
+
+    def test_windows_pid_probe_never_uses_os_kill(self):
+        with patch("librarymanager_core.sys.platform", "win32"), \
+                patch("librarymanager_core._windows_pid_alive", return_value=True) as windows_probe, \
+                patch("librarymanager_core.os.kill") as unsafe_kill:
+            self.assertTrue(_is_pid_alive(12345))
+        windows_probe.assert_called_once_with(12345)
+        unsafe_kill.assert_not_called()
+
     def test_detached_monitor_reloads_when_installed_code_changes(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -40,6 +40,26 @@ function loadNamedFunction(name) {
   throw new Error(`Could not parse ${name}`);
 }
 
+test("watcher auto-start preference is saved only after startup succeeds", async () => {
+  const startMonitorAndRemember = loadNamedFunction("startMonitorAndRemember");
+  const calls = [];
+  const result = await startMonitorAndRemember(
+    async (mode) => { calls.push(["operation", mode]); return { state: "running" }; },
+    async (key, value) => { calls.push(["setting", key, value]); }
+  );
+  assert.deepEqual(result, { state: "running" });
+  assert.deepEqual(calls, [["operation", "ensure_monitor"], ["setting", "autoStartMonitor", true]]);
+  const failedCalls = [];
+  await assert.rejects(
+    startMonitorAndRemember(
+      async () => { failedCalls.push("operation"); throw new Error("monitor failed"); },
+      async () => { failedCalls.push("setting"); }
+    ),
+    /monitor failed/
+  );
+  assert.deepEqual(failedCalls, ["operation"]);
+});
+
 test("Command Centre presents unresolved changes as actions, not completed work", () => {
   assert.match(javascript, /NEEDS ATTENTION/);
   assert.match(javascript, /Video deletion detected/);
@@ -262,7 +282,7 @@ test("pending filing proposals appear in their own visible section when zero pro
   // 2. UI rendering assertions: independent Filing Proposals card rendered outside Needs Attention
   assert.match(javascript, /pendingFilingProposals = filingProposals\.filter\(p => p\.status !== "needs_recovery"\)/);
   assert.match(javascript, /filingRecoveryProposals = filingProposals\.filter\(p => p\.status === "needs_recovery"\)/);
-  assert.match(javascript, /totalProblems = failedIncoming\.length \+ unavailableRoots\.length \+ attentionCount \+ filingRecoveryCount/);
+  assert.match(javascript, /totalProblems = indicatorState\.alerts\.count/);
   assert.match(javascript, /pendingFilingProposals\.length > 0 && React\.createElement\("div", \{ className: "lm-terminal-filing-card" \}/);
   assert.match(javascript, /className: "lm-terminal-filing-tag"/);
   assert.match(javascript, /"📁 FILING PROPOSALS"/);
@@ -374,11 +394,11 @@ test("Automatic Filing uses generic placeholder examples and contains no persona
   assert.doesNotMatch(manifest, /Vault2\/Vault2/);
 
   // Generic examples are present
-  assert.match(javascript, /placeholder: "Performer name"/);
+  assert.match(javascript, /placeholder: "Performer, studio, or tag name"/);
   assert.match(javascript, /placeholder: "Existing destination folder"/);
   assert.match(javascript, /\/Media\/Performers/);
-  assert.match(javascript, /\/Media\/Performers\/Example Folder/);
-  assert.match(manifest, /\/Media\/Performers\/Example Folder/);
+  assert.match(javascript, /\/Media\/Library\/Example Folder/);
+  assert.match(manifest, /existing performer, studio, or category folders/);
 });
 
 
@@ -408,37 +428,40 @@ test("Incoming settling live MM:SS countdown and Process Now UI components", () 
   assert.match(css, /\.lm-terminal-inline-btn\.process-now/);
 });
 
-test("Automatic Filing 'Performer or Studio (Let me choose)' option and dual-entity candidate UI", () => {
+test("Automatic Filing combined performer, studio or tag option and candidate UI", () => {
   // 1. Dropdown choices include the third option 'both'
-  assert.match(javascript, /\["both",\s*"Performer or Studio \(Let me choose\)"\]/);
-  assert.match(manifest, /Performer or Studio \(Let me choose\)/);
+  assert.match(javascript, /\["both",\s*"Performer, Studio or Tag \(Let me choose\)"\]/);
+  assert.match(manifest, /combined Performer, Studio or Tag review mode/);
 
   // 2. Candidate destination formatting with [Performer] and [Studio] tags
   assert.match(javascript, /\[\$\{\(c\.entity_type \|\| "DEST"\)\.toUpperCase\(\)\}\]/);
 
   // 3. Dual-match radio entity selection when both match same folder
   assert.match(javascript, /isDualMatch && Boolean\(opts\.updateMetadata\)/);
-  assert.match(javascript, /Tag \${me\.entity_type === "performer" \? "Performer" : "Studio"} \(\${me\.entity_name}\)/);
+  assert.match(javascript, /Use \${me\.entity_type\.charAt\(0\)\.toUpperCase\(\) \+ me\.entity_type\.slice\(1\)}/);
+  assert.match(javascript, /query FindT \{ allTags \{ id name \} \}/);
+  assert.match(javascript, /React\.createElement\("option", \{ value: "tag" \}, "Tag"\)/);
 
   // 4. Passing chosen target_entity_type and target_entity_id to approve handler
   assert.match(javascript, /target_entity_type: selectedEntityType/);
   assert.match(javascript, /target_entity_id: selectedEntityId/);
 });
 
-test("Automatic Filing Incoming diagnostic display, Retry Filing and Backlog UI components", () => {
-  // 1. Diagnostic rendering for imported incoming items
-  assert.match(javascript, /const isImported = item\.status === "imported"/);
-  assert.match(javascript, /className: "lm-terminal-filing-diagnostic"/);
-  assert.match(javascript, /className: "lm-filing-diag-label"/);
-  assert.match(javascript, /📁 Filing:/);
+test("Automatic Filing unresolved imports and Retry Filing appear in Command Center", () => {
+  // 1. Unresolved imported files are promoted to Needs Attention without duplicating pending proposals.
+  assert.match(javascript, /const filingAttentionIncoming = allActive\.filter/);
+  assert.match(javascript, /item\.has_pending_proposal !== true && item\.needs_recovery !== true/);
+  assert.match(javascript, /filingAttentionIncoming\.map/);
+  assert.match(javascript, /FILING NEEDS ATTENTION:/);
   assert.match(javascript, /item\.filing_diagnostic/);
 
-  // 2. Retry Filing button, safeguards (rejects already-filed, baseline, recovery, non-video) and handler
+  // 2. Retry Filing is enabled while idle and invokes the existing focused handler.
   assert.match(javascript, /handleRetryFiling/);
-  assert.match(javascript, /className: "lm-terminal-inline-btn retry-filing"/);
-  assert.match(javascript, /"⟳ RETRY FILING"/);
+  assert.match(javascript, /onClick: \(\) => handleRetryFiling\(item\.path\)/);
+  assert.match(javascript, /disabled: !!busy/);
+  assert.match(javascript, /"⟳ RETRYING…" : "⟳ RETRY FILING"/);
   assert.match(javascript, /operation\("retry_filing_proposal", \{ path \}\)/);
-  assert.match(javascript, /showRetryFiling = isImported && isVideo && !item\.filed && !item\.needs_recovery && !hasPendingProposal && !item\.is_baseline && item\.exists_on_disk !== false/);
+  assert.doesNotMatch(javascript, /Incoming File Status & Diagnostics/);
 
   // 3. Organise Existing Files backlog entry point and informational modal
   assert.match(javascript, /className: "lm-terminal-btn-backlog"/);
@@ -446,10 +469,7 @@ test("Automatic Filing Incoming diagnostic display, Retry Filing and Backlog UI 
   assert.match(javascript, /Organise Existing Files \(Backlog Workflow\)/);
   assert.match(javascript, /Baseline Protection Active/);
 
-  // 4. CSS styling for imported lines, diagnostic pill, retry button, and backlog entry button
-  assert.match(css, /\.lm-terminal-line\.imported/);
-  assert.match(css, /\.lm-terminal-filing-diagnostic/);
-  assert.match(css, /\.lm-terminal-inline-btn\.retry-filing/);
+  // 4. Backlog entry styling remains available in Command Center.
   assert.match(css, /\.lm-terminal-btn-backlog/);
 });
 
@@ -497,17 +517,68 @@ test("Backlog Organiser UI: selection, stats badges, confirmation modal, progres
   assert.match(css, /\.lm-backlog-tally-grid/);
 });
 
-test("Dashboard component mounts and executes without ReferenceError or TDZ errors", () => {
+test("backlog evaluation preserves filenames and exact reasons behind summary counts", () => {
+  const reason = loadNamedFunction("backlogResultReason");
+  const label = loadNamedFunction("backlogOutcomeLabel");
+
+  assert.equal(reason({
+    diagnostic: "Studio '8teenBoy' identified, but no destination folder found",
+    error: "less useful fallback"
+  }), "Studio '8teenBoy' identified, but no destination folder found");
+  assert.equal(reason({ error: "Could not locate linked Stash scene for this file." }),
+    "Could not locate linked Stash scene for this file.");
+  assert.equal(label("no_identity_found"), "No Identity Found");
+  assert.equal(label("destination_not_found"), "No Destination");
+
+  assert.match(javascript, /runningResults\.push\(\.\.\.res\.results\)/);
+  assert.match(javascript, /results: runningResults/);
+  assert.match(javascript, /Files that need explanation/);
+  assert.match(javascript, /result\.basename \|\| basename\(result\.path\)/);
+  assert.match(javascript, /backlogResultReason\(result\)/);
+  assert.match(css, /\.lm-backlog-result-list/);
+});
+
+test("every dashboard tab, including Incoming Downloads, renders without ReferenceError", () => {
   const registeredRoutes = {};
+  let requestedTab = "overview";
+  let requestedTerminalFilter = "all";
+  let stateCall = 0;
+  let executeComponents = false;
+  const dashboardFixture = {
+    inventory: { status: "complete", completed_at: "2026-09-20T00:00:00Z", present_count: 1, missing_count: 0, stash_scene_count: 1 },
+    monitor: { state: "running", pid_alive: true, is_stale: false, unavailable_roots: [], pending_events: 0 },
+    incoming: { active: [], downloading: 0, waiting: 0, scanning: 0, imported: 0, failed: 0 },
+    incoming_folder: { folders: [], valid_count: 0 },
+    pending_events: [], activity: [], filing_proposals: [], active_filing_transfers: [],
+    transcoder_candidates: [], configured_filing_roots: [], filing_folder_mappings: [],
+    startup: { platform_label: "Test OS" }, active_jobs: []
+  };
+  const configFixture = {
+    onboardingCompleted: true,
+    autoStartMonitor: false,
+    automaticMoveReconciliation: true,
+    automaticIncomingScan: true,
+    incomingFolders: [],
+    contactSheetScope: "incoming"
+  };
   const ReactMock = {
-    useState: (initial) => [typeof initial === "function" ? initial() : initial, () => {}],
+    useState: (initial) => {
+      const index = stateCall++;
+      let value = typeof initial === "function" ? initial() : initial;
+      if (index === 0) value = requestedTab;
+      if (index === 1) value = dashboardFixture;
+      if (index === 3) value = configFixture;
+      if (index === 15) value = requestedTerminalFilter;
+      return [value, () => {}];
+    },
     useRef: (val) => ({ current: val }),
     useEffect: (fn, deps) => {},
     useCallback: (fn, deps) => fn,
     useMemo: (fn, deps) => fn(),
     createElement: (type, props, ...children) => {
       if (typeof type === "function") {
-        try { return type(props || {}); } catch (_) { return { type: type.name || "fn", props, children }; }
+        if (!executeComponents) return { type: type.name || "fn", props, children };
+        return type(props || {});
       }
       return { type, props, children };
     },
@@ -524,6 +595,7 @@ test("Dashboard component mounts and executes without ReferenceError or TDZ erro
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
   const originalMutationObserver = globalThis.MutationObserver;
+  const originalFetch = globalThis.fetch;
 
   globalThis.MutationObserver = class {
     observe() {}
@@ -572,6 +644,9 @@ test("Dashboard component mounts and executes without ReferenceError or TDZ erro
     addEventListener: () => {},
     removeEventListener: () => {}
   };
+  globalThis.fetch = async () => ({
+    json: async () => ({ data: { configuration: { plugins: { librarymanager: { autoStartMonitor: false } } } } })
+  });
 
   try {
     // Execute the full librarymanager.js script
@@ -579,14 +654,109 @@ test("Dashboard component mounts and executes without ReferenceError or TDZ erro
     fn();
     const DashboardComponent = registeredRoutes["/library-manager"];
     assert.ok(DashboardComponent, "Dashboard route component registered");
+    executeComponents = true;
     
-    // Mount and execute DashboardComponent render
-    const rendered = DashboardComponent();
-    assert.ok(rendered, "Dashboard component mounted and returned JSX tree without ReferenceError");
+    const tabs = ["overview", "monitor", "incoming", "csm", "manage", "activity", "advanced", "help"];
+    for (const dashboardTab of tabs) {
+      requestedTab = dashboardTab;
+      requestedTerminalFilter = "all";
+      stateCall = 0;
+      assert.doesNotThrow(() => DashboardComponent(), `${dashboardTab} tab renders without a scope error`);
+    }
+
+    requestedTab = "overview";
+    requestedTerminalFilter = "attention";
+    stateCall = 0;
+    const emptyAttentionTree = DashboardComponent();
+    const flattenText = node => {
+      if (node == null || typeof node === "boolean") return "";
+      if (typeof node === "string" || typeof node === "number") return String(node);
+      if (Array.isArray(node)) return node.map(flattenText).join(" ");
+      return flattenText(node.children || []);
+    };
+    assert.match(flattenText(emptyAttentionTree), /No items currently need attention\. Watchtower is listening\./);
   } finally {
     globalThis.window = originalWindow;
     globalThis.document = originalDocument;
     globalThis.MutationObserver = originalMutationObserver;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("runtime indicators distinguish watcher process health from feature settings", () => {
+  const indicators = loadNamedFunction("dashboardIndicatorState");
+  const running = indicators(
+    { autoStartMonitor: false, automaticMoveReconciliation: true, automaticIncomingScan: true },
+    { state: "running", pid_alive: true, is_stale: false, unavailable_roots: [] },
+    { active: [] },
+    { pending_events: [], filing_proposals: [] }
+  );
+  assert.deepEqual(running.watcher, {
+    active: true,
+    state: "RUNNING",
+    help: "Filesystem monitor process is running; automatic startup is disabled"
+  });
+  assert.deepEqual(running.moveSync, { active: true, state: "ON" });
+  assert.deepEqual(running.incoming, { active: true, state: "ON" });
+  assert.deepEqual(running.alerts, { active: false, state: "CLEAR", count: 0 });
+
+  const stale = indicators(
+    { autoStartMonitor: true, automaticMoveReconciliation: false, automaticIncomingScan: false },
+    { state: "stale", is_stale: true, stale_reason: "Heartbeat missing", unavailable_roots: ["/nas"] },
+    { active: [{ status: "failed" }] },
+    { pending_events: [{ processing_state: null }], filing_proposals: [{ status: "needs_recovery" }] }
+  );
+  assert.equal(stale.watcher.state, "STALE");
+  assert.equal(stale.watcher.help, "Heartbeat missing");
+  assert.equal(stale.alerts.count, 5);
+});
+
+test("Incoming Downloads hides resolved history but retains unfinished filing work", () => {
+  const visible = loadNamedFunction("isIncomingWorkVisible");
+
+  assert.equal(visible({ status: "imported", filed: true }, true), false,
+    "completed filing is historical");
+  assert.equal(visible({ status: "ignored" }, true), false,
+    "dismissed history stays out of Incoming Downloads");
+  assert.equal(visible({ status: "imported", exists_on_disk: true, is_in_incoming_folder: true }, false), false,
+    "a successful import is complete when Automatic Filing is disabled");
+
+  assert.equal(visible({ status: "waiting" }, false), true,
+    "currently processing work remains visible");
+  assert.equal(visible({ status: "failed" }, false), true,
+    "unresolved errors remain visible");
+  assert.equal(visible({ status: "unmatched" }, false), true,
+    "items requiring review remain visible");
+  assert.equal(visible({ status: "imported", has_pending_proposal: true }, false), true,
+    "filing approval remains visible even if filing is later disabled");
+  assert.equal(visible({ status: "imported", needs_recovery: true }, false), true,
+    "filing recovery remains visible");
+  assert.equal(visible({
+    status: "imported", filed: false, exists_on_disk: true,
+    is_in_incoming_folder: true, is_baseline: false
+  }, true), true, "successful import does not hide unresolved filing");
+});
+
+test("Alerts navigation selects Overview Needs Attention and scrolls to it", () => {
+  const navigate = loadNamedFunction("navigateToNeedsAttention");
+  const calls = [];
+  let scrolled = null;
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  globalThis.window = { setTimeout: callback => { callback(); return 1; } };
+  globalThis.document = {
+    getElementById: id => ({ scrollIntoView: options => { scrolled = { id, options }; } })
+  };
+  try {
+    navigate(value => calls.push(["tab", value]), value => calls.push(["filter", value]));
+    assert.deepEqual(calls, [["filter", "attention"], ["tab", "overview"]]);
+    assert.deepEqual(scrolled, {
+      id: "lm-needs-attention",
+      options: { behavior: "smooth", block: "start" }
+    });
+  } finally {
+    globalThis.window = originalWindow;
+    globalThis.document = originalDocument;
   }
 });
 
@@ -674,8 +844,9 @@ test('Happening Now uncluttered and shows only active operations or listening em
   assert.ok(javascript.includes('lm-terminal-btn-backlog'), 'Backlog button present in Happening Now header');
   assert.ok(javascript.includes('backlogData?.eligible_count ?? incoming?.backlog_eligible_count'), 'Backlog button displays live eligible count');
 
-  // 4. Incoming Diagnostics accessible in Incoming tab
-  assert.ok(javascript.includes('Incoming File Status & Diagnostics'), 'Incoming tab includes diagnostics panel');
+  // 4. Unresolved filing diagnostics live in Command Center rather than Incoming Downloads.
+  assert.ok(javascript.includes('filingAttentionIncoming.map'), 'Command Center renders unresolved filing diagnostics');
+  assert.ok(!javascript.includes('Incoming File Status & Diagnostics'), 'Incoming tab no longer duplicates Command Center filing diagnostics');
 });
 
 test('Backlog Organise Existing Files reconciled stats, verified moved status pill, destination display and selection reset', () => {
@@ -699,4 +870,105 @@ test('Backlog Organise Existing Files reconciled stats, verified moved status pi
   assert.ok(css.includes('.item-status-pill.moved'), 'CSS defines style for moved pill');
   assert.ok(css.includes('.lm-backlog-stat.pending'), 'CSS defines style for pending stat card');
   assert.ok(css.includes('.lm-backlog-stat.moved'), 'CSS defines style for moved stat card');
+});
+
+test('File Reconciliation Phase 1 duplicate and external move alert cards, scene links and review controls', () => {
+  // 1. Duplicate detection alert card rendering
+  assert.ok(javascript.includes('⚠️ POSSIBLE DUPLICATE:'), 'Renders possible duplicate title');
+  assert.ok(javascript.includes('lm-terminal-badge duplicate'), 'Renders duplicate badge');
+  assert.ok(javascript.includes('Identical file already exists in Stash as Scene #'), 'Renders duplicate scene explanation');
+  assert.ok(javascript.includes('✓ Verified Identical'), 'Renders verification notice');
+  assert.ok(javascript.includes('⏳ Verification pending (calculating checksum…)'), 'Renders pending verification state');
+
+  // 2. Ambiguous candidate alert card rendering
+  assert.ok(javascript.includes('⚠️ AMBIGUOUS DUPLICATE CANDIDATES:'), 'Renders ambiguous duplicate title');
+  assert.ok(javascript.includes('AMBIGUOUS DUPLICATE'), 'Renders ambiguous duplicate badge');
+  assert.ok(javascript.includes('Multiple matching Stash scenes'), 'Renders ambiguous explanation');
+
+  // 3. External move alert card rendering
+  assert.ok(javascript.includes('⚠️ POSSIBLE EXTERNAL MOVE:'), 'Renders external move title');
+  assert.ok(javascript.includes('File matches missing Stash Scene #'), 'Renders external move explanation');
+
+  // 4. Review controls & Scene navigation & Keep Both confirmation
+  assert.ok(javascript.includes('👁 VIEW SCENE #'), 'Includes View Scene button linking to Stash scene');
+  assert.ok(javascript.includes('KEEP BOTH (ADD TO STASH)'), 'Includes Keep Both button');
+  assert.ok(javascript.includes('resolvePendingEvent(event, "keep_both")'), 'Invokes keep_both resolution');
+  assert.ok(javascript.includes('Keep this additional file?'), 'Shows confirmation for Keep Both');
+  assert.ok(javascript.includes("Stash may add it, associate it with an existing scene, or ignore it according to Stash's duplicate-handling rules."), 'Accurately explains Stash controls the scan outcome');
+  assert.ok(javascript.includes('Review only — Watchtower will not scan or relink this file automatically.'), 'External moves expose only review actions');
+  const externalMoveStart = javascript.indexOf('if (isExternalMove && dup)');
+  const genericReviewStart = javascript.indexOf('return React.createElement("div", { className: `lm-terminal-attention-item', externalMoveStart);
+  const externalMoveCard = javascript.slice(externalMoveStart, genericReviewStart);
+  assert.ok(externalMoveStart >= 0 && genericReviewStart > externalMoveStart, 'Locates the external-move card');
+  assert.ok(!externalMoveCard.includes('scan_destination'), 'External-move card cannot start a generic scan');
+  assert.ok(!externalMoveCard.includes('keep_both'), 'External-move card cannot start Keep Both');
+
+  // 5. CSS styling
+  assert.ok(css.includes('.lm-terminal-attention-item.duplicate'), 'CSS defines style for duplicate item');
+  assert.ok(css.includes('.lm-terminal-badge.duplicate'), 'CSS defines style for duplicate badge');
+  assert.ok(css.includes('.lm-terminal-btn.view-scene'), 'CSS defines style for view-scene button');
+});
+
+test("Filing Proposal hover preview and FastTag actions menu", () => {
+  assert.match(javascript, /SceneLink\(prop\.scene_id, basename\(prop\.source_path\), "lm-filing-scene-link"\)/);
+  assert.match(javascript, /className: "lm-terminal-btn details lm-filing-menu-trigger"/);
+  assert.match(javascript, /🎬 Open Scene in Stash/);
+  assert.match(javascript, /⚡ Edit Scene with FastTag/);
+  assert.match(javascript, /⟳ Refresh Filing Choices/);
+  assert.match(css, /\.lm-filing-scene-link/);
+});
+
+test("Backlog failures can open metadata editing and be re-evaluated", () => {
+  assert.match(javascript, /function openBacklogMetadataEditor\(event, sceneId\)/);
+  assert.match(javascript, /window\.open\(`\/scenes\/\$\{sceneId\}\/edit`/);
+  assert.match(javascript, /function openBacklogFastTag\(event, sceneId\)/);
+  assert.match(javascript, /cardEl\.dispatchEvent\(new MouseEvent\("contextmenu"/);
+  assert.match(javascript, /async function handleReevaluateBacklogItem\(item\)/);
+  assert.match(javascript, /refresh_metadata: true/);
+  assert.match(javascript, /🎬 OPEN SCENE TO EDIT/);
+  assert.match(javascript, /⚡ EDIT WITH FASTTAG/);
+  assert.match(javascript, /⟳ RE-EVALUATE/);
+  assert.match(javascript, /"data-scene-id": result\.scene_id \|\| ""/);
+  assert.match(css, /\.lm-backlog-item-actions/);
+});
+
+test("Exact duplicate repair requires verification and keeps companion deletion optional", () => {
+  assert.match(javascript, /operation\("inspect_backlog_duplicate"/);
+  assert.match(javascript, /request_verification: requestVerification === true/);
+  assert.match(javascript, /duplicate_info\.checksum_status === "verified"/);
+  assert.match(javascript, /DELETE EXACT DUPLICATE…/);
+  assert.match(javascript, /Also delete .* exact companion file\(s\) from the incoming folder/);
+  assert.match(javascript, /duplicateCompanionChoices\[result\.path\] === true/);
+  assert.match(javascript, /The organised file will remain:/);
+  assert.match(javascript, /This cannot be undone\./);
+  assert.match(javascript, /operation\("delete_backlog_duplicate"/);
+  assert.match(javascript, /backlogData\?\.duplicate_review_count/);
+  assert.match(javascript, /Incoming duplicate:/);
+  assert.match(css, /\.lm-duplicate-companion-choice/);
+});
+
+
+test("Phase 3 presents one expandable grouped review without destructive actions", () => {
+  assert.match(javascript, /data\?\.grouped_reconciliation \|\| \[\]/);
+  assert.match(javascript, /FOLDER MOVED/);
+  assert.match(javascript, /Review .* tracked item/);
+  assert.match(javascript, /Scene #\$\{member\.scene_id\}/);
+  assert.match(javascript, /File #\$\{member\.file_id\}/);
+  assert.match(javascript, /member\.reason \|\| "No additional detail"/);
+  assert.match(javascript, /Copy groups are review-only and cannot trigger a Stash scan/);
+  assert.match(javascript, /No media files will be moved or deleted/);
+  assert.match(javascript, /operation\("dismiss_grouped_reconciliation"/);
+  assert.doesNotMatch(javascript, /operation\("relink_grouped_reconciliation"/);
+});
+
+test("Phase 4 requires explicit Stash scan approval and keeps copy groups review-only", () => {
+  assert.match(javascript, /operation\("execute_grouped_reconciliation"/);
+  assert.match(javascript, /Watchtower will ask Stash to scan/);
+  assert.match(javascript, /Stash may update its library according to its own scanner rules/);
+  assert.match(javascript, /original scene ID and file ID at the exact expected path/);
+  assert.match(javascript, /No media files will be moved or deleted/);
+  assert.match(javascript, /batch\.operation_type === "folder_move" \|\| batch\.operation_type === "bulk_move"/);
+  assert.match(javascript, /Copy groups are review-only and cannot trigger a Stash scan/);
+  assert.match(javascript, /RESUME VERIFICATION/);
+  assert.match(javascript, /SCAN & VERIFY MOVE/);
 });
