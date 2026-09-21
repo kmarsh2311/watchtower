@@ -781,6 +781,44 @@ def test_phase4_file_id_mismatch_remains_visible_as_partial(tmp_path):
     assert stash.scan_calls == [[str(destination)]]
 
 
+def test_phase4_explains_stale_same_scene_attachment_and_rechecks_without_rescan(tmp_path):
+    from librarymanager_reconciliation import execute_grouped_move_reconciliation
+
+    database, _source, destination, expected, batch = _detected_move_batch(tmp_path)
+    stash = _successful_grouped_stash(expected)
+    old_path, new_path = expected[1]
+    size = new_path.stat().st_size
+    fingerprints = [{"type": "oshash", "value": "same-video"}]
+    stash.scene_files["phase4-scene-1"] = [
+        {"id": "phase4-file-1", "path": str(old_path), "basename": old_path.name,
+         "size": size, "fingerprints": fingerprints},
+        {"id": "replacement-file-id", "path": str(new_path), "basename": new_path.name,
+         "size": size, "fingerprints": fingerprints},
+    ]
+
+    result = execute_grouped_move_reconciliation(database, batch["id"], stash, owner="stale-test")
+    stale = next(member for member in result["members"] if member["scene_id"] == "phase4-scene-1")
+    assert result["state"] == "partially_verified"
+    assert "Stash still lists file ID phase4-file-1 at the missing old path" in stale["reason"]
+    assert "run Stash Clean" in stale["reason"]
+
+    recheck_stash = _successful_grouped_stash(expected)
+    recheck_stash.scene_files["phase4-scene-1"] = stash.scene_files["phase4-scene-1"]
+    rechecked = execute_grouped_move_reconciliation(
+        database, batch["id"], recheck_stash, owner="stale-recheck"
+    )
+    assert rechecked["state"] == "partially_verified"
+    assert recheck_stash.scan_calls == []
+
+
+def test_grouped_path_identity_normalizes_equivalent_unicode(tmp_path):
+    from librarymanager_reconciliation import _normalized_filesystem_path
+
+    composed = str(tmp_path / "Piñata Pete.mp4")
+    decomposed = str(tmp_path / "Pin\u0303ata Pete.mp4")
+    assert _normalized_filesystem_path(composed) == _normalized_filesystem_path(decomposed)
+
+
 def test_phase4_changed_destination_blocks_scan(tmp_path):
     from librarymanager_reconciliation import execute_grouped_move_reconciliation
 

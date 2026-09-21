@@ -1849,7 +1849,8 @@
 
     async function executeGroupedReconciliation(batch) {
       const resuming = batch.state === "scanning" || batch.state === "verifying";
-      if (!resuming && !window.confirm(
+      const rechecking = batch.state === "partially_verified";
+      if (!resuming && !rechecking && !window.confirm(
         `Reconcile this verified move through Stash?\n\nWatchtower will ask Stash to scan:\n${batch.destination_prefix || "Unknown destination"}\n\nStash may update its library according to its own scanner rules. Watchtower will resolve only files that retain the original scene ID and file ID at the exact expected path. No media files will be moved or deleted.`
       )) return;
       setBusy(`grouped-execute:${batch.id}`); setError("");
@@ -2733,14 +2734,14 @@
                   ? "Approval asks Stash to scan the destination folder; Watchtower then verifies every original scene and file identity."
                   : "Copy groups are review-only and cannot trigger a Stash scan."),
               React.createElement("div", { className: "lm-terminal-actions" },
-                isMoveGroup && !isPartiallyVerified && React.createElement("button", {
+                isMoveGroup && React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn retry",
                   disabled: !!busy,
                   onClick: () => executeGroupedReconciliation(batch)
                 }, busy === `grouped-execute:${batch.id}`
                   ? "VERIFYING…"
-                  : (isResumable ? "⟳ RESUME VERIFICATION" : "✓ SCAN & VERIFY MOVE")),
+                  : (isResumable ? "⟳ RESUME VERIFICATION" : (isPartiallyVerified ? "⟳ RECHECK AFTER STASH CLEAN" : "✓ SCAN & VERIFY MOVE"))),
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn dismiss",

@@ -12,6 +12,7 @@ import hashlib
 import sqlite3
 import stat
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -449,7 +450,9 @@ def _path_flavour(path: str):
 
 def _path_key(path: str) -> str:
     flavour = _path_flavour(path)
-    value = str(flavour(str(path or ""))).replace("\\", "/").rstrip("/")
+    value = unicodedata.normalize(
+        "NFC", str(flavour(str(path or ""))).replace("\\", "/").rstrip("/")
+    )
     return value.casefold() if flavour is PureWindowsPath else value
 
 
@@ -988,7 +991,7 @@ def dismiss_review_batch(database_path: Path | str, batch_id: int) -> dict:
 
 _GROUPED_SCENE_FILES_QUERY = """
 query WatchtowerGroupedSceneFiles($id: ID!) {
-  findScene(id: $id) { id files { id path basename } }
+  findScene(id: $id) { id files { id path basename size fingerprints { type value } } }
 }
 """
 
@@ -1146,8 +1149,38 @@ def _verify_grouped_members(database_path: Path | str, batch_id: int, stash, pat
                          if _normalized_filesystem_path(item.get("path")) == expected_key]
             if same_path:
                 observed = same_path[0]
+                original = next((item for item in (scene.get("files") or [])
+                                 if str(item.get("id")) == str(member["file_id"])), None)
+                original_fingerprints = {
+                    (str(item.get("type") or "").lower(), str(item.get("value") or ""))
+                    for item in ((original or {}).get("fingerprints") or [])
+                    if item.get("type") and item.get("value")
+                }
+                observed_fingerprints = {
+                    (str(item.get("type") or "").lower(), str(item.get("value") or ""))
+                    for item in (observed.get("fingerprints") or [])
+                    if item.get("type") and item.get("value")
+                }
+                strong_match = bool({pair for pair in original_fingerprints & observed_fingerprints
+                                     if pair[0] in {"oshash", "sha256", "md5"}})
+                stale_old_attachment = (
+                    original is not None
+                    and _normalized_filesystem_path(original.get("path"))
+                    == _normalized_filesystem_path(member.get("old_path"))
+                    and path_probe(member.get("old_path")).get("status") == "missing"
+                    and strong_match
+                    and (original.get("size") is None or observed.get("size") is None
+                         or int(original.get("size")) == int(observed.get("size")))
+                )
+                reason = (
+                    f"Stash still lists file ID {member['file_id']} at the missing old path, while "
+                    f"the same scene uses matching file ID {observed.get('id')} at the renamed path. "
+                    "Confirm the scene plays, run Stash Clean to remove the missing attachment, then recheck."
+                    if stale_old_attachment else
+                    "Expected path is attached to the scene with a different Stash file ID"
+                )
                 results.append((member, "uncertain",
-                                "Expected path is attached to the scene with a different Stash file ID",
+                                reason,
                                 {"observed_file_id": str(observed.get("id") or ""),
                                  "observed_scene_id": str(scene.get("id") or ""),
                                  "observed_path": observed.get("path")}))
@@ -1276,23 +1309,28 @@ def execute_grouped_move_reconciliation(
                 transition_batch(database_path, batch_id, "needs_attention", expected_state=state,
                                  reason="No stable verified destinations are currently ready to scan")
                 return batch_snapshot(database_path, batch_id)
-            destination = probe(batch["destination_prefix"])
-            if destination.get("status") != "ok" or not destination.get("is_dir"):
-                transition_batch(database_path, batch_id, "needs_attention", expected_state=state,
-                                 reason="Destination folder is unavailable; no Stash scan was started")
-                return batch_snapshot(database_path, batch_id)
-            transition_batch(database_path, batch_id, "scanning", expected_state=state,
-                             reason="User approved one bounded Stash scan of the destination folder",
-                             stash_job_id="starting")
-            try:
-                job_id = stash.metadata_scan(paths=[batch["destination_prefix"]])
-            except Exception as exc:
-                transition_batch(database_path, batch_id, "needs_attention", expected_state="scanning",
-                                 reason=f"Stash scan could not be started: {exc}")
-                return batch_snapshot(database_path, batch_id)
-            transition_batch(database_path, batch_id, "scanning", expected_state="scanning",
-                             stash_job_id=str(job_id))
-            batch = batch_snapshot(database_path, batch_id)
+            if state == "partially_verified":
+                transition_batch(database_path, batch_id, "verifying", expected_state=state,
+                                 reason="Rechecking remaining identities after user review")
+                batch = batch_snapshot(database_path, batch_id)
+            else:
+                destination = probe(batch["destination_prefix"])
+                if destination.get("status") != "ok" or not destination.get("is_dir"):
+                    transition_batch(database_path, batch_id, "needs_attention", expected_state=state,
+                                     reason="Destination folder is unavailable; no Stash scan was started")
+                    return batch_snapshot(database_path, batch_id)
+                transition_batch(database_path, batch_id, "scanning", expected_state=state,
+                                 reason="User approved one bounded Stash scan of the destination folder",
+                                 stash_job_id="starting")
+                try:
+                    job_id = stash.metadata_scan(paths=[batch["destination_prefix"]])
+                except Exception as exc:
+                    transition_batch(database_path, batch_id, "needs_attention", expected_state="scanning",
+                                     reason=f"Stash scan could not be started: {exc}")
+                    return batch_snapshot(database_path, batch_id)
+                transition_batch(database_path, batch_id, "scanning", expected_state="scanning",
+                                 stash_job_id=str(job_id))
+                batch = batch_snapshot(database_path, batch_id)
         elif state == "scanning" and batch.get("stash_job_id") in (None, "", "starting"):
             transition_batch(database_path, batch_id, "needs_attention", expected_state="scanning",
                              reason="The previous scan started but its job ID was not recorded; check Stash jobs before retrying")
