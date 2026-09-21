@@ -25,7 +25,7 @@ jobs:
       - name: Verify bundled watchdog in isolated Python
         run: python -m unittest tests.test_bundled_watchdog
       - name: Run full Python test suite
-        run: python -m pytest tests/
+        run: python -m pytest -vv --full-trace tests/
       - name: Run complete UI test suite
         if: always()
         run: node tests/test_ui.mjs
