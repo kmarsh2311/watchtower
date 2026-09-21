@@ -5027,6 +5027,12 @@
                         key: `${result.path || result.basename || outcome}-${index}`,
                         "data-scene-id": result.scene_id || ""
                       },
+                        result.scene_id ? React.createElement("a", {
+                          href: `/scenes/${result.scene_id}`,
+                          className: "lm-fasttag-scene-context",
+                          tabIndex: -1,
+                          "aria-hidden": "true"
+                        }) : null,
                         React.createElement("strong", null, result.basename || basename(result.path) || "Unknown file"),
                         React.createElement("p", null, backlogResultReason(result)),
                         result.path && React.createElement("code", null, result.path),

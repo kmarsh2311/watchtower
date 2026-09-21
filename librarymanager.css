@@ -3076,6 +3076,9 @@ a.lm-activity-scene-pill:hover {
 }
 .lm-backlog-item-details ul { margin: 5px 0 2px; padding-left: 18px; color: #bfdbfe; }
 .lm-backlog-item-details li + li { margin-top: 3px; }
+.lm-fasttag-scene-context {
+  display: none !important;
+}
 @media (max-width: 1050px) {
   .lm-backlog-stats-bar { grid-template-columns: 1fr; }
 }

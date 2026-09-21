@@ -935,6 +935,8 @@ test("Backlog failures can open metadata editing and be re-evaluated", () => {
   assert.match(javascript, /window\.open\(`\/scenes\/\$\{sceneId\}\/edit`/);
   assert.match(javascript, /function openBacklogFastTag\(event, sceneId\)/);
   assert.match(javascript, /cardEl\.dispatchEvent\(new MouseEvent\("contextmenu"/);
+  assert.match(javascript, /href: `\/scenes\/\$\{result\.scene_id\}`/);
+  assert.match(javascript, /className: "lm-fasttag-scene-context"/);
   assert.match(javascript, /async function handleReevaluateBacklogItem\(item\)/);
   assert.match(javascript, /refresh_metadata: true/);
   assert.match(javascript, /🎬 OPEN SCENE TO EDIT/);
@@ -942,6 +944,7 @@ test("Backlog failures can open metadata editing and be re-evaluated", () => {
   assert.match(javascript, /⟳ RE-EVALUATE/);
   assert.match(javascript, /"data-scene-id": result\.scene_id \|\| ""/);
   assert.match(css, /\.lm-backlog-item-actions/);
+  assert.match(css, /\.lm-fasttag-scene-context/);
 });
 
 test("Exact duplicate repair requires verification and keeps companion deletion optional", () => {
