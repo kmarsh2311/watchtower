@@ -132,6 +132,20 @@ def test_backlog_recheck_follows_recorded_filename_and_destination_folder_rename
     assert renamed_items[str(old_companion)]["path"] == str(new_companion)
     assert renamed_items[str(old_companion)]["status"] == "companion"
 
+    later_video = incoming / "Arrived Months Later.mp4"
+    later_companion = incoming / "Arrived Months Later.nfo"
+    later_video.write_bytes(b"later")
+    later_companion.write_bytes(b"metadata")
+    later = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
+    later_by_path = {item["path"]: item for item in later["items"]}
+    assert later_by_path[str(later_video)]["eligible"] is True
+    assert later_by_path[str(later_companion)]["status"] == "companion"
+    later_video.unlink()
+    later_companion.unlink()
+    cleared = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
+    assert str(later_video) not in {item["path"] for item in cleared["items"]}
+    assert cleared["missing_count"] == 0
+
     filed_source = incoming / "Filed Scene.mp4"
     filed_companion = incoming / "Filed Scene.mp4.jpg"
     filed_source.write_bytes(b"filed")

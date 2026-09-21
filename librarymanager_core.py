@@ -7547,6 +7547,35 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                 candidate = renamed_paths[candidate]
             return candidate if Path(candidate).is_file() else original_path
 
+        # The immutable baseline protects original files, but it must not freeze
+        # the organiser's working list forever. Add files that currently exist
+        # in Incoming without hashing them or scanning any library destination.
+        represented_current_paths = {
+            current_recorded_path(str(row["path"])) for row in rows
+        }
+        for incoming_folder in incoming_folders:
+            folder = Path(incoming_folder).expanduser()
+            if not folder.is_dir():
+                continue
+            for root, _dirs, filenames in os.walk(folder):
+                for filename in filenames:
+                    current_path = Path(root) / filename
+                    current_path_str = str(current_path)
+                    if current_path_str in represented_current_paths:
+                        continue
+                    try:
+                        stat = current_path.stat()
+                    except OSError:
+                        continue
+                    rows.append({
+                        "path": current_path_str,
+                        "size": stat.st_size,
+                        "modified_ns": stat.st_mtime_ns,
+                        "oshash": None,
+                        "seen_at": utc_now(),
+                    })
+                    represented_current_paths.add(current_path_str)
+
         # A previously completed move may carry a stale historical proposal
         # status. Treat it as moved only when the destination exists and the
         # preserved Stash file ID and scene ID both match the current inventory.
