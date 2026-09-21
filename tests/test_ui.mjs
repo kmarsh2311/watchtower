@@ -173,8 +173,10 @@ test("video quality naming is optional, standard resolution format, and position
   assert.match(javascript, /type: "radio"/);
   assert.match(javascript, /config\.includeVideoQuality === true && React\.createElement/);
   assert.match(css, /\.lm-quality-position-options\{[^}]*display:flex/);
+  assert.match(css, /\.lm-quality-setting\{[^}]*grid-column:1\/-1/);
+  assert.match(css, /\.lm-quality-setting\{[^}]*justify-content:space-between/);
   assert.match(css, /\.lm-quality-setting\{[^}]*border-bottom:/);
-  assert.match(css, /\.lm-quality-setting>\.lm-switch-row\{border-bottom:0\}/);
+  assert.match(css, /\.lm-quality-setting>\.lm-switch-row\{[^}]*border-bottom:0/);
   assert.ok(javascript.indexOf('className: "lm-date-setting"') < javascript.indexOf('className: "lm-quality-setting"'),
     "includeVideoQuality is placed after includeSceneDate in the rules grid");
   assert.match(javascript, /config\.filenameQualityPosition === "beginning" \? exampleMainParts\.unshift\(exampleQuality\) : exampleMainParts\.push\(exampleQuality\)/);
