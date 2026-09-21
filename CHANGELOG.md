@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.13 — 2026-09-22
+
+- **Simplified Renaming & Automatic Filing Architecture**: Completely decoupled Automatic Filing from Automatic Renaming. Automatic Filing moves files to destination folders preserving original filenames without generating permanent rename protection locks.
+- **Independent Automatic Renaming**: Master Automatic Renaming switch alone controls whether subsequent Stash metadata edits rename files on disk. When disabled, metadata edits leave files unchanged.
+- **Safe Database Migration**: Automatically clears legacy `rename_protected` flags in `filename_state` without enqueuing renames or triggering bulk renaming. Cleanly retired the redundant `autoFilingPreserveFilename` setting.
+- **Optional Video Quality Filename Token**: Added optional video quality token (`[1080p]`, `[720p]`, `[4K]`, etc.) to canonical filenames with configurable beginning/end positioning and responsive inline UI.
+- **Ingestion & Preview Height Resolution**: Ensures stored video dimensions supply the resolution for canonical filename generation and read-only test previews without requiring a full library rescan.
+- **Reconnecting Root & Monitor Resilience**: Stale monitor data cannot block recovery after a drive reconnects; backend verifies root availability on user removal acknowledgement.
+- **Bounded Operational History**: Safely bounded historical operational table retention (`prune_operational_records`) while preserving actionable proposals and unreviewed events indefinitely.
+
+
 ## 1.0.12 — 2026-09-21
 
 - Isolate the native Windows filesystem monitor from Stash's console so plugin-operation cleanup cannot interrupt the watcher or terminate Stash.

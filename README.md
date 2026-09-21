@@ -5,7 +5,7 @@
 # 🗼 Watchtower for Stash
 ### The 24/7 Real-Time Filesystem Watcher, Automated Ingest Pipeline & Media Inventory Guardian for Stash
 
-[![Version](https://img.shields.io/badge/version-1.0.12-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases)
+[![Version](https://img.shields.io/badge/version-1.0.13-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases)
 [![Stash](https://img.shields.io/badge/Stash-v0.26+-ff0055?style=for-the-badge)](https://github.com/stashapp/stash)
 [![Python](https://img.shields.io/badge/Python-3.10+-39ff64?style=for-the-badge)](https://python.org)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
