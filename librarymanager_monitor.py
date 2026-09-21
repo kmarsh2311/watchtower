@@ -380,7 +380,7 @@ from librarymanager_core import (
     expect_filesystem_create, expect_filesystem_move, fingerprint_value,
     is_file_on_unavailable_root,
                                  opensubtitles_hash, record_activity, record_filesystem_event, record_monitor_lifecycle,
-                                 resolve_filesystem_event, refresh_scene_inventory, utc_now)
+                                 resolve_filesystem_event, refresh_scene_inventory, utc_now, _is_pid_alive)
 
 
 logger = logging.getLogger("librarymanager.monitor")
@@ -3360,16 +3360,9 @@ def claim_monitor_ownership(database_path, token, pid, roots, unavailable):
         ).fetchone()
         if current and current["token"] != token and current["state"] in ("starting", "running"):
             existing_pid = int(current["pid"] or 0)
-            if existing_pid:
-                try:
-                    os.kill(existing_pid, 0)
-                    connection.rollback()
-                    return False
-                except PermissionError:
-                    connection.rollback()
-                    return False
-                except OSError:
-                    pass
+            if existing_pid and _is_pid_alive(existing_pid):
+                connection.rollback()
+                return False
         connection.execute(
             """UPDATE filesystem_monitor_status SET token=?,pid=?,state='starting',started_at=?,
                    heartbeat_at=?,roots_json=?,unavailable_roots_json=?,active_moves_json='[]' WHERE id=1""",

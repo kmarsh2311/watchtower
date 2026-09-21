@@ -3,6 +3,7 @@
 ## 1.0.12 — 2026-09-21
 
 - Isolate the native Windows filesystem monitor from Stash's console so plugin-operation cleanup cannot interrupt the watcher or terminate Stash.
+- Replace Unix-style PID signal probes with non-destructive Windows process-handle checks, preventing liveness checks from terminating the watcher or an unrelated reused PID.
 - Save Automatically Start Filesystem Monitor only after watcher startup succeeds, preventing failed starts from enabling an automatic retry loop.
 - Preserve the existing detached monitor behaviour on macOS and Linux.
 

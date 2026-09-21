@@ -119,12 +119,22 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(activity[0]["status"], "running")
 
     def test_permission_denied_pid_probe_still_means_process_is_alive(self):
-        with patch("librarymanager_core.os.kill", side_effect=PermissionError):
+        with patch("librarymanager_core.sys.platform", "linux"), \
+                patch("librarymanager_core.os.kill", side_effect=PermissionError):
             self.assertTrue(_is_pid_alive(12345))
 
     def test_missing_pid_probe_means_process_is_dead(self):
-        with patch("librarymanager_core.os.kill", side_effect=ProcessLookupError):
+        with patch("librarymanager_core.sys.platform", "linux"), \
+                patch("librarymanager_core.os.kill", side_effect=ProcessLookupError):
             self.assertFalse(_is_pid_alive(12345))
+
+    def test_windows_pid_probe_never_uses_os_kill(self):
+        with patch("librarymanager_core.sys.platform", "win32"), \
+                patch("librarymanager_core._windows_pid_alive", return_value=True) as windows_probe, \
+                patch("librarymanager_core.os.kill") as unsafe_kill:
+            self.assertTrue(_is_pid_alive(12345))
+        windows_probe.assert_called_once_with(12345)
+        unsafe_kill.assert_not_called()
 
     def test_monitor_database_has_single_live_owner(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

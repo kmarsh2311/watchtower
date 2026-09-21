@@ -25,7 +25,8 @@ from librarymanager_core import (
                                  preview_manual_filename, preview_scene_filename, reconcile_missing_files, refresh_scene_inventory,
                                  release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
                                  reconcile_filesystem_events, pending_filesystem_events,
-                                 pending_transcoder_candidates, promote_transcoder_candidate, utc_now)
+                                 pending_transcoder_candidates, promote_transcoder_candidate, utc_now,
+                                 _is_pid_alive)
 from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due
 
 
@@ -514,13 +515,8 @@ def monitor_process_launch_options(platform=None):
 def start_filesystem_monitor(stash, database_path, server_connection=None):
     current = filesystem_monitor_summary(database_path)
     if current.get("state") in ("running", "starting") and current.get("pid"):
-        try:
-            os.kill(int(current["pid"]), 0)
+        if _is_pid_alive(int(current["pid"])):
             return {**current, "message": "Filesystem monitor is already running or starting"}
-        except PermissionError:
-            return {**current, "message": "Filesystem monitor is already running or starting"}
-        except OSError:
-            pass
     roots = fetch_library_roots(stash)
     if not roots:
         raise ValueError("Stash has no configured library roots")
