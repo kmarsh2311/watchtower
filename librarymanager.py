@@ -29,7 +29,7 @@ from librarymanager_core import (
                                  find_duplicate_scene_file, inspect_backlog_duplicate,
                                  get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
                                  cancel_expected_filesystem_delete, _is_pid_alive)
-from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing
+from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing, prune_resolved_filing_baseline, invalidate_incoming_discovery_cache
 
 
 from librarymanager_reconciliation import (dismiss_review_batch, execute_grouped_move_reconciliation,
@@ -393,6 +393,11 @@ def delete_verified_backlog_duplicate(
           scene_id=actual["scene_id"], file_id=actual["candidate_file_id"],
           old_path=candidate_path, new_path=info["retained_path"], detail=detail,
           metadata={"deleted_companions": deleted_companions, "companion_errors": companion_errors})
+    try:
+        prune_resolved_filing_baseline(database_path, config)
+        invalidate_incoming_discovery_cache()
+    except Exception:
+        pass
     return {
         "success": True,
         "scene_id": actual["scene_id"],

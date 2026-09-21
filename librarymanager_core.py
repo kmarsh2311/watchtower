@@ -5051,12 +5051,21 @@ def discover_incoming_files_cached(
     cache_key = json.dumps(normalized_roots)
     now_mono = time.monotonic()
 
+    current_mtimes = {}
+    for f in incoming_folders:
+        try:
+            folder = Path(f).expanduser()
+            if folder.is_dir():
+                current_mtimes[str(folder)] = folder.stat().st_mtime_ns
+        except Exception:
+            pass
+
     if not force_refresh:
         with _INCOMING_DISCOVERY_CACHE_LOCK:
             cached = _INCOMING_DISCOVERY_CACHE.get(cache_key)
             if cached:
-                cached_mono, cached_entries = cached
-                if now_mono - cached_mono < ttl:
+                cached_mono, cached_mtimes, cached_entries = cached
+                if now_mono - cached_mono < ttl and cached_mtimes == current_mtimes:
                     return [
                         dict(e) for e in cached_entries
                         if is_actionable_incoming_file(e["path"], active_states.get(e["path"]))
@@ -5093,7 +5102,7 @@ def discover_incoming_files_cached(
             continue
 
     with _INCOMING_DISCOVERY_CACHE_LOCK:
-        _INCOMING_DISCOVERY_CACHE[cache_key] = (now_mono, fresh_entries)
+        _INCOMING_DISCOVERY_CACHE[cache_key] = (now_mono, current_mtimes, fresh_entries)
 
     return [dict(e) for e in fresh_entries]
 
@@ -7415,6 +7424,12 @@ def apply_filing_proposal(
                         scene_id=scene_id, file_id=file_id,
                         detail=f"File move completed, but metadata update could not be completed: {metadata_error}"
                     )
+
+            try:
+                prune_resolved_filing_baseline(database_path, config)
+                invalidate_incoming_discovery_cache()
+            except Exception as prune_exc:
+                logger.debug("Immediate baseline retirement after filing proposal failed: %s", prune_exc)
 
             return {
                 "id": proposal_id,
