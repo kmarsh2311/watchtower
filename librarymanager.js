@@ -2727,8 +2727,14 @@
                   : `${readyMembers.length} path${readyMembers.length === 1 ? "" : "s"} match the inferred folder mapping. ${uncertainMembers.length
                     ? `${uncertainMembers.length} item${uncertainMembers.length === 1 ? " remains" : "s remain"} uncertain and will not be reconciled automatically.`
                     : "All tracked paths are ready for a later verified reconciliation step."}`),
+              isPartiallyVerified && hasStashCleanGuidance && React.createElement("p", {
+                className: "lm-terminal-attention-detail"
+              }, React.createElement("strong", null,
+                "Stale Stash database attachment — no duplicate video file was found. The playable video remains in the renamed folder.")),
               isPartiallyVerified && React.createElement("div", { className: "lm-grouped-members" },
-                React.createElement("strong", null, `Items requiring review (${uncertainMembers.length})`),
+                React.createElement("strong", null, hasStashCleanGuidance
+                  ? `Stash database attachments requiring review (${uncertainMembers.length})`
+                  : `Items requiring review (${uncertainMembers.length})`),
                 React.createElement("div", { className: "lm-grouped-member-list" }, uncertainMembers.map(renderGroupedMember))),
               isPartiallyVerified && React.createElement("details", { className: "lm-grouped-members" },
                 React.createElement("summary", null, `Verified successfully (${verifiedMembers.length})`),

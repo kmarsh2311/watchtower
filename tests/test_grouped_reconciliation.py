@@ -819,6 +819,52 @@ def test_grouped_path_identity_normalizes_equivalent_unicode(tmp_path):
     assert _normalized_filesystem_path(composed) == _normalized_filesystem_path(decomposed)
 
 
+def test_phase4_ownership_query_uses_stash_unicode_path(tmp_path):
+    from librarymanager_reconciliation import execute_grouped_move_reconciliation
+
+    database, _source, destination, expected, batch = _detected_move_batch(tmp_path, count=2)
+    _old_path, original_expected_path = expected[0]
+    expected_path = original_expected_path.with_name("vidéo-0.mp4")
+    original_expected_path.rename(expected_path)
+    connection = connect(database)
+    connection.execute(
+        "UPDATE grouped_reconciliation_members SET expected_path=? WHERE batch_id=? AND file_id=?",
+        (str(expected_path), batch["id"], "phase4-file-0"),
+    )
+    connection.commit()
+    connection.close()
+
+    def probe(path):
+        if str(path) == str(destination):
+            return {"status": "ok", "exists": True, "is_file": False, "is_dir": True}
+        if str(path) in {str(_old_path), str(expected[1][0])}:
+            return {"status": "missing", "exists": False}
+        target = expected_path if unicodedata.normalize("NFC", str(path)) == unicodedata.normalize("NFC", str(expected_path)) else expected[1][1]
+        stat_result = target.stat()
+        return {"status": "ok", "exists": True, "is_file": True, "is_dir": False,
+                "size": stat_result.st_size, "mtime_ns": stat_result.st_mtime_ns}
+
+    # Stash returns the same visible path in decomposed Unicode form.
+    import unicodedata
+    stash_path = unicodedata.normalize("NFD", str(expected_path))
+    scene_id = "phase4-scene-0"
+    second_path = str(expected[1][1])
+    stash = _GroupedScanStash({
+        scene_id: [{"id": "phase4-file-0", "path": stash_path, "basename": Path(stash_path).name}],
+        "phase4-scene-1": [{"id": "phase4-file-1", "path": second_path,
+                            "basename": Path(second_path).name}],
+    }, {stash_path: [scene_id], second_path: ["phase4-scene-1"]})
+
+    result = execute_grouped_move_reconciliation(
+        database, batch["id"], stash, owner="unicode-owner", path_probe=probe
+    )
+    assert result["state"] == "resolved", [
+        (item["file_id"], item["state"], item["reason"], item["expected_path"], item["observed_path"])
+        for item in result["members"]
+    ]
+    assert result["verified_count"] == 2
+
+
 def test_phase4_changed_destination_blocks_scan(tmp_path):
     from librarymanager_reconciliation import execute_grouped_move_reconciliation
 

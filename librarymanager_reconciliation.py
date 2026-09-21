@@ -1189,8 +1189,12 @@ def _verify_grouped_members(database_path: Path | str, batch_id: int, stash, pat
                                 "Original scene/file identity was not found at the expected path", {}))
             continue
         try:
+            # Use the spelling/Unicode form returned by Stash. The expected
+            # filesystem path may be canonically equivalent but GraphQL path
+            # equality is byte-sensitive on some platforms.
+            ownership_path = str(exact[0].get("path") or expected_path)
             owners_result = stash.call_GQL(
-                _GROUPED_SCENE_BY_PATH_QUERY, {"path": str(expected_path)}
+                _GROUPED_SCENE_BY_PATH_QUERY, {"path": ownership_path}
             )
             owners = set()
             for owner_scene in ((owners_result or {}).get("findScenes") or {}).get("scenes") or []:

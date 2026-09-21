@@ -1002,6 +1002,8 @@ test("Phase 4 requires explicit Stash scan approval and keeps copy groups review
   assert.match(javascript, /Grouped verification completed: \$\{verifiedCount\} verified, \$\{remainingCount\} still need review/);
   assert.match(javascript, /tracked file records were verified in Stash/);
   assert.match(javascript, /Items requiring review/);
+  assert.match(javascript, /Stale Stash database attachment — no duplicate video file was found/);
+  assert.match(javascript, /Stash database attachments requiring review/);
   assert.match(javascript, /Verified successfully/);
   assert.match(javascript, /Click Diagnose Remaining first\. Do not run Stash Clean/);
   assert.match(javascript, /Open the affected scene and confirm it plays from the new path/);
