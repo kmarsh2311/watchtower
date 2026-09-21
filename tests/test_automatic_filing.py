@@ -3517,10 +3517,12 @@ def test_retry_filing_reuses_destination_directory_cache_without_rescanning(test
         assert "no destination folder found" in (res1.get("diagnostic") or "").lower()
         assert scan_count == 1, "First evaluation must scan the destination root once to populate cache"
 
-        # 2. Second retry call within TTL: must reuse the cache and NOT rescan
-        res2 = librarymanager_core.retry_filing_proposal(db, mock_stash, str(v), config=config)
+        # 2. Metadata refresh within TTL must reuse the folder cache and NOT rescan
+        res2 = librarymanager_core.retry_filing_proposal(
+            db, mock_stash, str(v), config=config, allow_refresh=True
+        )
         assert res2["success"] is False
-        assert scan_count == 1, "Second evaluation within TTL must reuse the directory cache without rescanning"
+        assert scan_count == 1, "Metadata refresh within TTL must reuse the directory cache without rescanning"
 
         # 3. Explicit cache invalidation (e.g. Refresh Folders) forces a fresh scan on next call
         librarymanager_core.invalidate_destination_dir_cache()

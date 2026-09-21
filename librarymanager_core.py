@@ -4895,7 +4895,7 @@ def delete_filing_folder_mapping(database_path: Path, mapping_id: int) -> bool:
 
 _DESTINATION_DIR_CACHE: dict[tuple[str, int], tuple[float, list[tuple[Path, str]]]] = {}
 _DESTINATION_DIR_CACHE_LOCK = threading.Lock()
-_DESTINATION_DIR_CACHE_TTL = 300.0  # 5 minutes default TTL across processes
+_DESTINATION_DIR_CACHE_TTL = 3600.0  # 1 hour; explicit folder refresh remains available
 _CACHE_GENERATION: int = 0
 
 
@@ -6318,9 +6318,10 @@ def retry_filing_proposal(
             "error": "This file is not located inside any configured Incoming folder."
         }
 
-    # If refreshing, invalidate destination directory cache so new/renamed folders on disk are found
-    if allow_refresh:
-        invalidate_destination_dir_cache(database_path)
+    # ``allow_refresh`` refreshes current Stash metadata and proposal choices.
+    # Folder discovery has its own persistent cache because rescanning multiple
+    # disks or NAS roots for every metadata edit is unnecessarily expensive.
+    # The explicit Refresh Folders operation invalidates and rebuilds that cache.
 
     # 2. Check scene linkage in files table or Stash
     file_id = None

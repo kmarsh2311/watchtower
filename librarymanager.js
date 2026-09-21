@@ -3253,7 +3253,7 @@
                   className: "lm-terminal-btn retry",
                   disabled: Boolean(busy) || isAnyTransferActive,
                   onClick: () => handleRefreshFilingProposal(prop.source_path, prop.id),
-                  title: "Re-evaluate destination choices and directory cache for this scene"
+                  title: "Fetch current Stash metadata and recalculate choices using the cached folder list"
                 }, busy === `refresh_prop_${prop.source_path}` ? "⟳ REFRESHING…" : "⟳ REFRESH CHOICES"),
                 React.createElement("button", {
                   type: "button",
