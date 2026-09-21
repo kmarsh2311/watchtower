@@ -2866,15 +2866,43 @@ a.lm-activity-scene-pill:hover {
 }
 .lm-backlog-stats-bar {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
-  gap: 8px;
-  margin-top: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.lm-backlog-overview { margin-bottom: 14px; }
+.lm-backlog-intro { margin: 0 0 8px; color: #cbd5e1; }
+.lm-backlog-protection {
+  margin: 0;
+  padding: 8px 10px;
+  border-left: 3px solid #38bdf8;
+  background: rgba(56, 189, 248, 0.06);
+  color: #d1fae5;
+}
+.lm-backlog-stat-group {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(255,255,255,.08);
+  border-radius: 7px;
+  background: rgba(255,255,255,.018);
+}
+.lm-backlog-stat-group h4 {
+  margin: 0 0 6px;
+  color: #94a3b8;
+  font-size: .68rem;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.lm-backlog-stat-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
 }
 .lm-backlog-stat {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 6px;
-  padding: 6px 10px;
+  padding: 7px 8px;
   display: flex;
   flex-direction: column;
 }
@@ -3011,6 +3039,40 @@ a.lm-activity-scene-pill:hover {
   padding: 1px 6px;
   border-radius: 3px;
   white-space: nowrap;
+}
+.item-status-pill.decision.destination-found,
+.item-status-pill.decision.ready {
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, 0.3);
+}
+.item-status-pill.decision.destination-needed {
+  background: rgba(245, 158, 11, 0.14);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.32);
+}
+.item-status-pill.decision.duplicate {
+  background: rgba(167, 139, 250, 0.14);
+  color: #c4b5fd;
+  border: 1px solid rgba(167, 139, 250, 0.32);
+}
+.lm-backlog-item-details {
+  margin-top: 5px;
+  color: #94a3b8;
+  font-size: .73rem;
+}
+.lm-backlog-item-details summary {
+  width: fit-content;
+  cursor: pointer;
+  color: #7dd3fc;
+}
+.lm-backlog-item-details ul { margin: 5px 0 2px; padding-left: 18px; color: #bfdbfe; }
+.lm-backlog-item-details li + li { margin-top: 3px; }
+@media (max-width: 1050px) {
+  .lm-backlog-stats-bar { grid-template-columns: 1fr; }
+}
+@media (max-width: 700px) {
+  .lm-backlog-stat-cards { grid-template-columns: 1fr; }
 }
 .item-status-pill.eligible {
   background: rgba(74, 222, 128, 0.15);

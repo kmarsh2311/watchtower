@@ -469,7 +469,7 @@ test("Automatic Filing unresolved imports and Retry Filing appear in Command Cen
   // 3. Organise Existing Files backlog entry point and informational modal
   assert.match(javascript, /className: "lm-terminal-btn-backlog"/);
   assert.match(javascript, /📁 ORGANISE EXISTING FILES/);
-  assert.match(javascript, /Organise Existing Files \(Backlog Workflow\)/);
+  assert.match(javascript, /Organise Existing Files/);
   assert.match(javascript, /Baseline Protection Active/);
 
   // 4. Backlog entry styling remains available in Command Center.
@@ -479,16 +479,19 @@ test("Automatic Filing unresolved imports and Retry Filing appear in Command Cen
 test("Backlog Organiser UI: selection, stats badges, confirmation modal, progress tallies and cancel action", () => {
   // 1. Stats bar with separate original baseline snapshot, remaining incoming, eligible videos, companions and filed/ineligible
   assert.match(javascript, /className: "lm-backlog-stats-bar"/);
-  assert.match(javascript, /Original Snapshot/);
-  assert.match(javascript, /Remaining in Incoming/);
-  assert.match(javascript, /Eligible Videos/);
-  assert.match(javascript, /Companion Files/);
-  assert.match(javascript, /Verified Moved/);
+  assert.match(javascript, /Current work/);
+  assert.match(javascript, /Needs review/);
+  assert.match(javascript, /Completed/);
+  assert.match(javascript, /Protected Baseline/);
+  assert.match(javascript, /In Incoming/);
+  assert.match(javascript, /Ready to Evaluate/);
+  assert.match(javascript, /Companions/);
+  assert.match(javascript, /Verified Filed/);
   assert.match(javascript, /Ineligible \/ Filed/);
 
   // 2. Select all eligible videos, reset on open, and individual checkbox selection
   assert.match(javascript, /handleSelectAllEligible/);
-  assert.match(javascript, /Select All Eligible/);
+  assert.match(javascript, /Select All Ready/);
   assert.match(javascript, /toggleBacklogItemSelection/);
   assert.match(javascript, /selectedBacklogPaths/);
   assert.match(javascript, /setSelectedBacklogPaths\(new Set\(\)\)/);
@@ -518,6 +521,10 @@ test("Backlog Organiser UI: selection, stats badges, confirmation modal, progres
   assert.match(css, /\.lm-backlog-stat\.eligible/);
   assert.match(css, /\.lm-backlog-item\.eligible/);
   assert.match(css, /\.lm-backlog-tally-grid/);
+  assert.match(javascript, /Why Watchtower classified this file/);
+  assert.match(javascript, /Destination needed/);
+  assert.match(css, /\.lm-backlog-stat-group/);
+  assert.match(css, /\.lm-backlog-item-details/);
 });
 
 test("backlog evaluation preserves filenames and exact reasons behind summary counts", () => {
@@ -854,12 +861,12 @@ test('Happening Now uncluttered and shows only active operations or listening em
 
 test('Backlog Organise Existing Files reconciled stats, verified moved status pill, destination display and selection reset', () => {
   // 1. Stats Bar Cards
-  assert.ok(javascript.includes('Original Snapshot'), 'Stats bar includes Original Snapshot label');
-  assert.ok(javascript.includes('Remaining in Incoming'), 'Stats bar includes Remaining in Incoming label');
-  assert.ok(javascript.includes('Eligible Videos'), 'Stats bar includes Eligible Videos label');
-  assert.ok(javascript.includes('Pending Proposals'), 'Stats bar includes Pending Proposals label');
-  assert.ok(javascript.includes('Companion Files'), 'Stats bar includes Companion Files label');
-  assert.ok(javascript.includes('Verified Moved'), 'Stats bar includes Verified Moved label');
+  assert.ok(javascript.includes('Protected Baseline'), 'Stats bar explains the protected baseline');
+  assert.ok(javascript.includes('In Incoming'), 'Stats bar includes current incoming work');
+  assert.ok(javascript.includes('Ready to Evaluate'), 'Stats bar uses clear evaluation wording');
+  assert.ok(javascript.includes('Filing Proposals'), 'Stats bar includes filing proposals');
+  assert.ok(javascript.includes('Companions'), 'Stats bar includes companion files');
+  assert.ok(javascript.includes('Verified Filed'), 'Stats bar includes completed filing');
 
   // 2. Verified moved item rendering and destination path display
   assert.ok(javascript.includes('item.destination_path'), 'Renders destination path when available');

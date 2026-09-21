@@ -4922,61 +4922,43 @@
       },
         React.createElement(Modal.Header, { closeButton: !isBacklogEvaluating, style: { background: "#0b120c", borderBottom: "1px solid rgba(56, 189, 248, .2)" } },
           React.createElement(Modal.Title, { style: { color: "#38bdf8", fontWeight: "700", fontSize: "1.1rem" } },
-            "📁 Organise Existing Files (Backlog Workflow)"
+            "📁 Organise Existing Files"
           )
         ),
         React.createElement(Modal.Body, { style: { background: "#060a07", color: "#d1fae5", fontSize: ".88rem", lineHeight: "1.5", maxHeight: "75vh", overflowY: "auto" } },
-          React.createElement("div", { style: { marginBottom: "12px" } },
-            React.createElement("p", { style: { margin: "0 0 6px 0", fontSize: ".86rem" } },
+          React.createElement("div", { className: "lm-backlog-overview" },
+            React.createElement("p", { className: "lm-backlog-intro" },
+              "Review files already in your incoming folders and create filing suggestions. Nothing moves until you approve a proposal."
+            ),
+            React.createElement("p", { className: "lm-backlog-protection" },
               React.createElement("strong", { style: { color: "#38bdf8" } }, "Baseline Protection Active: "),
               `Watchtower registered ${(backlogData?.baseline_total ?? backlogData?.total_count ?? incoming?.baseline_count ?? 0).toLocaleString()} pre-existing files in your original baseline snapshot. Files remain protected and are never moved automatically.`
             ),
             React.createElement("div", { className: "lm-backlog-stats-bar" },
-              React.createElement("div", { className: "lm-backlog-stat total" },
-                React.createElement("span", { className: "stat-label" }, "Original Snapshot"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.baseline_total ?? backlogData?.total_count ?? 0).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "Baseline total")
+              React.createElement("section", { className: "lm-backlog-stat-group current" },
+                React.createElement("h4", null, "Current work"),
+                React.createElement("div", { className: "lm-backlog-stat-cards" },
+                  React.createElement("div", { className: "lm-backlog-stat incoming" }, React.createElement("span", { className: "stat-label" }, "In Incoming"), React.createElement("span", { className: "stat-val" }, (backlogData?.remaining_incoming_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Files still present")),
+                  React.createElement("div", { className: "lm-backlog-stat eligible" }, React.createElement("span", { className: "stat-label" }, "Ready to Evaluate"), React.createElement("span", { className: "stat-val" }, (backlogData?.eligible_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Safe to inspect")),
+                  React.createElement("div", { className: "lm-backlog-stat companions" }, React.createElement("span", { className: "stat-label" }, "Companions"), React.createElement("span", { className: "stat-val" }, (backlogData?.remaining_companion_count ?? backlogData?.companion_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "JPG, NFO and sidecars"))
+                )
               ),
-              React.createElement("div", { className: "lm-backlog-stat incoming" },
-                React.createElement("span", { className: "stat-label" }, "Remaining in Incoming"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.remaining_incoming_count ?? 0).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "Present in folders")
+              React.createElement("section", { className: "lm-backlog-stat-group review" },
+                React.createElement("h4", null, "Needs review"),
+                React.createElement("div", { className: "lm-backlog-stat-cards" },
+                  React.createElement("div", { className: "lm-backlog-stat pending" }, React.createElement("span", { className: "stat-label" }, "Filing Proposals"), React.createElement("span", { className: "stat-val" }, (backlogData?.pending_proposal_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Awaiting approval")),
+                  React.createElement("div", { className: "lm-backlog-stat duplicate-removed" }, React.createElement("span", { className: "stat-label" }, "Duplicate Review"), React.createElement("span", { className: "stat-val" }, (backlogData?.duplicate_review_count || 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Possible exact copies")),
+                  React.createElement("div", { className: "lm-backlog-stat ineligible" }, React.createElement("span", { className: "stat-label" }, "Missing on Disk"), React.createElement("span", { className: "stat-val" }, (backlogData?.missing_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Needs explanation"))
+                )
               ),
-              React.createElement("div", { className: "lm-backlog-stat eligible" },
-                React.createElement("span", { className: "stat-label" }, "Eligible Videos"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.eligible_count ?? 0).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "Ready to evaluate")
-              ),
-              React.createElement("div", { className: "lm-backlog-stat pending" },
-                React.createElement("span", { className: "stat-label" }, "Pending Proposals"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.pending_proposal_count ?? 0).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "Awaiting approval")
-              ),
-              (backlogData?.duplicate_review_count || 0) > 0 ? React.createElement("div", { className: "lm-backlog-stat duplicate-removed" },
-                React.createElement("span", { className: "stat-label" }, "Duplicate Review"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.duplicate_review_count || 0).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "Verification available")
-              ) : null,
-              React.createElement("div", { className: "lm-backlog-stat companions" },
-                React.createElement("span", { className: "stat-label" }, "Companion Files"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.remaining_companion_count ?? backlogData?.companion_count ?? 0).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "In Incoming (JPG/NFO)")
-              ),
-              React.createElement("div", { className: "lm-backlog-stat moved" },
-                React.createElement("span", { className: "stat-label" }, "Verified Moved"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.verified_moved_count ?? (backlogData?.already_filed_count ?? 0)).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "Moved out of Incoming")
-              ),
-              (backlogData?.resolved_duplicate_count || 0) > 0 ? React.createElement("div", { className: "lm-backlog-stat duplicate-removed" },
-                React.createElement("span", { className: "stat-label" }, "Duplicates Removed"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.resolved_duplicate_count || 0).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "Verified incoming copies")
-              ) : null,
-              (backlogData?.missing_count || 0) > 0 ? React.createElement("div", { className: "lm-backlog-stat ineligible" },
-                React.createElement("span", { className: "stat-label" }, "Missing on Disk"),
-                React.createElement("span", { className: "stat-val" }, (backlogData?.missing_count ?? 0).toLocaleString()),
-                React.createElement("span", { className: "stat-sub" }, "Unaccounted for")
-              ) : null
+              React.createElement("section", { className: "lm-backlog-stat-group completed" },
+                React.createElement("h4", null, "Completed"),
+                React.createElement("div", { className: "lm-backlog-stat-cards" },
+                  React.createElement("div", { className: "lm-backlog-stat total" }, React.createElement("span", { className: "stat-label" }, "Protected Baseline"), React.createElement("span", { className: "stat-val" }, (backlogData?.baseline_total ?? backlogData?.total_count ?? 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Original snapshot")),
+                  React.createElement("div", { className: "lm-backlog-stat moved" }, React.createElement("span", { className: "stat-label" }, "Verified Filed"), React.createElement("span", { className: "stat-val" }, (backlogData?.verified_moved_count ?? (backlogData?.already_filed_count ?? 0)).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Moved from Incoming")),
+                  React.createElement("div", { className: "lm-backlog-stat duplicate-removed" }, React.createElement("span", { className: "stat-label" }, "Duplicates Removed"), React.createElement("span", { className: "stat-val" }, (backlogData?.resolved_duplicate_count || 0).toLocaleString()), React.createElement("span", { className: "stat-sub" }, "Verified incoming copies"))
+                )
+              )
             )
           ),
 
@@ -5158,7 +5140,7 @@
           React.createElement("div", null,
             React.createElement("div", { className: "lm-backlog-controls" },
               React.createElement("div", { className: "lm-backlog-tabs" },
-                React.createElement("button", { className: backlogTab === "eligible" ? "active" : "", onClick: () => setBacklogTab("eligible") }, `Eligible Videos (${backlogData?.eligible_count ?? 0})`),
+                React.createElement("button", { className: backlogTab === "eligible" ? "active" : "", onClick: () => setBacklogTab("eligible") }, `Ready to Evaluate (${backlogData?.eligible_count ?? 0})`),
                 React.createElement("button", { className: backlogTab === "companions" ? "active" : "", onClick: () => setBacklogTab("companions") }, `Companions (${backlogData?.remaining_companion_count ?? backlogData?.companion_count ?? 0})`),
                 React.createElement("button", { className: backlogTab === "ineligible" ? "active" : "", onClick: () => setBacklogTab("ineligible") }, `Ineligible / Filed (${backlogData?.ineligible_count ?? Math.max(0, (backlogData?.video_count ?? 0) - (backlogData?.eligible_count ?? 0))})`),
                 React.createElement("button", { className: backlogTab === "all" ? "active" : "", onClick: () => setBacklogTab("all") }, `All Files (${backlogData?.total_count ?? 0})`)
@@ -5178,7 +5160,7 @@
                     className: "lm-btn-select-all-eligible",
                     onClick: handleSelectAllEligible,
                     style: { fontSize: ".76rem", whiteSpace: "nowrap" }
-                  }, `Select All Eligible (${backlogData?.eligible_count ?? 0})`),
+                  }, `Select All Ready (${backlogData?.eligible_count ?? 0})`),
                   validSelectedCount > 0 ? React.createElement(Button, {
                     size: "sm",
                     variant: "outline-secondary",
@@ -5200,6 +5182,13 @@
                 .filter(item => !backlogSearch || item.basename.toLowerCase().includes(backlogSearch.toLowerCase()))
                 .map((item, idx) => {
                   const isChecked = validSelectedPaths.has(item.path);
+                  const diagnosticParts = String(item.diagnostic || "").split("|").map(part => part.trim()).filter(Boolean);
+                  const needsDestination = !item.destination_path && diagnosticParts.some(part => /no destination|destination folder not found/i.test(part));
+                  const decisionLabel = item.duplicate_info ? "Duplicate review" :
+                    !item.eligible ? (item.status_label || "Not ready") :
+                    item.destination_path ? "Destination found" :
+                    needsDestination ? "Destination needed" : "Ready to evaluate";
+                  const decisionClass = item.duplicate_info ? "duplicate" : item.destination_path ? "destination-found" : needsDestination ? "destination-needed" : "ready";
                   return React.createElement("div", {
                     key: item.path || idx,
                     className: `lm-backlog-item ${item.eligible ? "eligible" : "ineligible"} ${isChecked ? "selected" : ""}`,
@@ -5216,18 +5205,26 @@
                     React.createElement("div", { className: "item-body", style: { flex: 1, minWidth: 0 } },
                       React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px" } },
                         React.createElement("span", { className: "item-name", title: item.path }, item.basename),
-                        React.createElement("span", { className: `item-status-pill ${item.status}` }, item.status_label)
+                        React.createElement("span", { className: `item-status-pill decision ${decisionClass}` }, decisionLabel)
                       ),
                       React.createElement("div", { className: "item-meta", style: { fontSize: ".75rem", color: "#94a3b8", display: "flex", flexWrap: "wrap", gap: "10px", marginTop: "2px" } },
                         item.scene_id ? React.createElement("span", null, `Scene ${item.scene_id}${item.scene_title ? `: ${item.scene_title}` : ""}`) : null,
-                        item.size ? React.createElement("span", null, `${(item.size / (1024 * 1024)).toFixed(1)} MB`) : null,
-                        item.diagnostic ? React.createElement("span", { style: { color: "#bfdbfe" } }, `Diag: ${item.diagnostic}`) : null
+                        item.size ? React.createElement("span", null, `${(item.size / (1024 * 1024)).toFixed(1)} MB`) : null
                       ),
                       item.destination_path ? React.createElement("div", {
                         className: "item-destination",
                         style: { fontSize: ".74rem", color: "#38bdf8", marginTop: "3px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
                         title: item.destination_path
                       }, `➔ ${item.destination_path}`) : null,
+                      diagnosticParts.length ? React.createElement("details", {
+                        className: "lm-backlog-item-details",
+                        onClick: event => event.stopPropagation()
+                      },
+                        React.createElement("summary", null, "Why Watchtower classified this file"),
+                        React.createElement("ul", null, diagnosticParts.map((part, partIndex) =>
+                          React.createElement("li", { key: `${item.path}-reason-${partIndex}` }, part)
+                        ))
+                      ) : null,
                       item.duplicate_info ? React.createElement("div", { className: "lm-duplicate-review-evidence" },
                         React.createElement("p", null, React.createElement("b", null, "Incoming duplicate: "), item.path),
                         React.createElement("p", null, React.createElement("b", null, "Organised file retained: "), item.duplicate_info.retained_path),
@@ -5275,7 +5272,7 @@
               React.createElement("span", { style: { fontSize: ".82rem", color: "#94a3b8" } },
                 `Selected: `,
                 React.createElement("strong", { style: { color: "#38bdf8" } }, validSelectedCount),
-                ` of ${backlogData?.eligible_count ?? 0} eligible videos`
+                ` of ${backlogData?.eligible_count ?? 0} ready to evaluate`
               ),
               React.createElement(Button, {
                 variant: "primary",
