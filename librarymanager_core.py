@@ -7521,10 +7521,31 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             proposals_by_path[p_row["source_path"]] = dict(p_row)
 
         files_by_path = {}
+        files_by_id = {}
         for f_row in connection.execute(
             "SELECT file_id, scene_id, path, basename, title FROM files WHERE exists_on_disk=1"
         ).fetchall():
             files_by_path[f_row["path"]] = dict(f_row)
+            files_by_id[str(f_row["file_id"])] = dict(f_row)
+
+        # Baseline paths are intentionally immutable. Follow Watchtower's own
+        # completed filename history when presenting their current location.
+        renamed_paths = {}
+        for rename_row in connection.execute(
+            """SELECT old_path,new_path FROM activity_log
+               WHERE old_path IS NOT NULL AND new_path IS NOT NULL
+                 AND status IN ('renamed','complete')
+               ORDER BY id ASC"""
+        ).fetchall():
+            renamed_paths[str(rename_row["old_path"])] = str(rename_row["new_path"])
+
+        def current_recorded_path(original_path: str) -> str:
+            candidate = original_path
+            visited = set()
+            while candidate in renamed_paths and candidate not in visited:
+                visited.add(candidate)
+                candidate = renamed_paths[candidate]
+            return candidate if Path(candidate).is_file() else original_path
 
         # A previously completed move may carry a stale historical proposal
         # status. Treat it as moved only when the destination exists and the
@@ -7535,6 +7556,17 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             if not proposed_path or Path(src).suffix.lower() not in VIDEO_EXTENSIONS:
                 continue
             destination_file = files_by_path.get(proposed_path)
+            if not destination_file and proposal.get("status") == "completed":
+                current_identity = files_by_id.get(str(proposal.get("file_id") or ""))
+                if (
+                    current_identity
+                    and str(current_identity.get("scene_id") or "") == str(proposal.get("scene_id") or "")
+                    and Path(str(current_identity.get("path") or "")).is_file()
+                ):
+                    destination_file = current_identity
+                    proposal = dict(proposal)
+                    proposal["proposed_path"] = str(current_identity["path"])
+                    proposed_path = proposal["proposed_path"]
             identity_matches = bool(
                 destination_file
                 and str(destination_file.get("file_id") or "") == str(proposal.get("file_id") or "")
@@ -7553,7 +7585,8 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
                 diagnostics_by_path[inc_row["path"]] = inc_row["filing_diagnostic"]
 
         for row in rows:
-            path_str = row["path"]
+            baseline_path = row["path"]
+            path_str = current_recorded_path(baseline_path)
             p_obj = Path(path_str)
             ext = p_obj.suffix.lower()
             is_video = ext in VIDEO_EXTENSIONS
@@ -7576,7 +7609,7 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             if not is_video:
                 companion_count += 1
                 destination_path = None
-                duplicate_repair = resolved_duplicate_paths.get(path_str) if not is_file else None
+                duplicate_repair = resolved_duplicate_paths.get(baseline_path) if not is_file else None
                 if duplicate_repair:
                     resolved_duplicate_companion_count += 1
                     status_code = "duplicate_removed"
@@ -7631,6 +7664,7 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
 
                 items.append({
                     "path": path_str,
+                    "baseline_path": baseline_path,
                     "basename": p_obj.name,
                     "size": row["size"] or 0,
                     "is_video": False,
@@ -7651,8 +7685,8 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             video_count += 1
 
             # Check proposals
-            prop = proposals_by_path.get(path_str)
-            verified_move = verified_moved_proposals_by_src.get(path_str)
+            prop = proposals_by_path.get(baseline_path)
+            verified_move = verified_moved_proposals_by_src.get(baseline_path)
 
             # Check linked Stash scene (from files table or proposal)
             f_info = files_by_path.get(path_str)
@@ -7667,7 +7701,7 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
             eligible = False
             destination_path = None
             duplicate_info = None
-            duplicate_repair = resolved_duplicate_paths.get(path_str) if not is_file else None
+            duplicate_repair = resolved_duplicate_paths.get(baseline_path) if not is_file else None
 
             if duplicate_repair:
                 resolved_duplicate_video_count += 1
@@ -7754,6 +7788,7 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
 
             items.append({
                 "path": path_str,
+                "baseline_path": baseline_path,
                 "basename": p_obj.name,
                 "size": row["size"] or (p_obj.stat().st_size if is_file else 0),
                 "is_video": True,

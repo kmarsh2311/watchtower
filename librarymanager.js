@@ -1368,6 +1368,7 @@
         const raw = await operation("get_backlog_items");
         const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
         setBacklogData(payload);
+        return payload;
       } catch (err) {
         setBacklogError(err.message || "Failed to load backlog files.");
       } finally {
@@ -1378,8 +1379,15 @@
     async function handleRecheckBacklog() {
       setBusy("backlog_recheck");
       try {
-        await loadBacklog();
-        setNotice("Incoming files checked again. Resolved items were removed from Needs Attention.");
+        const previousCount = Number(backlogData?.needs_attention_count || 0);
+        const refreshed = await loadBacklog();
+        if (refreshed) {
+          const currentCount = Number(refreshed?.needs_attention_count || 0);
+          const resolvedCount = Math.max(0, previousCount - currentCount);
+          setNotice(resolvedCount > 0
+            ? `${resolvedCount} item${resolvedCount === 1 ? "" : "s"} resolved and removed from Needs Attention.`
+            : "Recheck complete. No unresolved items changed; details remain below.");
+        }
       } finally {
         setBusy("");
       }
@@ -1387,6 +1395,7 @@
 
     async function handleAcknowledgeMissing(item) {
       if (!item?.path) return;
+      const baselinePath = item.baseline_path || item.path;
       const confirmed = window.confirm(
         `Stop showing this missing baseline item as needing attention?\n\n${item.path}\n\n` +
         "Use this only if you intentionally deleted or moved it outside Watchtower. The original baseline history will be retained."
@@ -1394,9 +1403,9 @@
       if (!confirmed) return;
       setBusy(`backlog_ack:${item.path}`);
       try {
-        const raw = await operation("acknowledge_backlog_missing", { paths: [item.path] });
+        const raw = await operation("acknowledge_backlog_missing", { paths: [baselinePath] });
         const result = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (!(result?.acknowledged || []).includes(item.path)) {
+        if (!(result?.acknowledged || []).includes(baselinePath)) {
           throw new Error("The file is present again or is no longer an unresolved baseline item.");
         }
         await loadBacklog();

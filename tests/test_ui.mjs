@@ -964,6 +964,9 @@ test("Backlog separates current missing files from retained activity history", (
   assert.match(javascript, /Needs Attention \(\$\{backlogData\?\.needs_attention_count/);
   assert.match(javascript, /Activity summary/);
   assert.match(javascript, /async function handleRecheckBacklog\(\)/);
+  assert.match(javascript, /Recheck complete\. No unresolved items changed; details remain below\./);
+  assert.match(javascript, /resolvedCount.*resolved and removed from Needs Attention/s);
+  assert.doesNotMatch(javascript, /Incoming files checked again\. Resolved items were removed/);
   assert.match(javascript, /operation\("acknowledge_backlog_missing"/);
   assert.match(javascript, /ACKNOWLEDGE REMOVAL…/);
   assert.match(javascript, /The original baseline history will be retained/);

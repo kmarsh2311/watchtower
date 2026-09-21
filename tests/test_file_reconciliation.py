@@ -94,6 +94,81 @@ def test_backlog_missing_items_can_be_rechecked_or_acknowledged_without_deleting
     assert {row["path"] for row in connect(db_path).execute("SELECT path FROM filing_incoming_baseline")} == {
         str(missing_video), str(missing_companion)
     }
+
+
+def test_backlog_recheck_follows_recorded_filename_and_destination_folder_renames(tmp_path: Path):
+    db_path = create_test_db(tmp_path / "watchtower.db")
+    incoming = tmp_path / "Incoming"
+    incoming.mkdir()
+
+    old_video = incoming / "Original Name.mp4"
+    old_companion = incoming / "Original Name.mp4.jpg"
+    old_video.write_bytes(b"video")
+    old_companion.write_bytes(b"image")
+    librarymanager_core.snapshot_incoming_baseline(db_path, [str(incoming)])
+    new_video = incoming / "Renamed by Watchtower.mp4"
+    new_companion = incoming / "Renamed by Watchtower.mp4.jpg"
+    old_video.rename(new_video)
+    old_companion.rename(new_companion)
+
+    conn = connect(db_path)
+    for old_path, new_path, action, status in (
+        (old_video, new_video, "automatic rename", "renamed"),
+        (old_companion, new_companion, "sidecar_renamed", "complete"),
+    ):
+        conn.execute(
+            """INSERT INTO activity_log(category,severity,action,status,old_path,new_path,metadata_json,recorded_at)
+               VALUES ('filename','info',?,?,?,?, '{}','2026-01-01')""",
+            (action, status, str(old_path), str(new_path)),
+        )
+    conn.commit()
+    conn.close()
+
+    renamed = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
+    assert renamed["missing_count"] == 0
+    renamed_items = {item["baseline_path"]: item for item in renamed["items"]}
+    assert renamed_items[str(old_video)]["path"] == str(new_video)
+    assert renamed_items[str(old_video)]["eligible"] is True
+    assert renamed_items[str(old_companion)]["path"] == str(new_companion)
+    assert renamed_items[str(old_companion)]["status"] == "companion"
+
+    filed_source = incoming / "Filed Scene.mp4"
+    filed_companion = incoming / "Filed Scene.mp4.jpg"
+    filed_source.write_bytes(b"filed")
+    filed_companion.write_bytes(b"jpg")
+    conn = connect(db_path)
+    for path in (filed_source, filed_companion):
+        stat = path.stat()
+        conn.execute(
+            "INSERT INTO filing_incoming_baseline(path,size,modified_ns,oshash,seen_at) VALUES (?,?,?,?,?)",
+            (str(path), stat.st_size, stat.st_mtime_ns, None, "2026-01-01"),
+        )
+    old_destination = tmp_path / "Old Folder" / filed_source.name
+    new_destination = tmp_path / "New Folder" / filed_source.name
+    new_destination.parent.mkdir()
+    filed_source.unlink()
+    filed_companion.unlink()
+    new_destination.write_bytes(b"filed")
+    (new_destination.parent / filed_companion.name).write_bytes(b"jpg")
+    conn.execute(
+        """INSERT INTO filing_proposals(
+               file_id,scene_id,source_path,proposed_path,destination_folder,destination_filename,
+               organize_by,matched_entity_id,matched_entity_name,match_source,reason,status,created_at,updated_at
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("44", "22", str(filed_source), str(old_destination), str(old_destination.parent),
+         filed_source.name, "performer", "p22", "Example", "scene_performer", "filed",
+         "completed", "2026-01-01", "2026-01-01"),
+    )
+    conn.commit()
+    conn.close()
+    seed_scene(db_path, 22, 44, new_destination)
+
+    moved = get_backlog_items(db_path, None, config={"incomingFolders": [str(incoming)]})
+    assert moved["missing_count"] == 0
+    moved_items = {item["baseline_path"]: item for item in moved["items"]}
+    assert moved_items[str(filed_source)]["status"] == "moved"
+    assert moved_items[str(filed_source)]["destination_path"] == str(new_destination)
+    assert moved_items[str(filed_companion)]["status"] == "moved"
 from librarymanager import (
     assert_scene_removal_safe,
     validate_filesystem_scan_action,
