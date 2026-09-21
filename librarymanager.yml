@@ -127,12 +127,16 @@ settings:
     type: BOOLEAN
   autoFilingOrganizeBy:
     displayName: Automatic Filing Organization
-    description: "Choose whether to organize new incoming videos by 'performer', 'studio', or combined Performer, Studio or Tag review mode."
+    description: "Choose whether to organize new incoming videos by performer, studio, or combined Performer, Studio or Tag review mode. Combined review is the default."
     type: STRING
   autoFilingDestinationRoots:
     displayName: Automatic Filing Destination Roots
     description: Up to five destination root directories containing your existing performer, studio, or category folders.
     type: STRING
+  autoFilingDestinationRootsOverride:
+    displayName: Limit Automatic Filing to Selected Roots
+    description: Use manually selected destination roots instead of all Stash library roots.
+    type: BOOLEAN
   autoFilingDestinationRoot:
     displayName: Automatic Filing Destination Root
     description: Legacy single root directory containing your existing performer or studio folders (e.g. /Media/Performers).
@@ -146,8 +150,8 @@ settings:
     description: "Choose when Watchtower suggests filing: 'import' (immediately after video import) or 'metadata' (after a performer, studio, or tag is assigned in Stash)."
     type: STRING
   autoFilingPreserveFilename:
-    displayName: Preserve Original Filename
-    description: "Keep original filenames when filing, and protect filed videos from subsequent renaming by Automatic Renaming."
+    displayName: Protect Filed Filenames from Automatic Renaming
+    description: "Automatic Filing keeps the current filename during the move. Enable this to prevent the separate Automatic Renaming feature from renaming it later."
     type: BOOLEAN
   autoFilingMaxDiscoveryDepth:
     displayName: Maximum Folder Discovery Depth

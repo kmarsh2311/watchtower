@@ -4745,7 +4745,11 @@ def get_configured_filing_destination_roots(config: dict | None) -> list[str]:
     """Return a cleaned, deduplicated list of configured destination roots for automatic filing."""
     if not config or not isinstance(config, dict):
         return []
-    raw = config.get("autoFilingDestinationRoots")
+    explicit_raw = config.get("autoFilingDestinationRoots")
+    has_explicit = bool(explicit_raw) or bool(config.get("autoFilingDestinationRoot"))
+    override_setting = config.get("autoFilingDestinationRootsOverride")
+    use_explicit = override_setting is True or (override_setting is None and has_explicit)
+    raw = explicit_raw if use_explicit else config.get("_libraryRoots")
     roots = []
     if isinstance(raw, list):
         for item in raw:
@@ -4759,7 +4763,7 @@ def get_configured_filing_destination_roots(config: dict | None) -> list[str]:
                     roots.append(part_str)
 
     # Fallback to legacy single root setting if roots is empty
-    if not roots:
+    if not roots and use_explicit:
         legacy = str(config.get("autoFilingDestinationRoot") or "").strip()
         if legacy:
             roots.append(legacy)
@@ -5707,7 +5711,7 @@ def evaluate_filing_proposal(database_path: Path, stash, file_path: str, scene: 
             record_incoming_filing_diagnostic(database_path, file_path, "Waiting for performer, studio, or tag metadata to be added in Stash.")
             return None
 
-    organize_by = (config.get("autoFilingOrganizeBy") or "performer").strip().lower()
+    organize_by = (config.get("autoFilingOrganizeBy") or "both").strip().lower()
     dest_roots = get_configured_filing_destination_roots(config)
     if not dest_roots:
         record_incoming_filing_diagnostic(database_path, file_path, "No destination roots configured in Automatic Filing settings.")
@@ -6914,14 +6918,17 @@ def apply_filing_proposal(
                     "UPDATE files SET path=?, basename=?, exists_on_disk=1, last_seen_at=? WHERE file_id=?",
                     (str(dest_video), dest_video.name, now, file_id)
                 )
-                if (config or {}).get("autoFilingPreserveFilename"):
+                if (config or {}).get("autoFilingPreserveFilename", True):
                     existing_st = connection.execute("SELECT file_id FROM filename_state WHERE file_id=?", (file_id,)).fetchone()
                     if existing_st:
                         connection.execute("UPDATE filename_state SET rename_protected=1, updated_at=? WHERE file_id=?", (now, file_id))
                     else:
                         connection.execute(
-                            "INSERT INTO filename_state (file_id, base_stem, base_source, rename_protected, created_at, updated_at) VALUES (?, ?, 'automatic_filing', 1, ?, ?)",
-                            (file_id, dest_video.stem, now, now)
+                            """INSERT INTO filename_state
+                               (file_id, base_stem, base_source, rename_protected, created_at, updated_at)
+                               SELECT ?, ?, 'automatic_filing', 1, ?, ?
+                               WHERE EXISTS (SELECT 1 FROM files WHERE file_id=?)""",
+                            (file_id, dest_video.stem, now, now, file_id)
                         )
                 connection.execute(
                     "UPDATE incoming_files SET path=?, filing_diagnostic=NULL, last_checked_at=? WHERE path=? OR path=?",

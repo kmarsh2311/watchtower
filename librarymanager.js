@@ -1281,6 +1281,7 @@
     const [newMappingType, setNewMappingType] = React.useState("performer");
     const [newMappingName, setNewMappingName] = React.useState("");
     const [newMappingFolder, setNewMappingFolder] = React.useState("");
+    const [showCustomMappings, setShowCustomMappings] = React.useState(false);
     const [showBacklogModal, setShowBacklogModal] = React.useState(false);
     const [backlogData, setBacklogData] = React.useState(null);
     const [loadingBacklog, setLoadingBacklog] = React.useState(false);
@@ -4006,6 +4007,10 @@
         ? config.autoFilingDestinationRoots
         : (config.autoFilingDestinationRoot ? [config.autoFilingDestinationRoot] : [""]);
       const destinationRootsList = rawDestRoots.length > 0 ? rawDestRoots : [""];
+      const monitoredLibraryRoots = (data?.library_roots || []).map(root => root.path).filter(Boolean);
+      const hasLegacyDestinationRoots = rawDestRoots.some(root => String(root || "").trim());
+      const limitFilingRoots = config.autoFilingDestinationRootsOverride === true ||
+        (config.autoFilingDestinationRootsOverride == null && hasLegacyDestinationRoots);
 
       const handleAddDestRoot = () => {
         if (destinationRootsList.length >= 5) return;
@@ -4058,6 +4063,24 @@
       };
 
       const folderMappingsList = data?.filing_folder_mappings || [];
+
+      const handleProtectExistingIncoming = async () => {
+        const existingCount = Number(incoming?.baseline_count || 0);
+        if (existingCount > 0 && !window.confirm(
+          `Replace the existing protection snapshot of ${existingCount} file(s)?\n\nWatchtower will record the files currently present in Incoming as pre-existing and will not automatically file them.`
+        )) return;
+        setBusy("baseline");
+        try {
+          const raw = await operation("establish_filing_baseline");
+          const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+          setNotice(`Protection snapshot recorded ${res?.snapshotted ?? 0} pre-existing incoming file(s).`);
+          await refresh(true);
+        } catch (err) {
+          setError(err.message || String(err));
+        } finally {
+          setBusy("");
+        }
+      };
 
 
       const handleSaveNewMapping = async () => {
@@ -4188,8 +4211,18 @@
                   : "Please configure at least one incoming folder located inside a Stash library root.")),
               React.createElement("small", null, `${incoming.downloading ? `${incoming.downloading} downloading, ` : ""}${incoming.waiting || 0} waiting, ${incoming.scanning || 0} being added, ${incoming.imported || 0} added, ${incoming.failed || 0} failed.`)),
             React.createElement("p", { className: "lm-help", style: { marginTop: "10px" } },
-              "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."))),
-        panel("Automatic Filing (Phase 2)", "Conservatively propose destination folders for new videos arriving in Incoming folders across multiple roots with custom mappings and optional metadata tagging. All moves require explicit review and approval.",
+              "In-flight downloads (.crdownload, .part, .download, .tmp) are actively tracked in the Live Terminal. When downloading finishes and the file settles, Stash adds it automatically."),
+            React.createElement("div", { className: "lm-incoming-state ready", style: { marginTop: "16px" } },
+              React.createElement("strong", null, `Pre-existing files protected: ${Number(incoming?.baseline_count || 0).toLocaleString()}`),
+              React.createElement("span", null, "These files were already in Incoming when protection was recorded. Watchtower will not file or move them automatically."),
+              React.createElement("button", {
+                type: "button",
+                className: "btn btn-outline-secondary btn-sm",
+                disabled: !!busy || multiStatus.valid_count < 1,
+                onClick: handleProtectExistingIncoming,
+                title: "Record files currently in Incoming as protected pre-existing files"
+              }, Number(incoming?.baseline_count || 0) > 0 ? "Replace Protection Snapshot…" : "Protect Files Already in Incoming")))),
+        panel("Automatic Filing (Beta)", "Propose destination folders for new videos arriving in Incoming. Every move requires your review and approval.",
           React.createElement(React.Fragment, null,
             React.createElement(Switch, { setting: "autoFilingEnabled", defaultValue: false,
               label: "Enable Automatic Filing Proposals",
@@ -4198,7 +4231,7 @@
               React.createElement(ChoiceField, {
                 label: "Organize By",
                 help: "Choose Performer or Studio only, or let Watchtower offer matching Performer, Studio, and verified Stash Tag folders for your approval.",
-                value: config.autoFilingOrganizeBy || "performer",
+                value: config.autoFilingOrganizeBy || "both",
                 choices: [["performer", "Performer"], ["studio", "Studio"], ["both", "Performer, Studio or Tag (Let me choose)"]],
                 onChange: value => updateSetting("autoFilingOrganizeBy", value, `Automatic Filing organization set to ${value === "studio" ? "Studio" : (value === "both" ? "Performer, Studio or Tag (Let me choose)" : "Performer")}.`)
               })),
@@ -4218,9 +4251,9 @@
                 choices: [["import", "Immediately after import"], ["metadata", "After metadata has been added in Stash"]],
                 onChange: value => updateSetting("autoFilingTrigger", value, `When to suggest filing set to ${value === "metadata" ? "after metadata has been added" : "immediately after import"}.`)
               })),
-            React.createElement(Switch, { setting: "autoFilingPreserveFilename", defaultValue: false,
-              label: "Preserve Original Filename",
-              help: "Keep the original filename when moving files via Automatic Filing, and protect filed videos from being subsequently renamed by Automatic Renaming." }),
+            React.createElement(Switch, { setting: "autoFilingPreserveFilename", defaultValue: true,
+              label: "Protect filed filenames from Automatic Renaming",
+              help: "Automatic Filing always keeps the current filename while moving the file. Keep this enabled to stop the separate Automatic Renaming feature from renaming it later." }),
             React.createElement("div", { style: { marginTop: "14px" } },
               React.createElement(ChoiceField, {
                 label: "Maximum Folder Discovery Depth",
@@ -4240,9 +4273,11 @@
               })),
             React.createElement("div", { className: "lm-incoming-list-container", style: { marginTop: "18px" } },
               React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" } },
-                React.createElement("strong", null, `Destination Roots (${destinationRootsList.length}/5)`),
+                React.createElement("strong", null, limitFilingRoots
+                  ? `Selected Automatic Filing Roots (${destinationRootsList.length}/5)`
+                  : `Using Stash Library Roots (${monitoredLibraryRoots.length})`),
                 React.createElement("div", { style: { display: "flex", gap: "6px" } },
-                  React.createElement("button", {
+                  limitFilingRoots && React.createElement("button", {
                     type: "button",
                     className: "btn btn-secondary btn-sm lm-refresh-folders-btn",
                     disabled: !!busy,
@@ -4259,12 +4294,25 @@
                 )
               ),
               React.createElement("small", { style: { display: "block", color: "var(--text-muted, #aab3c5)", marginBottom: "10px" } },
-                "Configure up to 5 parent directories containing existing performer, studio, or category subfolders (e.g. /Media/Library/Example Folder)."),
-              destinationRootsList.map((rootPath, idx) => {
+                limitFilingRoots
+                  ? "Only these selected roots may be used for filing destinations."
+                  : "Automatic Filing uses the same library roots configured and monitored by Stash."),
+              React.createElement("label", { className: "lm-switch-row", style: { marginBottom: "10px" } },
+                React.createElement("input", {
+                  type: "checkbox",
+                  checked: limitFilingRoots,
+                  onChange: event => updateSetting("autoFilingDestinationRootsOverride", event.target.checked,
+                    event.target.checked ? "Automatic Filing limited to selected roots." : "Automatic Filing now uses all Stash library roots.")
+                }),
+                React.createElement("div", { className: "lm-switch-text" },
+                  React.createElement("strong", null, "Limit Automatic Filing to selected roots"),
+                  React.createElement("small", null, "Enable this only when Automatic Filing should use fewer folders than the filesystem monitor."))),
+              (limitFilingRoots ? destinationRootsList : monitoredLibraryRoots).map((rootPath, idx) => {
                 return React.createElement("div", { className: "lm-incoming-row", key: `dest-root-${idx}` },
                   React.createElement("input", {
                     value: rootPath || "",
                     className: "lm-incoming-row-input",
+                    readOnly: !limitFilingRoots,
                     onChange: event => handleUpdateDestRoot(idx, event.target.value),
                     onBlur: event => {
                       const next = [...destinationRootsList];
@@ -4273,7 +4321,7 @@
                     },
                     placeholder: `/Media/Performers${idx > 0 ? `_${idx + 1}` : ""}`
                   }),
-                  React.createElement("button", {
+                  limitFilingRoots && React.createElement("button", {
                     type: "button",
                     className: "lm-incoming-row-remove",
                     title: destinationRootsList.length > 1 ? "Remove this destination root" : "Clear root path",
@@ -4284,10 +4332,16 @@
               })
             ),
             React.createElement("div", { className: "lm-custom-mappings-container", style: { marginTop: "20px", borderTop: "1px solid var(--border-color, #2a2f3a)", paddingTop: "16px" } },
-              React.createElement("strong", { style: { display: "block", marginBottom: "4px" } }, "Custom Folder Mappings"),
+              React.createElement("button", {
+                type: "button",
+                className: "btn btn-link",
+                onClick: () => setShowCustomMappings(value => !value),
+                "aria-expanded": showCustomMappings,
+                style: { padding: 0, marginBottom: "4px", fontWeight: "bold" }
+              }, `${showCustomMappings ? "▾" : "▸"} Custom Folder Mappings (${folderMappingsList.length})`),
               React.createElement("small", { style: { display: "block", color: "var(--text-muted, #aab3c5)", marginBottom: "10px" } },
                 "Associate specific Stash performers, studios, or tags with custom folder locations. Mapped folders must exist and be inside configured destination roots."),
-              (folderMappingsList.length > 0) ? React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginBottom: "14px" } },
+              showCustomMappings && ((folderMappingsList.length > 0) ? React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginBottom: "14px" } },
                 folderMappingsList.map(m => React.createElement("div", {
                   key: `mapping-${m.id}`,
                   style: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", padding: "8px 12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.07)" }
@@ -4305,8 +4359,8 @@
                     title: "Delete custom mapping"
                   }, "✕")
                 ))
-              ) : React.createElement("p", { style: { fontStyle: "italic", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } }, "No custom folder mappings configured."),
-              React.createElement("div", { style: { background: "rgba(0,0,0,0.15)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.05)" } },
+              ) : React.createElement("p", { style: { fontStyle: "italic", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } }, "No custom folder mappings configured.")),
+              showCustomMappings && React.createElement("div", { style: { background: "rgba(0,0,0,0.15)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.05)" } },
                 React.createElement("span", { style: { fontWeight: "bold", fontSize: "0.85rem", display: "block", marginBottom: "8px" } }, "+ Add Custom Folder Mapping"),
                 React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 2fr auto", gap: "8px", alignItems: "center" } },
                   React.createElement("select", {
@@ -4340,25 +4394,7 @@
                   }, "+ Save")
                 )
               )
-            ),
-            React.createElement("div", { style: { marginTop: "20px" } },
-              React.createElement("button", {
-                type: "button",
-                className: "btn btn-outline-secondary btn-sm",
-                disabled: !!busy,
-                onClick: async () => {
-                  setBusy("baseline");
-                  try {
-                    const raw = await operation("establish_filing_baseline");
-                    const res = typeof raw === "string" ? JSON.parse(raw) : raw;
-                    setNotice(`Baseline snapshot captured ${res?.snapshotted ?? 0} existing incoming file(s).`);
-                  } catch (err) {
-                    setError(err.message || String(err));
-                  } finally {
-                    setBusy("");
-                  }
-                }
-              }, "Snapshot Incoming Baseline Now")))))
+            ))))
     }
     else if (tab === "csm") content = React.createElement(React.Fragment, null,
       panel("Contact Sheets (CSM)", "Generate multi-frame visual contact sheet companion images alongside your video files.",

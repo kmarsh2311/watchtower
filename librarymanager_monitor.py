@@ -1598,11 +1598,13 @@ class CompletedDownloadWorker(threading.Thread):
         self.incoming_folder = self.incoming_folders[0] if self.incoming_folders else None
 
     def __init__(self, database_path, stash, incoming_folder, enabled, settle_seconds, notifications,
-                 fallback_seconds=60, max_attempts=3, incoming_folders=None, track_temporary_downloads=False):
+                 fallback_seconds=60, max_attempts=3, incoming_folders=None, track_temporary_downloads=False,
+                 library_roots=None):
         super().__init__(daemon=True)
         self.database_path, self.stash = database_path, stash
         raw_folders = incoming_folders if incoming_folders is not None else ([incoming_folder] if incoming_folder else [])
         self._set_incoming_folders(raw_folders)
+        self.library_roots = [str(root) for root in (library_roots or [])]
         self.enabled = bool(enabled and self.incoming_folders)
         self.settle_seconds = max(60, int(settle_seconds or 300))
         self.notifications = notifications
@@ -1640,6 +1642,7 @@ class CompletedDownloadWorker(threading.Thread):
             self._recover_recent_files()
             try:
                 config = self.stash.find_plugin_config("librarymanager") or {}
+                config["_libraryRoots"] = list(self.library_roots)
                 if config.get("autoFilingEnabled"):
                     folders = [str(f) for f in self.incoming_folders]
                     baseline_ok, _ = is_filing_baseline_established(self.database_path, folders)
@@ -2348,6 +2351,7 @@ class CompletedDownloadWorker(threading.Thread):
 
             try:
                 config = self.stash.find_plugin_config("librarymanager") or {}
+                config["_libraryRoots"] = list(self.library_roots)
                 if config.get("autoFilingEnabled"):
                     trigger = (config.get("autoFilingTrigger") or "import").strip().lower()
                     if trigger == "import":
@@ -3595,6 +3599,7 @@ def main():
         runtime.get("incoming_settle_seconds", 300), runtime.get("mac_notifications") is True,
         runtime.get("incoming_fallback_seconds", 60),
         incoming_folders=runtime.get("incoming_folders"),
+        library_roots=runtime.get("library_roots") or roots,
     )
     incoming_worker.generate_contact_sheets = runtime.get("generate_contact_sheets") is True
     incoming_worker.track_temporary_downloads = True
@@ -3717,6 +3722,9 @@ def main():
                             if _new_enabled is not None:
                                 incoming_worker.enabled = bool(_new_enabled and incoming_worker.incoming_folders)
                             incoming_worker.settle_seconds = new_cfg.get("incoming_settle_seconds", incoming_worker.settle_seconds)
+                            incoming_worker.library_roots = [str(root) for root in new_cfg.get(
+                                "library_roots", incoming_worker.library_roots
+                            )]
                             incoming_worker.generate_contact_sheets = new_cfg.get("generate_contact_sheets", incoming_worker.generate_contact_sheets)
                             incoming_worker.contact_sheet_grid = new_cfg.get("contact_sheet_grid", incoming_worker.contact_sheet_grid)
                             incoming_worker.contact_sheet_banner = new_cfg.get("contact_sheet_banner", incoming_worker.contact_sheet_banner)

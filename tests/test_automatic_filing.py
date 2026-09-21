@@ -1668,6 +1668,25 @@ def test_stale_filing_proposal_automatically_invalidated_on_file_or_scene_deleti
 # Phase 2 Feature Tests: Multiple Roots, Custom Mappings, Metadata, Torrents
 # ---------------------------------------------------------------------------
 
+def test_filing_roots_default_to_stash_library_roots_and_preserve_legacy_override():
+    library_roots = ["/library/one", "/library/two"]
+
+    assert get_configured_filing_destination_roots({"_libraryRoots": library_roots}) == library_roots
+    assert get_configured_filing_destination_roots({
+        "_libraryRoots": library_roots,
+        "autoFilingDestinationRoots": ["/legacy/selected"],
+    }) == ["/legacy/selected"]
+    assert get_configured_filing_destination_roots({
+        "_libraryRoots": library_roots,
+        "autoFilingDestinationRoots": ["/legacy/selected"],
+        "autoFilingDestinationRootsOverride": False,
+    }) == library_roots
+    assert get_configured_filing_destination_roots({
+        "_libraryRoots": library_roots,
+        "autoFilingDestinationRoots": ["/chosen"],
+        "autoFilingDestinationRootsOverride": True,
+    }) == ["/chosen"]
+
 def test_phase2_multiple_destination_roots_single_match(test_env):
     """Phase 2.1: Search all configured roots. Propose when exactly one matches."""
     db = test_env["db"]

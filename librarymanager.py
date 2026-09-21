@@ -502,6 +502,13 @@ def fetch_library_roots(stash):
     return sorted({str(item.get("path")).strip() for item in stashes if item.get("path")})
 
 
+def filing_config_with_library_roots(stash, config=None):
+    """Attach Stash roots for Automatic Filing without persisting derived paths."""
+    effective = dict(config or stash.find_plugin_config("librarymanager") or {})
+    effective["_libraryRoots"] = fetch_library_roots(stash)
+    return effective
+
+
 def get_configured_incoming_folders(config):
     raw_folders = (config or {}).get("incomingFolders")
     if isinstance(raw_folders, list):
@@ -729,6 +736,7 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
         "contact_sheet_adjust_vertical": config.get("contactSheetAdjustVertical") is not False,
         "contact_sheet_script": config.get("contactSheetScript") or "",
         "allow_custom_contact_sheet_script": config.get("allowCustomContactSheetScript") is True,
+        "library_roots": roots,
     }), encoding="utf-8")
     runtime_path.chmod(0o600)
     log_handle = open(log_path, "ab", buffering=0)
@@ -778,6 +786,7 @@ def reload_monitor_runtime(stash, database_path):
                 "incoming_folder": valid_incoming_paths[0] if valid_incoming_paths else "",
                 "incoming_folders": valid_incoming_paths,
                 "incoming_settle_seconds": max(60, int(config.get("incomingSettleMinutes") or 5) * 60),
+                "library_roots": roots,
                 "generate_contact_sheets": config.get("generateContactSheets") is True,
                 "contact_sheet_grid": config.get("contactSheetGrid") or "4x4",
                 "contact_sheet_banner": config.get("contactSheetBanner") is not False,
@@ -1054,7 +1063,7 @@ def main():
     hook_context = (plugin_input.get("args") or {}).get("hookContext") or {}
     if hook_context:
         stash = StashInterface(plugin_input["server_connection"])
-        config = stash.find_plugin_config("librarymanager") or {}
+        config = filing_config_with_library_roots(stash)
         filing_on_meta = bool(config.get("autoFilingEnabled") and (config.get("autoFilingTrigger") or "import").strip().lower() == "metadata")
         if not config.get("automaticRenaming") and not filing_on_meta:
             print(json.dumps({"output": "Hooks skipped: Automatic Renaming and Metadata-triggered Filing are disabled."}))
@@ -1774,8 +1783,8 @@ def main():
             message = f"Activity report is empty. JSON: {report_path}; CSV: {csv_path}"
     elif mode == "dashboard":
         stash = StashInterface(plugin_input["server_connection"])
-        config = stash.find_plugin_config("librarymanager") or {}
-        roots = fetch_library_roots(stash)
+        config = filing_config_with_library_roots(stash)
+        roots = config["_libraryRoots"]
         payload = dashboard_data(
             database_path,
             (plugin_input.get("args") or {}).get("limit", 250),
@@ -1857,7 +1866,7 @@ def main():
         target_entity_type = args.get("target_entity_type")
         target_entity_id = args.get("target_entity_id")
         stash = StashInterface(plugin_input["server_connection"])
-        config = stash.find_plugin_config("librarymanager") or {}
+        config = filing_config_with_library_roots(stash)
         result = apply_filing_proposal(
             database_path, stash, int(proposal_id),
             config=config,
@@ -1892,7 +1901,7 @@ def main():
         entity_name = args.get("entity_name")
         folder_path = args.get("folder_path")
         stash = StashInterface(plugin_input["server_connection"])
-        config = stash.find_plugin_config("librarymanager") or {}
+        config = filing_config_with_library_roots(stash)
         configured_roots = get_configured_filing_destination_roots(config)
         success, msg = save_filing_folder_mapping(
             database_path, entity_type, entity_id, entity_name, folder_path,
@@ -1907,7 +1916,7 @@ def main():
         message = json.dumps({"success": success, "mappings": mappings}, ensure_ascii=False)
     elif mode in ("refresh_destination_roots_cache", "refresh_filing_cache"):
         stash = StashInterface(plugin_input["server_connection"])
-        config = stash.find_plugin_config("librarymanager") or {}
+        config = filing_config_with_library_roots(stash)
         roots = get_configured_filing_destination_roots(config)
         max_depth = int(config.get("autoFilingMaxDiscoveryDepth", 4))
         result = refresh_destination_dir_cache(database_path, roots, max_depth=max_depth)
@@ -1919,12 +1928,12 @@ def main():
         allow_refresh = bool(args.get("allow_refresh", False))
         proposal_id = args.get("proposal_id")
         stash = StashInterface(plugin_input["server_connection"])
-        config = stash.find_plugin_config("librarymanager") or {}
+        config = filing_config_with_library_roots(stash)
         result = retry_filing_proposal(database_path, stash, path, config=config, allow_baseline=allow_baseline, allow_refresh=allow_refresh, proposal_id=proposal_id)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "get_backlog_items":
         stash = StashInterface(plugin_input["server_connection"])
-        config = stash.find_plugin_config("librarymanager") or {}
+        config = filing_config_with_library_roots(stash)
         result = get_backlog_items(database_path, stash, config=config)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "evaluate_backlog_batch":
@@ -1932,7 +1941,7 @@ def main():
         paths = args.get("paths") or []
         refresh_metadata = args.get("refresh_metadata") is True
         stash = StashInterface(plugin_input["server_connection"])
-        config = stash.find_plugin_config("librarymanager") or {}
+        config = filing_config_with_library_roots(stash)
         result = evaluate_backlog_batch(
             database_path, stash, paths, config=config, allow_refresh=refresh_metadata
         )

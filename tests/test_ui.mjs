@@ -302,9 +302,13 @@ test("pending filing proposals appear in their own visible section when zero pro
   assert.match(css, /\.lm-terminal-filing-count/);
 });
 
-test("Automatic Filing Phase 2 UI elements: multiple roots, custom mappings, candidate picker, metadata toggle, and torrent warning", () => {
+test("Automatic Filing Beta UI uses Stash roots with optional overrides and collapsible mappings", () => {
   // 1. Multiple destination roots controls in settings
-  assert.match(javascript, /Destination Roots \(\$\{destinationRootsList\.length\}\/5\)/);
+  assert.match(javascript, /Automatic Filing \(Beta\)/);
+  assert.doesNotMatch(javascript, /Automatic Filing \(Phase 2\)/);
+  assert.match(javascript, /Using Stash Library Roots/);
+  assert.match(javascript, /Limit Automatic Filing to selected roots/);
+  assert.match(javascript, /autoFilingDestinationRootsOverride/);
   assert.match(javascript, /handleAddDestRoot/);
   assert.match(javascript, /handleUpdateDestRoot/);
   assert.match(javascript, /handleRemoveDestRoot/);
@@ -312,6 +316,8 @@ test("Automatic Filing Phase 2 UI elements: multiple roots, custom mappings, can
 
   // 2. Custom folder mappings UI in settings
   assert.match(javascript, /Custom Folder Mappings/);
+  assert.match(javascript, /showCustomMappings/);
+  assert.match(javascript, /aria-expanded/);
   assert.match(javascript, /handleSaveNewMapping/);
   assert.match(javascript, /handleDeleteMapping/);
   assert.match(javascript, /save_filing_folder_mapping/);
@@ -332,13 +338,14 @@ test("Automatic Filing Phase 2 UI elements: multiple roots, custom mappings, can
   assert.match(css, /\.lm-custom-mappings-container/);
 });
 
-test("Automatic Filing settings include 'When to Suggest Filing' and 'Preserve Original Filename'", () => {
+test("Automatic Filing settings explain trigger and filename protection accurately", () => {
   assert.match(javascript, /When to Suggest Filing/);
   assert.match(javascript, /autoFilingTrigger/);
   assert.match(javascript, /Immediately after import/);
   assert.match(javascript, /After metadata has been added in Stash/);
 
-  assert.match(javascript, /Preserve Original Filename/);
+  assert.match(javascript, /Protect filed filenames from Automatic Renaming/);
+  assert.match(javascript, /Automatic Filing always keeps the current filename/);
   assert.match(javascript, /autoFilingPreserveFilename/);
 });
 
@@ -408,7 +415,7 @@ test("Automatic Filing uses generic placeholder examples and contains no persona
   assert.match(javascript, /placeholder: "Performer, studio, or tag name"/);
   assert.match(javascript, /placeholder: "Existing destination folder"/);
   assert.match(javascript, /\/Media\/Performers/);
-  assert.match(javascript, /\/Media\/Library\/Example Folder/);
+  assert.match(javascript, /Automatic Filing uses the same library roots configured and monitored by Stash/);
   assert.match(manifest, /existing performer, studio, or category folders/);
 });
 
