@@ -1856,10 +1856,14 @@
       try {
         const raw = await operation("execute_grouped_reconciliation", { batch_id: batch.id });
         const result = typeof raw === "string" ? JSON.parse(raw) : raw;
-        const state = result?.batch?.state || result?.status || "review";
+        const completedBatch = result?.batch || result || {};
+        const state = completedBatch.state || result?.status || "review";
+        const verifiedCount = Number(completedBatch.verified_count || 0);
+        const trackedCount = Number(completedBatch.tracked_count || 0);
+        const remainingCount = Math.max(0, trackedCount - verifiedCount);
         setNotice(state === "resolved"
           ? "Grouped move verified successfully in Stash."
-          : "Grouped verification finished with items still requiring review.");
+          : `Grouped verification completed: ${verifiedCount} verified, ${remainingCount} still need review.`);
         await refresh();
       } catch (reviewError) {
         setError(`Could not reconcile grouped move: ${reviewError.message}`);
@@ -2675,9 +2679,11 @@
           groupedReconciliation.map(batch => {
             const members = batch.members || [];
             const readyMembers = members.filter(member => member.state === "ready");
+            const verifiedMembers = members.filter(member => member.state === "verified");
             const uncertainMembers = members.filter(member => member.state !== "ready" && member.state !== "verified");
             const isMoveGroup = batch.operation_type === "folder_move" || batch.operation_type === "bulk_move";
             const isResumable = batch.state === "scanning" || batch.state === "verifying";
+            const isPartiallyVerified = batch.state === "partially_verified";
             const operationLabel = ({
               folder_move: "FOLDER MOVED",
               bulk_move: "FILES MOVED",
@@ -2697,10 +2703,11 @@
               React.createElement("p", { className: "lm-terminal-attention-sub" },
                 React.createElement("b", null, "To: "), batch.destination_prefix || "Unknown destination"),
               React.createElement("p", { className: "lm-terminal-attention-detail" },
-                `${readyMembers.length} path${readyMembers.length === 1 ? "" : "s"} match the inferred folder mapping. `,
-                uncertainMembers.length
-                  ? `${uncertainMembers.length} item${uncertainMembers.length === 1 ? " remains" : "s remain"} uncertain and will not be reconciled automatically.`
-                  : "All tracked paths are ready for a later verified reconciliation step."),
+                isPartiallyVerified
+                  ? `${verifiedMembers.length} of ${members.length} tracked file records were verified in Stash. ${uncertainMembers.length} ${uncertainMembers.length === 1 ? "record needs" : "records need"} manual review and will not be cleared automatically.`
+                  : `${readyMembers.length} path${readyMembers.length === 1 ? "" : "s"} match the inferred folder mapping. ${uncertainMembers.length
+                    ? `${uncertainMembers.length} item${uncertainMembers.length === 1 ? " remains" : "s remain"} uncertain and will not be reconciled automatically.`
+                    : "All tracked paths are ready for a later verified reconciliation step."}`),
               React.createElement("details", { className: "lm-grouped-members" },
                 React.createElement("summary", null, `Review ${members.length} tracked item${members.length === 1 ? "" : "s"}`),
                 React.createElement("div", { className: "lm-grouped-member-list" },
@@ -2720,11 +2727,13 @@
                     React.createElement("div", { className: "lm-grouped-path" }, `→ ${member.expected_path || "No verified destination path"}`),
                     React.createElement("div", { className: "lm-grouped-reason" }, member.reason || "No additional detail"))))),
               React.createElement("p", { className: "lm-terminal-attention-fix" },
-                isMoveGroup
+                isPartiallyVerified
+                  ? "The destination scan completed. Expand the tracked items to review the remaining Stash scene/file identity conflicts."
+                  : isMoveGroup
                   ? "Approval asks Stash to scan the destination folder; Watchtower then verifies every original scene and file identity."
                   : "Copy groups are review-only and cannot trigger a Stash scan."),
               React.createElement("div", { className: "lm-terminal-actions" },
-                isMoveGroup && React.createElement("button", {
+                isMoveGroup && !isPartiallyVerified && React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn retry",
                   disabled: !!busy,

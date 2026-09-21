@@ -999,4 +999,8 @@ test("Phase 4 requires explicit Stash scan approval and keeps copy groups review
   assert.match(javascript, /Copy groups are review-only and cannot trigger a Stash scan/);
   assert.match(javascript, /RESUME VERIFICATION/);
   assert.match(javascript, /SCAN & VERIFY MOVE/);
+  assert.match(javascript, /Grouped verification completed: \$\{verifiedCount\} verified, \$\{remainingCount\} still need review/);
+  assert.match(javascript, /tracked file records were verified in Stash/);
+  assert.match(javascript, /The destination scan completed\. Expand the tracked items/);
+  assert.match(javascript, /isMoveGroup && !isPartiallyVerified/);
 });
