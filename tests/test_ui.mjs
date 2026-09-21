@@ -367,6 +367,14 @@ test("Automatic Filing nested folder discovery depth and explicit cache refresh 
   assert.match(manifest, /Maximum Folder Discovery Depth/);
 });
 
+test("Custom folder mappings require a real Stash entity ID", () => {
+  assert.match(javascript, /await gql\(`query FindP/);
+  assert.match(javascript, /await gql\(`query FindS/);
+  assert.match(javascript, /await gql\(`query FindT/);
+  assert.match(javascript, /No Stash \$\{newMappingType\} named/);
+  assert.doesNotMatch(javascript, /entityId = newMappingName\.trim\(\)/);
+});
+
 test("Automatic Filing save notifications cover all settings, removals, and error paths", () => {
   // 1. Destination roots save and remove toasts
   assert.match(javascript, /"Destination roots saved\."/);

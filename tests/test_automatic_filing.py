@@ -1824,6 +1824,29 @@ def test_phase2_custom_folder_mappings_validation_and_usage(test_env):
     assert len(get_filing_folder_mappings(db)) == 0
 
 
+def test_legacy_name_based_tag_mapping_resolves_current_stash_tag_id(test_env):
+    """Mappings saved by the old UI with a name in entity_id remain usable."""
+    db = test_env["db"]
+    root = test_env["dest_root"]
+    mapped = root / "Hot Young Brit"
+    mapped.mkdir()
+
+    assert save_filing_folder_mapping(
+        db, "tag", "HYB", "HYB", str(mapped), [str(root)]
+    )[0]
+    assert save_filing_folder_mapping(
+        db, "tag", "hyb", "hyb", str(mapped), [str(root)]
+    )[0]
+
+    destinations, status = librarymanager_core.resolve_tag_filing_destinations(
+        [str(root)], {"id": "588", "name": "hyb", "aliases": []},
+        database_path=db,
+    )
+
+    assert status == "custom_mapping"
+    assert destinations == [mapped.resolve()]
+
+
 def test_phase2_optional_metadata_updates_default_move_only(test_env):
     """Phase 2.3: By default, approving a filing proposal moves only and leaves metadata untouched."""
     db = test_env["db"]

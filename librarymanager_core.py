@@ -5173,18 +5173,28 @@ def resolve_filing_destinations(
     if not destination_roots:
         return [], "Destination root folder is not configured"
 
-    # 1. Custom folder mapping check (supports any depth under destination roots)
+    # 1. Custom folder mapping check (supports any depth under destination roots).
+    # Older UI builds could store the entity name in entity_id when their Stash
+    # lookup failed. Prefer the stable ID, then accept an exact case-insensitive
+    # name match so those existing mappings remain useful.
     if database_path and entity_id and entity_type:
         connection = connect(database_path)
         try:
-            row = connection.execute(
+            rows = connection.execute(
                 "SELECT folder_path FROM filing_folder_mappings WHERE entity_type=? AND entity_id=?",
                 (entity_type.lower(), str(entity_id))
-            ).fetchone()
-            if row:
-                mapped_path = Path(row["folder_path"])
+            ).fetchall()
+            if not rows and entity_name:
+                rows = connection.execute(
+                    """SELECT folder_path FROM filing_folder_mappings
+                       WHERE entity_type=? AND entity_name=? COLLATE NOCASE""",
+                    (entity_type.lower(), str(entity_name).strip())
+                ).fetchall()
+            valid_mapped: list[Path] = []
+            seen_mapped: set[str] = set()
+            for row in rows:
+                mapped_path = Path(row["folder_path"]).expanduser()
                 if mapped_path.is_dir():
-                    # Verify inside one of destination roots at any depth
                     res_mapped = str(mapped_path.resolve())
                     for r in destination_roots:
                         if not r:
@@ -5192,9 +5202,14 @@ def resolve_filing_destinations(
                         try:
                             r_res = str(Path(r).expanduser().resolve())
                             if res_mapped == r_res or res_mapped.startswith(r_res + os.sep):
-                                return [mapped_path.resolve()], "custom_mapping"
+                                if res_mapped not in seen_mapped:
+                                    seen_mapped.add(res_mapped)
+                                    valid_mapped.append(mapped_path.resolve())
+                                break
                         except Exception:
                             continue
+            if valid_mapped:
+                return valid_mapped, "custom_mapping" if len(valid_mapped) == 1 else "multiple_destinations"
         finally:
             connection.close()
 

@@ -4036,34 +4036,28 @@
         setBusy("save_mapping");
         try {
           let entityId = "";
-          try {
-            if (newMappingType === "performer") {
-              const gqlRes = await query(`query FindP { allPerformers { id name } }`);
-              const performers = gqlRes?.allPerformers || [];
-              const pMatch = performers.find(p => p.name.toLowerCase() === newMappingName.trim().toLowerCase());
-              if (pMatch) entityId = pMatch.id;
-            } else if (newMappingType === "studio") {
-              const gqlRes = await query(`query FindS { allStudios { id name } }`);
-              const studios = gqlRes?.allStudios || [];
-              const sMatch = studios.find(s => s.name.toLowerCase() === newMappingName.trim().toLowerCase());
-              if (sMatch) entityId = sMatch.id;
-            } else {
-              const gqlRes = await query(`query FindT { allTags { id name } }`);
-              const tags = gqlRes?.allTags || [];
-              const tMatch = tags.find(t => t.name.toLowerCase() === newMappingName.trim().toLowerCase());
-              if (tMatch) entityId = tMatch.id;
-            }
-          } catch (e) {
-            // fallback
+          const requestedName = newMappingName.trim();
+          if (newMappingType === "performer") {
+            const gqlRes = await gql(`query FindP { allPerformers { id name } }`);
+            const match = (gqlRes?.allPerformers || []).find(item => item.name.toLowerCase() === requestedName.toLowerCase());
+            if (match) entityId = match.id;
+          } else if (newMappingType === "studio") {
+            const gqlRes = await gql(`query FindS { allStudios { id name } }`);
+            const match = (gqlRes?.allStudios || []).find(item => item.name.toLowerCase() === requestedName.toLowerCase());
+            if (match) entityId = match.id;
+          } else {
+            const gqlRes = await gql(`query FindT { allTags { id name } }`);
+            const match = (gqlRes?.allTags || []).find(item => item.name.toLowerCase() === requestedName.toLowerCase());
+            if (match) entityId = match.id;
           }
           if (!entityId) {
-            entityId = newMappingName.trim();
+            throw new Error(`No Stash ${newMappingType} named '${requestedName}' was found. Check the name and try again.`);
           }
 
           const raw = await operation("save_filing_folder_mapping", {
             entity_type: newMappingType,
             entity_id: String(entityId),
-            entity_name: newMappingName.trim(),
+            entity_name: requestedName,
             folder_path: newMappingFolder.trim()
           });
           const res = typeof raw === "string" ? JSON.parse(raw) : raw;
