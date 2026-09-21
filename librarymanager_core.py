@@ -5646,6 +5646,7 @@ def is_filing_baseline_established(database_path: Path, incoming_folders: list[s
 def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str]) -> int:
     """Snapshot all files currently present across incoming folders to establish an activation baseline.
     Files present in this snapshot will never be proposed for automatic filing.
+    Uses an atomic staged transaction so the previous valid snapshot is preserved if interrupted.
     Fails safely: records status='failed' on error so un-baselined files can never be filed."""
     now = utc_now()
     count = 0
@@ -5659,11 +5660,19 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
             (now, json.dumps(cleaned_folders))
         )
         run_id = cur.lastrowid
-        # A user-requested replacement must replace the old snapshot rather
-        # than accumulating paths which no longer exist in Incoming.
-        connection.execute("DELETE FROM filing_baseline_acknowledgements")
-        connection.execute("DELETE FROM filing_incoming_baseline")
-        connection.execute("DELETE FROM filing_baseline_summary")
+        connection.commit()
+
+        # Ensure staging table exists and is empty
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS filing_incoming_baseline_staging (
+                   path TEXT PRIMARY KEY,
+                   size INTEGER,
+                   modified_ns INTEGER,
+                   oshash TEXT,
+                   seen_at TEXT
+               )"""
+        )
+        connection.execute("DELETE FROM filing_incoming_baseline_staging")
         connection.commit()
 
         for folder_str in cleaned_folders:
@@ -5677,13 +5686,15 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
             for root, dirs, files in os.walk(folder):
                 for fname in files:
                     fpath = Path(root) / fname
+                    if is_temporary_download(fpath):
+                        continue
                     try:
                         st = fpath.stat()
                         size = st.st_size
                         modified_ns = st.st_mtime_ns
                         oshash = opensubtitles_hash(fpath) if fpath.suffix.lower() in VIDEO_EXTENSIONS else None
                         connection.execute(
-                            """INSERT OR REPLACE INTO filing_incoming_baseline
+                            """INSERT OR REPLACE INTO filing_incoming_baseline_staging
                                (path, size, modified_ns, oshash, seen_at)
                                VALUES (?, ?, ?, ?, ?)""",
                             (str(fpath), size, modified_ns, oshash, now)
@@ -5692,9 +5703,18 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
                     except OSError as os_err:
                         raise RuntimeError(f"Failed reading incoming file '{fpath}': {os_err}")
 
+        # Atomic replacement: swap staging into live baseline in a single transaction
+        connection.execute("DELETE FROM filing_baseline_acknowledgements")
+        connection.execute("DELETE FROM filing_incoming_baseline")
+        connection.execute("DELETE FROM filing_baseline_summary")
+        connection.execute(
+            """INSERT INTO filing_incoming_baseline (path, size, modified_ns, oshash, seen_at)
+               SELECT path, size, modified_ns, oshash, seen_at FROM filing_incoming_baseline_staging"""
+        )
+        connection.execute("DELETE FROM filing_incoming_baseline_staging")
         connection.execute(
             """UPDATE filing_baseline_state
-               SET status='complete', completed_at=?, file_count=?
+               SET status='complete', completed_at=?, file_count=?, last_error=NULL
                WHERE id=?""",
             (utc_now(), count, run_id)
         )
@@ -5705,6 +5725,8 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
             (count, count, utc_now()),
         )
         connection.commit()
+        invalidate_incoming_discovery_cache()
+        return count
     except Exception as exc:
         if run_id:
             try:
@@ -5714,13 +5736,13 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
                        WHERE id=?""",
                     (str(exc), run_id)
                 )
+                connection.execute("DELETE FROM filing_incoming_baseline_staging")
                 connection.commit()
             except Exception:
                 pass
         raise
     finally:
         connection.close()
-    return count
 
 
 def prune_resolved_filing_baseline(database_path: Path, config: dict | None = None) -> dict:
