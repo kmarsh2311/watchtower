@@ -1932,9 +1932,11 @@ def main():
         result = retry_filing_proposal(database_path, stash, path, config=config, allow_baseline=allow_baseline, allow_refresh=allow_refresh, proposal_id=proposal_id)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "get_backlog_items":
-        stash = StashInterface(plugin_input["server_connection"])
-        config = filing_config_with_library_roots(stash)
-        result = get_backlog_items(database_path, stash, config=config)
+        args = plugin_input.get("args") or {}
+        force_refresh = args.get("force_refresh") is True or args.get("recheck") is True
+        stash = StashInterface(plugin_input["server_connection"]) if "server_connection" in plugin_input else None
+        config = filing_config_with_library_roots(stash) if stash else None
+        result = get_backlog_items(database_path, stash, config=config, force_refresh=force_refresh)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "acknowledge_backlog_missing":
         paths = (plugin_input.get("args") or {}).get("paths") or []

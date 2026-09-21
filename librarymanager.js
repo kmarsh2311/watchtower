@@ -1361,11 +1361,11 @@
       });
     }, []);
 
-    const loadBacklog = React.useCallback(async () => {
+    const loadBacklog = React.useCallback(async (forceRefresh = false) => {
       setLoadingBacklog(true);
       setBacklogError("");
       try {
-        const raw = await operation("get_backlog_items");
+        const raw = await operation("get_backlog_items", { force_refresh: forceRefresh === true });
         const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
         setBacklogData(payload);
         return payload;
@@ -1380,7 +1380,7 @@
       setBusy("backlog_recheck");
       try {
         const previousCount = Number(backlogData?.needs_attention_count || 0);
-        const refreshed = await loadBacklog();
+        const refreshed = await loadBacklog(true);
         if (refreshed) {
           const currentCount = Number(refreshed?.needs_attention_count || 0);
           const resolvedCount = Math.max(0, previousCount - currentCount);

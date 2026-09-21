@@ -5009,6 +5009,95 @@ def delete_filing_folder_mapping(database_path: Path, mapping_id: int) -> bool:
         connection.close()
 
 
+_INCOMING_DISCOVERY_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_INCOMING_DISCOVERY_CACHE_LOCK = threading.Lock()
+_INCOMING_DISCOVERY_CACHE_TTL = 3600.0  # 1 hour; explicit recheck remains available
+
+
+def invalidate_incoming_discovery_cache(root_path: str | Path | None = None) -> None:
+    """Invalidate cached incoming directory scan results in memory."""
+    with _INCOMING_DISCOVERY_CACHE_LOCK:
+        if root_path is None:
+            _INCOMING_DISCOVERY_CACHE.clear()
+        else:
+            try:
+                norm_target = os.path.normcase(str(Path(root_path).expanduser())).replace(chr(92), "/")
+                keys_to_remove = [k for k in _INCOMING_DISCOVERY_CACHE if norm_target in k]
+                for k in keys_to_remove:
+                    _INCOMING_DISCOVERY_CACHE.pop(k, None)
+            except Exception:
+                _INCOMING_DISCOVERY_CACHE.clear()
+
+
+def discover_incoming_files_cached(
+    incoming_folders: list[str],
+    active_incoming_states: dict[str, str] | None = None,
+    force_refresh: bool = False,
+    ttl: float = _INCOMING_DISCOVERY_CACHE_TTL
+) -> list[dict]:
+    """Scan configured incoming folders for actionable completed files with a 1-hour cache.
+    - Reuses cached discovery when roots match and within TTL.
+    - Explicit force_refresh or TTL expiry rescans available incoming folders.
+    - Filters out active incomplete lifecycle states and temporary download files.
+    """
+    if not incoming_folders:
+        return []
+    
+    active_states = active_incoming_states or {}
+    normalized_roots = sorted([
+        os.path.normcase(str(Path(f).expanduser())).replace(chr(92), "/")
+        for f in incoming_folders if f and str(f).strip()
+    ])
+    cache_key = json.dumps(normalized_roots)
+    now_mono = time.monotonic()
+
+    if not force_refresh:
+        with _INCOMING_DISCOVERY_CACHE_LOCK:
+            cached = _INCOMING_DISCOVERY_CACHE.get(cache_key)
+            if cached:
+                cached_mono, cached_entries = cached
+                if now_mono - cached_mono < ttl:
+                    return [
+                        dict(e) for e in cached_entries
+                        if is_actionable_incoming_file(e["path"], active_states.get(e["path"]))
+                    ]
+
+    fresh_entries = []
+    seen_paths = set()
+    for incoming_folder in incoming_folders:
+        folder = Path(incoming_folder).expanduser()
+        if not folder.is_dir():
+            continue
+        try:
+            for root, _dirs, filenames in os.walk(folder):
+                for filename in filenames:
+                    current_path = Path(root) / filename
+                    current_path_str = str(current_path)
+                    if current_path_str in seen_paths:
+                        continue
+                    if not is_actionable_incoming_file(current_path, active_states.get(current_path_str)):
+                        continue
+                    try:
+                        stat = current_path.stat()
+                    except OSError:
+                        continue
+                    seen_paths.add(current_path_str)
+                    fresh_entries.append({
+                        "path": current_path_str,
+                        "size": stat.st_size,
+                        "modified_ns": stat.st_mtime_ns,
+                        "oshash": None,
+                        "seen_at": utc_now(),
+                    })
+        except OSError:
+            continue
+
+    with _INCOMING_DISCOVERY_CACHE_LOCK:
+        _INCOMING_DISCOVERY_CACHE[cache_key] = (now_mono, fresh_entries)
+
+    return [dict(e) for e in fresh_entries]
+
+
 _DESTINATION_DIR_CACHE: dict[tuple[str, int], tuple[float, list[tuple[Path, str]]]] = {}
 _DESTINATION_DIR_CACHE_LOCK = threading.Lock()
 _DESTINATION_DIR_CACHE_TTL = 3600.0  # 1 hour; explicit folder refresh remains available
@@ -7705,7 +7794,7 @@ def process_incoming_file_now(database_path: Path, file_path: str) -> dict:
 
 
 
-def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> dict:
+def get_backlog_items(database_path: Path, stash=None, config: dict = None, force_refresh: bool = False) -> dict:
     """Return current Incoming work plus unresolved activation protection rows."""
     if config is None:
         config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
@@ -7805,34 +7894,19 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None) -> d
 
         # The immutable baseline protects original files, but it must not freeze
         # the organiser's working list forever. Add files that currently exist
-        # in Incoming without hashing them or scanning any library destination.
+        # in Incoming using cached directory discovery.
         represented_current_paths = {
             current_recorded_path(str(row["path"])) for row in rows
         }
-        for incoming_folder in incoming_folders:
-            folder = Path(incoming_folder).expanduser()
-            if not folder.is_dir():
-                continue
-            for root, _dirs, filenames in os.walk(folder):
-                for filename in filenames:
-                    current_path = Path(root) / filename
-                    current_path_str = str(current_path)
-                    if current_path_str in represented_current_paths:
-                        continue
-                    if not is_actionable_incoming_file(current_path, active_incoming_states.get(current_path_str)):
-                        continue
-                    try:
-                        stat = current_path.stat()
-                    except OSError:
-                        continue
-                    rows.append({
-                        "path": current_path_str,
-                        "size": stat.st_size,
-                        "modified_ns": stat.st_mtime_ns,
-                        "oshash": None,
-                        "seen_at": utc_now(),
-                    })
-                    represented_current_paths.add(current_path_str)
+        discovered_files = discover_incoming_files_cached(
+            incoming_folders,
+            active_incoming_states,
+            force_refresh=force_refresh
+        )
+        for disc in discovered_files:
+            if disc["path"] not in represented_current_paths:
+                rows.append(disc)
+                represented_current_paths.add(disc["path"])
 
         # A previously completed move may carry a stale historical proposal
         # status. Treat it as moved only when the destination exists and the
