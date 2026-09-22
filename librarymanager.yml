@@ -1,6 +1,6 @@
 name: Watchtower
 description: Safely inventories Stash scene files and reports filesystem differences.
-version: 1.0.13
+version: 1.0.14
 ui:
   javascript:
     - librarymanager.js

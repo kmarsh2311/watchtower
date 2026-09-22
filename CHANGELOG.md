@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.14 — 2026-09-22
+
+- **Backlog Organiser**: Preserve batch evaluation results and summary counts when re-evaluating individual items after metadata updates.
+- **FastTag Keyboard Search**: Disable React-Bootstrap modal focus trap (`enforceFocus: false`) on the Organise Existing Files modal so FastTag search inputs retain focus and keyboard typing immediately upon opening.
+- **Onboarding Wizard**: Bound wizard dialog to viewport height (`max-height: calc(100dvh - 3rem)`) with dedicated vertical scrolling on `.lm-wizard-body` and non-shrinking headers/footers, ensuring users with many Stash library roots can scroll Step 2 and always reach navigation buttons.
+
 ## 1.0.13 — 2026-09-22
 
 ### ⚡ External Moves & Folder Renames (Grouped Reconciliation)
