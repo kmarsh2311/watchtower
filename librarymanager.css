@@ -2310,7 +2310,7 @@ a.lm-activity-scene-pill:hover {
   box-sizing: border-box !important;
   animation: lmFadeInBackdrop 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
   overscroll-behavior: contain !important;
-  touch-action: none !important;
+  touch-action: pan-y !important;
 }
 
 .lm-wizard-backdrop.lm-exiting {
@@ -2326,6 +2326,7 @@ a.lm-activity-scene-pill:hover {
 .lm-wizard-dialog {
   width: 100%;
   max-width: 660px;
+  max-height: calc(100dvh - 3rem);
   background: #111c2e !important;
   border: 1px solid #2fa66d !important;
   border-radius: 0.75rem !important;
@@ -2446,10 +2447,19 @@ a.lm-activity-scene-pill:hover {
   color: #39ff64 !important;
 }
 
+.lm-wizard-header,
+.lm-wizard-stepper,
+.lm-wizard-footer {
+  flex-shrink: 0;
+}
+
 /* Wizard Body */
 .lm-wizard-body {
   padding: 1.35rem 1.4rem !important;
-  min-height: 260px !important;
+  flex: 1 1 auto;
+  min-height: 0 !important;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .lm-wizard-pane h3 {
   margin: 0 0 0.45rem 0 !important;
@@ -2577,6 +2587,16 @@ a.lm-activity-scene-pill:hover {
 @media (max-width: 600px) {
   .lm-wizard-stepper {
     display: none !important;
+  }
+}
+
+@media (max-width: 600px), (max-height: 700px) {
+  .lm-wizard-backdrop {
+    padding: 0.5rem !important;
+  }
+
+  .lm-wizard-dialog {
+    max-height: calc(100dvh - 1rem);
   }
 }
 

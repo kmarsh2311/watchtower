@@ -239,6 +239,24 @@ test("onboarding controls enforce indexing and baseline transitions", () => {
   assert.equal(controls(5, false, true).canGoBack, true);
 });
 
+test("onboarding wizard layout scrolls body and keeps navigation buttons visible", () => {
+  // 1. Dialog is limited by viewport height
+  assert.match(css, /\.lm-wizard-dialog\s*\{[\s\S]*max-height:\s*calc\(100dvh - 3rem\);/, "Dialog is limited by viewport height");
+
+  // 2. Wizard body uses vertical scrolling and min-height: 0
+  assert.match(css, /\.lm-wizard-body\s*\{[\s\S]*flex:\s*1 1 auto;/, "Wizard body flexes to fill available height");
+  assert.match(css, /\.lm-wizard-body\s*\{[\s\S]*min-height:\s*0 !important;/, "Wizard body has min-height: 0 to allow shrinking in flex container");
+  assert.match(css, /\.lm-wizard-body\s*\{[\s\S]*overflow-y:\s*auto;/, "Wizard body enables vertical scrolling");
+  assert.match(css, /\.lm-wizard-body\s*\{[\s\S]*overscroll-behavior:\s*contain;/, "Wizard body contains overscroll");
+
+  // 3. Header, stepper, and footer do not shrink
+  assert.match(css, /\.lm-wizard-header,\s*\.lm-wizard-stepper,\s*\.lm-wizard-footer\s*\{[\s\S]*flex-shrink:\s*0;/, "Header, stepper, and footer have flex-shrink: 0");
+
+  // 4. Short and mobile viewports use reduced padding and height
+  assert.match(css, /@media\s*\(max-width:\s*600px\),\s*\(max-height:\s*700px\)[\s\S]*\.lm-wizard-backdrop\s*\{[\s\S]*padding:\s*0\.5rem !important;/, "Short/mobile viewports reduce backdrop padding");
+  assert.match(css, /@media\s*\(max-width:\s*600px\),\s*\(max-height:\s*700px\)[\s\S]*\.lm-wizard-dialog\s*\{[\s\S]*max-height:\s*calc\(100dvh - 1rem\);/, "Short/mobile viewports reduce dialog max-height offset");
+});
+
 test("inventory progress formatter reports preparation and bounded percentage", () => {
   const format = loadNamedFunction("formatInventoryProgress");
   assert.match(format({ status: "preparing", detail: "Reading scenes from Stash" }), /Reading scenes from Stash/);
