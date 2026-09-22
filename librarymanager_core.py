@@ -6737,7 +6737,8 @@ def retry_filing_proposal(
     config: dict = None,
     allow_baseline: bool = False,
     allow_refresh: bool = False,
-    proposal_id: int | None = None
+    proposal_id: int | None = None,
+    force_rescan: bool = False
 ) -> dict:
     """Re-evaluate an eligible, already-imported incoming scene for automatic filing.
     - Evaluates current Stash metadata, aliases, custom mappings, and destination folders.
@@ -6754,6 +6755,11 @@ def retry_filing_proposal(
 
     if not config.get("autoFilingEnabled"):
         return {"success": False, "error": "Automatic filing is disabled in settings."}
+
+    if force_rescan:
+        roots = get_configured_filing_destination_roots(config)
+        max_depth = int(config.get("autoFilingMaxDiscoveryDepth", 4))
+        refresh_destination_dir_cache(database_path, roots, max_depth=max_depth)
 
     # 1. Prevent duplicate proposals, check unresolved recovery states, and recognise already-filed scenes
     conn = connect(database_path)

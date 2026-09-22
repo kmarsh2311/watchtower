@@ -360,6 +360,13 @@ test("Automatic Filing Beta UI uses Stash roots with optional overrides and coll
   assert.match(javascript, /handleDeleteMapping/);
   assert.match(javascript, /save_filing_folder_mapping/);
   assert.match(javascript, /delete_filing_folder_mapping/);
+  assert.match(javascript, /className: "lm-custom-mappings-list"/);
+  assert.match(css, /\.lm-custom-mappings-list\s*\{[^}]*max-height:\s*340px;[^}]*overflow-y:\s*auto;/);
+  assert.match(javascript, /placeholder:\s*"Search mappings by name, type, or folder…"/);
+  assert.match(javascript, /customMappingFilter/);
+  const addFormIndex = javascript.indexOf("+ Add Custom Folder Mapping");
+  const listContainerIndex = javascript.indexOf('className: "lm-custom-mappings-list"');
+  assert.ok(addFormIndex !== -1 && listContainerIndex !== -1 && addFormIndex < listContainerIndex, "+ Add controls are rendered above the scrollable mappings list");
 
   // 3. Proposal card enhancements: candidate destination dropdown, custom mapped badge, torrent warning, metadata checkbox
   assert.match(javascript, /className: "lm-filing-candidate-picker"/);
@@ -852,6 +859,8 @@ test('Automatic Filing approval and refresh choices UI feedback and candidate va
   assert.ok(javascript.includes('allow_refresh: true'), 'Passes allow_refresh flag to retry_filing_proposal');
   assert.ok(javascript.includes('proposal_id: proposalId'), 'Passes proposal_id for in-place update');
   assert.ok(javascript.includes('Filing proposal destination choices refreshed successfully.'), 'Success notice on refresh');
+  assert.ok(javascript.includes('Scanning storage disks for folder changes'), 'Displays in-progress scan toast');
+  assert.ok(javascript.includes('lm-filing-rescan-indicator'), 'Displays inline scanning spinner banner on card');
 
   // 3. Selection validation on refresh
   assert.ok(javascript.includes('newCandidates.some'), 'Validates current selection against refreshed candidates');
@@ -984,7 +993,8 @@ test("Filing Proposal hover preview and FastTag actions menu", () => {
   assert.match(javascript, /className: "lm-terminal-btn details lm-filing-menu-trigger"/);
   assert.match(javascript, /🎬 Open Scene in Stash/);
   assert.match(javascript, /⚡ Edit Scene with FastTag/);
-  assert.match(javascript, /⟳ Refresh Filing Choices/);
+  assert.match(javascript, /⟳ Rescan Folders & Recalculate/);
+  assert.match(javascript, /⟳ REFRESH CHOICES/);
   assert.match(css, /\.lm-filing-scene-link/);
 });
 

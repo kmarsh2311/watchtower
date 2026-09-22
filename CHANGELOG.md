@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.15 — 2026-09-22
+
+- **On-Demand Disk Rescan**: Added **`⟳ Rescan Folders & Recalculate`** to the filing proposal actions menu (`⋮ ACTIONS`), immediately invalidating the 1-hour directory cache to discover newly created, deleted, or renamed folders on physical storage drives without waiting or restarting Stash.
+- **Rescan Visual Feedback**: Added immediate in-progress scanning toast notifications, card inline loading spinner banners, and completion confirmation notices so disk sweep activity is always visible.
+- **Custom Folder Mappings Filter & Scroll**: Bound the custom folder mappings list inside a scrollable container (`max-height: 340px`) with a real-time client-side search box matching name, entity type, and destination path, keeping `+ Add Custom Folder Mapping` controls persistently visible above.
+
 ## 1.0.14 — 2026-09-22
 
 - **Backlog Organiser**: Preserve batch evaluation results and summary counts when re-evaluating individual items after metadata updates.

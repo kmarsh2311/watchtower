@@ -5189,3 +5189,58 @@ def test_rename_protected_schema_migration_and_auto_rename_independence(tmp_path
     assert apply_res["status"] == "renamed"
     assert len(moves) == 1
     assert moves[0][2] == "Super Title - Super Studio - Performer One.mp4"
+
+def test_retry_filing_proposal_force_rescan_invalidates_and_discovers_new_disk_folders(test_env):
+    """Verify retry_filing_proposal with force_rescan=True invalidates cache and rescans live disk folders."""
+    db = test_env["db"]
+    incoming = test_env["incoming"]
+    dest_root = test_env["dest_root"]
+
+    snapshot_incoming_baseline(db, [str(incoming)])
+
+    (dest_root / "Initial Performer").mkdir(parents=True, exist_ok=True)
+    video = incoming / "Test Video - Initial Performer.mp4"
+    video.write_bytes(b"dummy video data")
+
+    conn = connect(db)
+    now_str = utc_now()
+    conn.execute("INSERT INTO files (file_id, scene_id, path, basename, exists_on_disk, first_seen_at, last_seen_at) VALUES ('f1', 's1', ?, ?, 1, ?, ?)", (str(video), video.name, now_str, now_str))
+    conn.execute("INSERT INTO incoming_files (path, first_seen_at, last_checked_at, status, detail) VALUES (?, ?, ?, 'imported', 'Scene s1')", (str(video), now_str, now_str))
+    conn.commit()
+    conn.close()
+
+    scene = {
+        "id": "s1",
+        "title": "Test Scene",
+        "files": [{"id": "f1", "path": str(video)}],
+        "performers": [{"id": "p1", "name": "Initial Performer", "alias_list": []}],
+        "studio": None,
+        "tags": []
+    }
+
+    mock_stash = MagicMock()
+    mock_stash.call_GQL.return_value = {"findScene": scene, "allPerformers": scene["performers"]}
+
+    config = {
+        "autoFilingEnabled": True,
+        "autoFilingOrganizeBy": "performer",
+        "autoFilingMatchSource": "metadata_first",
+        "autoFilingDestinationRoots": [str(dest_root)],
+        "incomingFolders": [str(incoming)]
+    }
+
+    prop = evaluate_filing_proposal(db, mock_stash, str(video), scene, config)
+    assert prop is not None
+    assert prop["destination_folder"] == str((dest_root / "Initial Performer").resolve())
+
+    # Now remove Initial Performer and create New Performer on disk without waiting 1 hour
+    (dest_root / "Initial Performer").rmdir()
+    (dest_root / "New Performer").mkdir(parents=True, exist_ok=True)
+
+    scene["performers"] = [{"id": "p2", "name": "New Performer", "alias_list": []}]
+    mock_stash.call_GQL.return_value = {"findScene": scene, "allPerformers": scene["performers"]}
+
+    # Calling retry with force_rescan=True forces an immediate disk rescan and invalidation
+    rescan_res = retry_filing_proposal(db, mock_stash, str(video), config=config, allow_refresh=True, force_rescan=True)
+    assert rescan_res["success"] is True
+    assert rescan_res["proposal"]["destination_folder"] == str((dest_root / "New Performer").resolve())

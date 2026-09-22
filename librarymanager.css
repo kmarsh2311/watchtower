@@ -2822,6 +2822,16 @@ a.lm-activity-scene-pill:hover {
 .lm-custom-mappings-container {
   margin-top: 20px;
 }
+.lm-custom-mappings-list {
+  max-height: 340px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+  padding-right: 4px;
+}
 
 .lm-terminal-line.imported {
   color: #38bdf8;

@@ -1330,6 +1330,7 @@
     const [newMappingName, setNewMappingName] = React.useState("");
     const [newMappingFolder, setNewMappingFolder] = React.useState("");
     const [showCustomMappings, setShowCustomMappings] = React.useState(false);
+    const [customMappingFilter, setCustomMappingFilter] = React.useState("");
     const [showBacklogModal, setShowBacklogModal] = React.useState(false);
     const [backlogData, setBacklogData] = React.useState(null);
     const [loadingBacklog, setLoadingBacklog] = React.useState(false);
@@ -2488,18 +2489,24 @@
       }
     }
 
-    async function handleRefreshFilingProposal(filePath, proposalId) {
-      setBusy("refresh_prop_" + filePath); setError("");
+    async function handleRefreshFilingProposal(filePath, proposalId, forceRescan = false) {
+      const busyKey = forceRescan ? ("rescan_prop_" + filePath) : ("refresh_prop_" + filePath);
+      setBusy(busyKey); setError("");
+      setNotice(forceRescan ? "⏳ Scanning storage disks for folder changes…" : "⏳ Refreshing filing choices…");
       try {
         const raw = await operation("retry_filing_proposal", {
           path: filePath,
           proposal_id: proposalId,
           allow_refresh: true,
-          allow_baseline: true
+          allow_baseline: true,
+          force_rescan: Boolean(forceRescan)
         });
         const res = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (res && res.success) {
-          setNotice("Filing proposal destination choices refreshed successfully.");
+          const msg = forceRescan
+            ? "Destination folders rescanned from disk and choices recalculated."
+            : "Filing proposal destination choices refreshed successfully.";
+          setNotice(msg);
           const newCandidates = res.proposal?.candidate_destinations || [];
           const currentSelected = filingOptions[proposalId]?.targetDest;
           if (currentSelected && !newCandidates.some(c => (c.destination_folder || c) === currentSelected)) {
@@ -3239,6 +3246,9 @@
               )
             ) : null;
 
+            const isRescanning = busy === `rescan_prop_${prop.source_path}`;
+            const isRefreshing = busy === `refresh_prop_${prop.source_path}`;
+
             return React.createElement("div", {
               className: "lm-terminal-attention-item filing",
               key: `filing-${prop.id}`
@@ -3317,9 +3327,10 @@
                       style: { background: "transparent", border: "none", color: "#38bdf8", textAlign: "left", padding: "8px 12px", fontSize: "0.82rem", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px", borderTop: "1px solid rgba(255,255,255,0.06)" },
                       onClick: () => {
                         setActiveFilingMenuId(null);
-                        handleRefreshFilingProposal(prop.source_path, prop.id);
-                      }
-                    }, "⟳ Refresh Filing Choices")
+                        handleRefreshFilingProposal(prop.source_path, prop.id, true);
+                      },
+                      title: "Rescan physical storage disks for created, renamed, or deleted destination folders"
+                    }, "⟳ Rescan Folders & Recalculate")
                   )
                 )),
               React.createElement("p", { className: "lm-terminal-attention-detail" },
@@ -3329,6 +3340,24 @@
                   React.createElement("span", { style: { marginLeft: "8px", opacity: 0.8 } }, `(${selectedCandidate?.match_source || prop.match_source})`))),
               React.createElement("p", { className: "lm-terminal-attention-sub", style: { wordBreak: "break-all", overflowWrap: "anywhere" } },
                 React.createElement("b", null, "From: "), prop.source_path),
+              (isRescanning || isRefreshing) ? React.createElement("div", {
+                className: "lm-filing-rescan-indicator",
+                style: {
+                  margin: "8px 0",
+                  padding: "6px 10px",
+                  background: isRescanning ? "rgba(56, 189, 248, 0.12)" : "rgba(148, 163, 184, 0.12)",
+                  border: isRescanning ? "1px solid rgba(56, 189, 248, 0.3)" : "1px solid rgba(148, 163, 184, 0.3)",
+                  borderRadius: "4px",
+                  color: isRescanning ? "#38bdf8" : "#94a3b8",
+                  fontSize: "0.82rem",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px"
+                }
+              },
+                React.createElement("span", { className: "lm-filing-spinner" }, "⟳"),
+                isRescanning ? "Scanning physical storage disks for folder changes…" : "Fetching Stash metadata and recalculating choices…"
+              ) : null,
               destDisplay,
               prop.in_nested_folder ? React.createElement("div", {
                 className: "lm-filing-torrent-warning",
@@ -3380,7 +3409,7 @@
                   disabled: Boolean(busy) || isAnyTransferActive,
                   onClick: () => handleRefreshFilingProposal(prop.source_path, prop.id),
                   title: "Fetch current Stash metadata and recalculate choices using the cached folder list"
-                }, busy === `refresh_prop_${prop.source_path}` ? "⟳ REFRESHING…" : "⟳ REFRESH CHOICES"),
+                }, isRescanning ? "⟳ SCANNING DISKS…" : (isRefreshing ? "⟳ REFRESHING…" : "⟳ REFRESH CHOICES")),
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn dismiss",
@@ -4455,58 +4484,94 @@
               }, `${showCustomMappings ? "▾" : "▸"} Custom Folder Mappings (${folderMappingsList.length})`),
               React.createElement("small", { style: { display: "block", color: "var(--text-muted, #aab3c5)", marginBottom: "10px" } },
                 "Associate specific Stash performers, studios, or tags with custom folder locations. Mapped folders must exist and be inside configured destination roots."),
-              showCustomMappings && ((folderMappingsList.length > 0) ? React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginBottom: "14px" } },
-                folderMappingsList.map(m => React.createElement("div", {
-                  key: `mapping-${m.id}`,
-                  style: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", padding: "8px 12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.07)" }
-                },
-                  React.createElement("div", null,
-                    React.createElement("strong", null, m.entity_name),
-                    React.createElement("span", { style: { opacity: 0.6, fontSize: "0.8rem", marginLeft: "6px" } }, `(${m.entity_type} #${m.entity_id})`),
-                    React.createElement("div", { style: { fontSize: "0.85rem", color: "var(--text-muted, #aab3c5)", marginTop: "2px" } }, m.folder_path)
-                  ),
-                  React.createElement("button", {
-                    type: "button",
-                    className: "btn btn-outline-danger btn-sm",
-                    disabled: !!busy,
-                    onClick: () => handleDeleteMapping(m.id),
-                    title: "Delete custom mapping"
-                  }, "✕")
-                ))
-              ) : React.createElement("p", { style: { fontStyle: "italic", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } }, "No custom folder mappings configured.")),
-              showCustomMappings && React.createElement("div", { style: { background: "rgba(0,0,0,0.15)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.05)" } },
-                React.createElement("span", { style: { fontWeight: "bold", fontSize: "0.85rem", display: "block", marginBottom: "8px" } }, "+ Add Custom Folder Mapping"),
-                React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 2fr auto", gap: "8px", alignItems: "center" } },
-                  React.createElement("select", {
-                    className: "form-control form-control-sm",
-                    value: newMappingType,
-                    onChange: e => setNewMappingType(e.target.value)
-                  },
-                    React.createElement("option", { value: "performer" }, "Performer"),
-                    React.createElement("option", { value: "studio" }, "Studio"),
-                    React.createElement("option", { value: "tag" }, "Tag")
-                  ),
+              showCustomMappings && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { background: "rgba(0,0,0,0.15)", padding: "12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.05)", marginBottom: "12px" } },
+                  React.createElement("span", { style: { fontWeight: "bold", fontSize: "0.85rem", display: "block", marginBottom: "8px" } }, "+ Add Custom Folder Mapping"),
+                  React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 2fr auto", gap: "8px", alignItems: "center" } },
+                    React.createElement("select", {
+                      className: "form-control form-control-sm",
+                      value: newMappingType,
+                      onChange: e => setNewMappingType(e.target.value)
+                    },
+                      React.createElement("option", { value: "performer" }, "Performer"),
+                      React.createElement("option", { value: "studio" }, "Studio"),
+                      React.createElement("option", { value: "tag" }, "Tag")
+                    ),
+                    React.createElement("input", {
+                      type: "text",
+                      className: "form-control form-control-sm",
+                      placeholder: "Performer, studio, or tag name",
+                      value: newMappingName,
+                      onChange: e => setNewMappingName(e.target.value)
+                    }),
+                    React.createElement("input", {
+                      type: "text",
+                      className: "form-control form-control-sm",
+                      placeholder: "Existing destination folder",
+                      value: newMappingFolder,
+                      onChange: e => setNewMappingFolder(e.target.value)
+                    }),
+                    React.createElement("button", {
+                      type: "button",
+                      className: "btn btn-primary btn-sm",
+                      disabled: !!busy || !newMappingName.trim() || !newMappingFolder.trim(),
+                      onClick: handleSaveNewMapping
+                    }, "+ Save")
+                  )
+                ),
+                folderMappingsList.length > 0 && React.createElement("div", { className: "lm-custom-mappings-filter", style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" } },
                   React.createElement("input", {
                     type: "text",
                     className: "form-control form-control-sm",
-                    placeholder: "Performer, studio, or tag name",
-                    value: newMappingName,
-                    onChange: e => setNewMappingName(e.target.value)
+                    placeholder: "Search mappings by name, type, or folder…",
+                    value: customMappingFilter,
+                    onChange: e => setCustomMappingFilter(e.target.value),
+                    style: { maxWidth: "360px" }
                   }),
-                  React.createElement("input", {
-                    type: "text",
-                    className: "form-control form-control-sm",
-                    placeholder: "Existing destination folder",
-                    value: newMappingFolder,
-                    onChange: e => setNewMappingFolder(e.target.value)
-                  }),
-                  React.createElement("button", {
+                  customMappingFilter && React.createElement("button", {
                     type: "button",
-                    className: "btn btn-primary btn-sm",
-                    disabled: !!busy || !newMappingName.trim() || !newMappingFolder.trim(),
-                    onClick: handleSaveNewMapping
-                  }, "+ Save")
-                )
+                    className: "btn btn-outline-secondary btn-sm",
+                    onClick: () => setCustomMappingFilter(""),
+                    title: "Clear filter",
+                    style: { padding: "0.2rem 0.5rem", fontSize: "0.75rem" }
+                  }, "Clear")
+                ),
+                (() => {
+                  const query = (customMappingFilter || "").trim().toLowerCase();
+                  const displayed = query
+                    ? folderMappingsList.filter(m =>
+                        (m.entity_name || "").toLowerCase().includes(query) ||
+                        (m.entity_type || "").toLowerCase().includes(query) ||
+                        (m.folder_path || "").toLowerCase().includes(query)
+                      )
+                    : folderMappingsList;
+
+                  if (folderMappingsList.length === 0) {
+                    return React.createElement("p", { style: { fontStyle: "italic", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem" } }, "No custom folder mappings configured.");
+                  }
+                  if (displayed.length === 0) {
+                    return React.createElement("p", { style: { fontStyle: "italic", color: "var(--text-muted, #aab3c5)", fontSize: "0.85rem", marginTop: "8px" } }, `No mappings match “${customMappingFilter}”.`);
+                  }
+                  return React.createElement("div", { className: "lm-custom-mappings-list" },
+                    displayed.map(m => React.createElement("div", {
+                      key: `mapping-${m.id}`,
+                      style: { display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", padding: "8px 12px", borderRadius: "6px", border: "1px solid rgba(255,255,255,0.07)" }
+                    },
+                      React.createElement("div", null,
+                        React.createElement("strong", null, m.entity_name),
+                        React.createElement("span", { style: { opacity: 0.6, fontSize: "0.8rem", marginLeft: "6px" } }, `(${m.entity_type} #${m.entity_id})`),
+                        React.createElement("div", { style: { fontSize: "0.85rem", color: "var(--text-muted, #aab3c5)", marginTop: "2px" } }, m.folder_path)
+                      ),
+                      React.createElement("button", {
+                        type: "button",
+                        className: "btn btn-outline-danger btn-sm",
+                        disabled: !!busy,
+                        onClick: () => handleDeleteMapping(m.id),
+                        title: "Delete custom mapping"
+                      }, "✕")
+                    ))
+                  );
+                })()
               )
             ))))
     }

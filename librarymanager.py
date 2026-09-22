@@ -1929,10 +1929,11 @@ def main():
         path = args.get("path")
         allow_baseline = bool(args.get("allow_baseline", False))
         allow_refresh = bool(args.get("allow_refresh", False))
+        force_rescan = bool(args.get("force_rescan", False))
         proposal_id = args.get("proposal_id")
         stash = StashInterface(plugin_input["server_connection"])
         config = filing_config_with_library_roots(stash)
-        result = retry_filing_proposal(database_path, stash, path, config=config, allow_baseline=allow_baseline, allow_refresh=allow_refresh, proposal_id=proposal_id)
+        result = retry_filing_proposal(database_path, stash, path, config=config, allow_baseline=allow_baseline, allow_refresh=allow_refresh, proposal_id=proposal_id, force_rescan=force_rescan)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "get_backlog_items":
         args = plugin_input.get("args") or {}
