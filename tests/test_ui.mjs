@@ -915,6 +915,9 @@ test('Backlog Organise Existing Files reconciled stats, verified moved status pi
   assert.ok(javascript.includes('setSelectedBacklogPaths(new Set())'), 'Clears backlog selections on close/finish');
   assert.ok(javascript.includes('validSelectedCount === 0'), 'Disables evaluate button when zero selected');
 
+  // 4. Backlog modal configuration
+  assert.match(javascript, /enforceFocus:\s*false,[\s\S]*dialogClassName:\s*"lm-backlog-modal"/, "Backlog modal sets enforceFocus: false for external FastTag popups");
+
   // 4. CSS styling
   assert.ok(css.includes('.item-status-pill.moved'), 'CSS defines style for moved pill');
   assert.ok(css.includes('.lm-backlog-stat.pending'), 'CSS defines style for pending stat card');

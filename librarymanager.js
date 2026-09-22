@@ -5093,6 +5093,7 @@
           }
         },
         centered: true,
+        enforceFocus: false,
         dialogClassName: "lm-backlog-modal"
       },
         React.createElement(Modal.Header, { closeButton: !isBacklogEvaluating, style: { background: "#0b120c", borderBottom: "1px solid rgba(56, 189, 248, .2)" } },
