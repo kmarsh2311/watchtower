@@ -1239,6 +1239,51 @@
     })[outcome] || "Needs Review";
   }
 
+  function mergeBacklogEvaluationResult(previous, response) {
+    const refreshedResults = Array.isArray(response?.results) ? response.results : [];
+    if (!previous || refreshedResults.length === 0) {
+      return previous || {
+        total: refreshedResults.length,
+        processed: refreshedResults.length,
+        cancelled: false,
+        tally: response?.tally || {},
+        results: refreshedResults
+      };
+    }
+
+    const replacements = new Map(refreshedResults.map(result => [result.path, result]));
+    const previousResults = Array.isArray(previous.results) ? previous.results : [];
+    const mergedResults = previousResults.map(result => replacements.get(result.path) || result);
+    const existingPaths = new Set(previousResults.map(result => result.path));
+    refreshedResults.forEach(result => {
+      if (!existingPaths.has(result.path)) mergedResults.push(result);
+    });
+
+    const tally = {
+      proposal_ready: 0,
+      candidate_selection_required: 0,
+      no_identity_found: 0,
+      destination_not_found: 0,
+      ambiguous_match: 0,
+      already_filed: 0,
+      duplicate_review: 0,
+      ineligible: 0,
+      errors: 0
+    };
+    mergedResults.forEach(result => {
+      const outcome = result?.outcome;
+      if (Object.prototype.hasOwnProperty.call(tally, outcome)) tally[outcome] += 1;
+    });
+
+    return {
+      ...previous,
+      total: Math.max(Number(previous.total || 0), mergedResults.length),
+      processed: Math.max(Number(previous.processed || 0), mergedResults.length),
+      tally,
+      results: mergedResults
+    };
+  }
+
   function navigateToNeedsAttention(setTab, setTerminalFilter) {
     setTerminalFilter("attention");
     setTab("overview");
@@ -1453,13 +1498,7 @@
           refresh_metadata: true
         });
         const result = typeof raw === "string" ? JSON.parse(raw) : raw;
-        setBacklogCompletedSummary({
-          total: 1,
-          processed: 1,
-          cancelled: false,
-          tally: result?.tally || {},
-          results: result?.results || []
-        });
+        setBacklogCompletedSummary(previous => mergeBacklogEvaluationResult(previous, result));
         await loadBacklog();
       } catch (err) {
         setError(err?.message || "Backlog re-evaluation failed.");

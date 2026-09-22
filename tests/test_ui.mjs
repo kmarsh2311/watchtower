@@ -967,6 +967,13 @@ test("Filing Proposal hover preview and FastTag actions menu", () => {
   assert.match(css, /\.lm-filing-scene-link/);
 });
 
+test("Single backlog re-evaluation preserves the rest of the batch summary", () => {
+  assert.match(javascript, /function mergeBacklogEvaluationResult\(previous, response\)/);
+  assert.match(javascript, /previousResults\.map\(result => replacements\.get\(result\.path\) \|\| result\)/);
+  assert.match(javascript, /setBacklogCompletedSummary\(previous => mergeBacklogEvaluationResult\(previous, result\)\)/);
+  assert.doesNotMatch(javascript, /setBacklogCompletedSummary\(\{\s*total: 1,\s*processed: 1,/);
+});
+
 test("Backlog failures can open metadata editing and be re-evaluated", () => {
   assert.match(javascript, /function openBacklogMetadataEditor\(event, sceneId\)/);
   assert.match(javascript, /window\.open\(`\/scenes\/\$\{sceneId\}\/edit`/);
