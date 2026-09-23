@@ -1592,6 +1592,7 @@ def main():
             connection.commit()
         finally:
             connection.close()
+        invalidate_incoming_discovery_cache()
         audit(database_path, "incoming", "ignore item", "ignored", new_path=path, detail="User ignored incoming file from console")
         message = json.dumps({"status": "ignored", "path": path, "detail": "Item ignored by user"}, ensure_ascii=False)
     elif mode == "retry_all_incoming_files":

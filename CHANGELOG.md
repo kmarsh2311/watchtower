@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.17 — 2026-09-23
+
+- **Unresolved Filing Attention Actions**: Added **`✕ DISMISS ALERT`** to safely clear unresolved filing warnings from Needs Attention, plus direct **`⚡ EDIT WITH FASTTAG`** / **`🎬 OPEN SCENE`** buttons to assign missing metadata without leaving Watchtower.
+- **Interactive Scene Navigation**: Replaced static text with interactive `[Scene ID]` pills on unresolved filing cards for one-click Stash scene access and FastTag right-click triggers.
+- **Real-Time Backlog Tally**: Dismissed incoming videos now immediately increment the `📁 ORGANISE EXISTING FILES` header counter in real time, ensuring dismissed media remains trackable for later batch organization.
+- **Expanded In-App User Guide & Safety Guidance**: Added dedicated sections for Automatic Filing and external file moves in Finder/Explorer, explicitly reinforcing safety checks, testing on small sample folders, and backup practices.
+
 ## 1.0.16 — 2026-09-23
 
 - **Background Filing Queue**: Transformed proposal execution into non-blocking server-side background tasks via Stash's task system, allowing users to safely navigate away or queue multiple approvals without stalled or aborted transfers.

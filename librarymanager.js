@@ -2383,6 +2383,7 @@
       try {
         await operation("dismiss_incoming_file", { path });
         await refresh();
+        loadBacklog(true).catch(() => {});
       } catch (err) {
         setError(err.message || String(err));
       } finally {
@@ -2800,27 +2801,57 @@
                 onClick: () => { setSearch(basename(item.path)); setTab("activity"); }
               }, "👁 VIEW LOG ENTRY")))),
 
-          filingAttentionIncoming.map(item => React.createElement("div", {
-            className: "lm-terminal-attention-item warn",
-            key: `filing-attention-${item.path}`
-          },
-            React.createElement("div", { className: "lm-terminal-attention-title" },
-              React.createElement("strong", null, `! FILING NEEDS ATTENTION: ${basename(item.path)}`),
-              React.createElement("span", { className: "lm-terminal-badge warn" }, "FILING UNRESOLVED")),
-            React.createElement("p", { className: "lm-terminal-attention-detail" },
-              React.createElement("b", null, "Reason: "),
-              item.filing_diagnostic || "The video was added to Stash, but Watchtower could not create a filing proposal."),
-            React.createElement("p", { className: "lm-terminal-attention-sub" },
-              React.createElement("b", null, "Imported successfully: "), item.detail || item.path),
-            React.createElement("p", { className: "lm-terminal-attention-fix" },
-              "→ Fix: Correct the destination mapping or scene metadata if needed, then click RETRY FILING."),
-            React.createElement("div", { className: "lm-terminal-actions" },
-              React.createElement("button", {
-                type: "button",
-                className: "lm-terminal-btn retry",
-                disabled: !!busy,
-                onClick: () => handleRetryFiling(item.path)
-              }, busy === `retry_filing:${item.path}` ? "⟳ RETRYING…" : "⟳ RETRY FILING")))),
+          filingAttentionIncoming.map(item => {
+            const sceneIdMatch = String(item.detail || "").match(/scene\s+(\d+)/i);
+            const sceneId = item.scene_id || (sceneIdMatch ? sceneIdMatch[1] : null);
+            return React.createElement("div", {
+              className: "lm-terminal-attention-item warn",
+              key: `filing-attention-${item.path}`,
+              "data-scene-id": sceneId || undefined
+            },
+              React.createElement("div", { className: "lm-terminal-attention-title" },
+                React.createElement("strong", null, `! FILING NEEDS ATTENTION: ${basename(item.path)}`),
+                React.createElement("span", { className: "lm-terminal-badge warn" }, "FILING UNRESOLVED")),
+              React.createElement("p", { className: "lm-terminal-attention-detail" },
+                React.createElement("b", null, "Reason: "),
+                item.filing_diagnostic || "The video was added to Stash, but Watchtower could not create a filing proposal."),
+              React.createElement("p", { className: "lm-terminal-attention-sub" },
+                React.createElement("b", null, "Imported successfully: "),
+                sceneId ? React.createElement(React.Fragment, null,
+                  "Added as Stash ",
+                  React.createElement("span", { className: "scene-card lm-scene-pill-card", onClick: e => e.stopPropagation() },
+                    SceneLink(sceneId, `Scene ${sceneId}`, "lm-terminal-stream-pill")
+                  )
+                ) : (item.detail || item.path)),
+              React.createElement("p", { className: "lm-terminal-attention-fix" },
+                "→ Fix: Correct the destination mapping or scene metadata if needed, then click RETRY FILING. If you want to leave the file where it is, click DISMISS ALERT."),
+              React.createElement("div", { className: "lm-terminal-actions" },
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn retry",
+                  disabled: !!busy,
+                  onClick: () => handleRetryFiling(item.path)
+                }, busy === `retry_filing:${item.path}` ? "⟳ RETRYING…" : "⟳ RETRY FILING"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn dismiss",
+                  disabled: !!busy,
+                  onClick: () => handleDismissIncoming(item.path)
+                }, "✕ DISMISS ALERT"),
+                sceneId ? React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn details",
+                  title: window.FastTag ? "Open this scene in FastTag" : "Open Scene in Stash",
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    if (window.FastTag) {
+                      openBacklogFastTag(e, sceneId);
+                    } else {
+                      window.open(`/scenes/${sceneId}`, "_blank", "noopener");
+                    }
+                  }
+                }, window.FastTag ? "⚡ EDIT WITH FASTTAG" : "🎬 OPEN SCENE") : null));
+          }),
 
           unavailableRoots.map(path => React.createElement("div", { className: "lm-terminal-attention-item warn", key: path },
             React.createElement("div", { className: "lm-terminal-attention-title" },
@@ -5019,7 +5050,7 @@
           title: "4. Filesystem Monitor & Moves",
           content: [
             React.createElement("h2", { key: "h2" }, "👁️ 4. Filesystem Monitor & External Moves"),
-            React.createElement("p", { key: "p1" }, "The Filesystem Monitor runs a background daemon process (watchdog) that observes your configured Stash library roots for external file changes."),
+            React.createElement("p", { key: "p1" }, "The Filesystem Monitor runs a background daemon process (watchdog) observing your Stash library roots for external file changes made in macOS Finder, Windows File Explorer, command-line scripts, or downloaders."),
             React.createElement("h3", { key: "h3_1" }, "Controls & Status Cards"),
             React.createElement("ul", { key: "ul1" },
               React.createElement("li", null, React.createElement("strong", null, "Monitor State: "), "Displays whether the daemon is Running or Stopped, along with process PID and heartbeat timestamp."),
@@ -5029,13 +5060,17 @@
               React.createElement("li", null, React.createElement("strong", null, "Library Roots: "), "Displays all discovered Stash library roots and verifies whether each mount/drive is currently available or offline.")
             ),
             React.createElement("h3", { key: "h3_2" }, "Reconcile Verified External Moves (automaticMoveReconciliation)"),
-            React.createElement("p", { key: "p2" }, "When enabled, if you move or rename a video in Finder/Explorer outside of Stash:"),
-            React.createElement("ol", { key: "ol1" },
-              React.createElement("li", null, "Watchtower detects the file move on disk."),
-              React.createElement("li", null, "Verifies exact byte size and computes the cryptographic OpenSubtitles hash (oshash) to guarantee a 100% match."),
-              React.createElement("li", null, "Triggers a targeted Stash scan to update the scene's path, preserving all metadata, performers, and history."),
-              React.createElement("li", null, "Automatically moves companion artwork and subtitle sidecars alongside the video.")
-            )
+            React.createElement("p", { key: "p2" }, "When enabled, Watchtower protects your library against lost scenes when reorganizing files outside of Stash:"),
+            React.createElement("ul", { key: "ul2" },
+              React.createElement("li", null, React.createElement("strong", null, "Single-File Moves & Renames: "), "Unambiguous individual moves are detected, matched by byte size and cryptographic hash (oshash), and reconnected in Stash automatically—preserving all metadata, tags, performers, and history."),
+              React.createElement("li", null, React.createElement("strong", null, "Grouped Folder Moves & Renames: "), "Renaming a folder (e.g. a studio or performer folder) or moving a folder with many videos is coalesced into a single grouped review batch in Command Center. Watchtower pauses for your approval rather than blindly auto-moving dozens of scenes."),
+              React.createElement("li", null, React.createElement("strong", null, "Cross-Drive & Multi-Volume Moves: "), "Relocating files across separate physical disks or network mount points uses safe stream transfers, ensuring both media and companion artwork transfer cleanly without cross-device link errors."),
+              React.createElement("li", null, React.createElement("strong", null, "OS Metadata Filtering: "), "System-generated files (like macOS .DS_Store or Windows Thumbs.db) are ignored so clean folders register as properly emptied."),
+              React.createElement("li", null, React.createElement("strong", null, "Duplicate Copy Protection: "), "Copying a folder in Finder/Explorer is classified as duplicate content (folder_copy) rather than a move, ensuring your original scene records are never overwritten.")
+            ),
+            React.createElement("div", { key: "alert_warn", className: "lm-alert warn", style: { marginTop: "12px", padding: "10px 14px", borderLeft: "3px solid #ffb52e", background: "rgba(255,181,46,0.08)" } },
+              React.createElement("strong", null, "⚠️ Verification & Safety Recommendation: "),
+              "No software can foresee every power interruption, sleeping drive, or network share disconnect. Always maintain current backups of your Stash database and media. When setting up or testing external moves, start with a single test file or small test folder to verify that your operating system and drive setup behave as expected before moving large collections.")
           ]
         },
         {
@@ -5055,11 +5090,44 @@
           ]
         },
         {
+          id: "automatic-filing",
+          icon: "📁",
+          title: "6. Automatic Filing & Backlog Organiser",
+          content: [
+            React.createElement("h2", { key: "h2" }, "📁 6. Automatic Filing & Backlog Organiser (Beta)"),
+            React.createElement("p", { key: "p1" }, "Automatic Filing moves newly imported media from incoming staging folders into organized destination folders on your storage drives based on Stash metadata."),
+            React.createElement("h3", { key: "h3_1" }, "How Automatic Filing Works"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "Location vs Filename: "), "Filing changes a file's folder location, not its filename. Filename formatting is controlled independently under Automatic Renaming."),
+              React.createElement("li", null, React.createElement("strong", null, "Destination Discovery: "), "Watchtower scans your configured destination roots for matching performer, studio, or tag folders (plus custom folder mappings)."),
+              React.createElement("li", null, React.createElement("strong", null, "Candidate Selection: "), "If a scene matches exactly one destination folder, it proposes that folder. If multiple folders match (e.g., multiple performers), Watchtower prompts you to select your preferred destination before approving."),
+              React.createElement("li", null, React.createElement("strong", null, "Background Queue: "), "Approved transfers run as background tasks via Stash's task system, allowing you to queue multiple moves or navigate away safely while transfers complete."),
+              React.createElement("li", null, React.createElement("strong", null, "Crash & Interruption Recovery: "), "If a transfer is interrupted or Stash restarts mid-move, Watchtower automatically inspects disk positions and reconciles scene paths upon startup without data loss.")
+            ),
+            React.createElement("h3", { key: "h3_2" }, "Handling Unresolved Filing Alerts"),
+            React.createElement("p", { key: "p2" }, "If a new video has no matching folder or missing metadata, it appears under Needs Attention:"),
+            React.createElement("ul", { key: "ul2" },
+              React.createElement("li", null, React.createElement("strong", null, "🎬 OPEN SCENE / ⚡ FASTTAG: "), "Directly opens the scene in Stash or FastTag so you can assign the studio, performer, or tags."),
+              React.createElement("li", null, React.createElement("strong", null, "⟳ RETRY FILING: "), "Re-evaluates the file after you update metadata or folder rules."),
+              React.createElement("li", null, React.createElement("strong", null, "✕ DISMISS ALERT: "), "Clears the alert from Needs Attention and leaves the video file in Incoming. It does not delete the file or scene.")
+            ),
+            React.createElement("h3", { key: "h3_3" }, "The Backlog Organiser (📁 ORGANISE EXISTING FILES)"),
+            React.createElement("p", { key: "p3" }, "When Automatic Filing is enabled, pre-existing files in Incoming are protected by an initial baseline snapshot so they are not moved prematurely:"),
+            React.createElement("ul", { key: "ul3" },
+              React.createElement("li", null, React.createElement("strong", null, "Live Header Counter: "), "The button counter dynamically tracks all unorganized and dismissed videos waiting in your Incoming folders."),
+              React.createElement("li", null, React.createElement("strong", null, "Batch Evaluation: "), "Open the modal at any time to evaluate files in batches, inspect proposed moves, and approve filing when ready.")
+            ),
+            React.createElement("div", { key: "alert_filing", className: "lm-alert warn", style: { marginTop: "12px", padding: "10px 14px", borderLeft: "3px solid #ffb52e", background: "rgba(255,181,46,0.08)" } },
+              React.createElement("strong", null, "⚠️ Verification & Safety Recommendation: "),
+              "Because filing moves files on disk, always inspect proposed destinations before confirming. Verify your first few filing proposals carefully to ensure folder mappings match your expectations before enabling automated workflows.")
+          ]
+        },
+        {
           id: "contact-sheets-csm",
           icon: "🖼️",
-          title: "6. Contact Sheets (CSM)",
+          title: "7. Contact Sheets (CSM)",
           content: [
-            React.createElement("h2", { key: "h2" }, "🖼️ 6. Contact Sheets (CSM)"),
+            React.createElement("h2", { key: "h2" }, "🖼️ 7. Contact Sheets (CSM)"),
             React.createElement("p", { key: "p1" }, "Generates multi-frame visual contact sheet index companion images (.mp4.jpg) alongside video files using ffmpeg."),
             React.createElement("h3", { key: "h3_1" }, "Settings & Layouts"),
             React.createElement("ul", { key: "ul1" },
@@ -5078,9 +5146,9 @@
         {
           id: "activity-history",
           icon: "📜",
-          title: "7. Activity History & Audit",
+          title: "8. Activity History & Audit",
           content: [
-            React.createElement("h2", { key: "h2" }, "📜 7. Activity History & Audit Exports"),
+            React.createElement("h2", { key: "h2" }, "📜 8. Activity History & Audit Exports"),
             React.createElement("p", { key: "p1" }, "The Activity tab provides a searchable audit history of all filesystem events, renames, contact sheet creations, warnings, and background actions."),
             React.createElement("h3", { key: "h3_1" }, "Features & Tools"),
             React.createElement("ul", { key: "ul1" },
@@ -5102,9 +5170,9 @@
         {
           id: "diagnostic-tools",
           icon: "🛠️",
-          title: "8. Advanced Diagnostic Tools",
+          title: "9. Advanced Diagnostic Tools",
           content: [
-            React.createElement("h2", { key: "h2" }, "🛠️ 8. Advanced Diagnostic Tools & Buttons"),
+            React.createElement("h2", { key: "h2" }, "🛠️ 9. Advanced Diagnostic Tools & Buttons"),
             React.createElement("p", { key: "p1" }, "Located under Advanced Diagnostics. All preview tools are 100% read-only and never modify files on disk."),
             React.createElement("h3", { key: "h3_1" }, "Single Scene Testing Controls"),
             React.createElement("ul", { key: "ul1" },
@@ -5133,9 +5201,9 @@
         {
           id: "auto-resolve-guide",
           icon: "🧹",
-          title: "9. Safe Auto-Resolve & Maintenance",
+          title: "10. Safe Auto-Resolve & Maintenance",
           content: [
-            React.createElement("h2", { key: "h2" }, "🧹 9. Safe Auto-Resolve & Maintenance"),
+            React.createElement("h2", { key: "h2" }, "🧹 10. Safe Auto-Resolve & Maintenance"),
             React.createElement("p", { key: "p1" }, "Explains how to resolve discrepancies, missing files, and duplicate conflicts in Diagnostic Results."),
             React.createElement("h3", { key: "h3_1" }, "The 1-Click Safe Auto-Resolve Sequence"),
             React.createElement("p", { key: "p2" }, "Clicking ", React.createElement("strong", null, "⚡ Safe Auto-Resolve (Reconcile & Clean)"), " executes an automated, metadata-safe multi-step pipeline:"),

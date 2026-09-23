@@ -999,14 +999,16 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
         ).fetchone()
         baseline_established = bool(baseline_state and baseline_state["status"] == "complete")
         backlog_eligible_count = 0
+        b_paths_set = set()
+        active_props = {
+            p["source_path"]: p["status"]
+            for p in connection.execute("SELECT source_path, status FROM filing_proposals").fetchall()
+        }
         if baseline_count > 0:
             b_rows = connection.execute("SELECT path FROM filing_incoming_baseline").fetchall()
-            active_props = {
-                p["source_path"]: p["status"]
-                for p in connection.execute("SELECT source_path, status FROM filing_proposals").fetchall()
-            }
             for b_row in b_rows:
                 b_path_str = b_row["path"]
+                b_paths_set.add(b_path_str)
                 b_p = Path(b_path_str)
                 if b_p.suffix.lower() in VIDEO_EXTENSIONS:
                     p_st = active_props.get(b_path_str)
@@ -1014,6 +1016,16 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
                         continue
                     if b_p.is_file():
                         backlog_eligible_count += 1
+
+        for ign_row in connection.execute("SELECT path FROM incoming_files WHERE status='ignored'").fetchall():
+            ign_p_str = ign_row["path"]
+            if ign_p_str and ign_p_str not in b_paths_set:
+                p_st = active_props.get(ign_p_str)
+                if p_st in ("completed", "pending", "needs_recovery"):
+                    continue
+                ign_p = Path(ign_p_str)
+                if ign_p.suffix.lower() in VIDEO_EXTENSIONS and ign_p.is_file():
+                    backlog_eligible_count += 1
         incoming_folders = get_configured_incoming_folders(config)
 
         for row in connection.execute(
@@ -1050,6 +1062,11 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
                 (item["path"], p_obj.name)
             ).fetchone()
             item_scene_id = str(f_row["scene_id"]) if f_row and f_row["scene_id"] else None
+            if not item_scene_id and item.get("detail"):
+                m_sc = re.search(r"scene\s+(\d+)", str(item["detail"]), re.I)
+                if m_sc:
+                    item_scene_id = m_sc.group(1)
+            item["scene_id"] = item_scene_id
 
             prop_row = connection.execute(
                 """SELECT status, proposed_path, destination_folder FROM filing_proposals

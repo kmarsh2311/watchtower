@@ -5,7 +5,7 @@
 # 🗼 Watchtower for Stash
 ### Filesystem monitoring, media ingest and library management for Stash
 
-[![Version](https://img.shields.io/badge/version-1.0.16-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases/tag/v1.0.16)
+[![Version](https://img.shields.io/badge/version-1.0.17-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases/tag/v1.0.17)
 [![Stash](https://img.shields.io/badge/Stash-v0.26+-ff0055?style=for-the-badge)](https://github.com/stashapp/stash)
 [![Python](https://img.shields.io/badge/Python-3.10+-39ff64?style=for-the-badge)](https://python.org)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
@@ -69,9 +69,15 @@ The grouped workflows have automated coverage using synthetic filesystem trees a
 
 ### 4. Automatic Filing and Backlog Organiser <small>— Beta feature</small>
 
-Automatic Filing uses Stash metadata to propose destinations for incoming media. Review the proposed operations before approving moves. **Filing changes a file's location, not its filename.** Automatic Renaming is a separate option and follows its own settings.
+Automatic Filing inspects newly imported media in your watched incoming folders and proposes destination paths inside your library based on matched performers, studios, tags, or custom folder mappings.
 
-The Backlog Organiser tracks the current working set, retires resolved entries, avoids treating temporary downloads as ready files, and shows unavailable incoming roots separately from genuinely missing files. Reconnect an unavailable disk and use **Recheck Files** to refresh its state.
+- **Location vs Filename:** **Filing changes a file's folder location, not its filename.** Automatic Renaming is an independent feature that follows its own settings.
+- **Candidate Selection:** When a scene matches exactly one destination folder, it proposes that destination. When multiple destinations are plausible (e.g. multiple performers with dedicated folders), Watchtower prompts you to pick your preferred destination before confirming.
+- **Background Task Execution:** Approved transfers run as serialized background jobs in Stash's task runner, allowing you to queue moves and navigate away safely while transfers complete. Interrupted transfers or unexpected restarts automatically trigger recovery upon startup.
+- **Handling Unresolved Filing Alerts:** If a file lacks matching metadata or folders, it appears in Command Center under **Needs Attention**. Use **`🎬 OPEN SCENE`** (or **`⚡ EDIT WITH FASTTAG`**) to assign metadata and click **`⟳ RETRY FILING`**, or click **`✕ DISMISS ALERT`** to safely clear the alert and keep the file in Incoming without deleting media.
+- **Backlog Organiser (`📁 ORGANISE EXISTING FILES`):** Pre-existing files in Incoming are protected by an initial baseline snapshot so they are never moved unexpectedly. The header counter dynamically tracks all unorganized and dismissed incoming files, allowing you to batch-evaluate and file backlog media whenever you are ready.
+
+> **⚠️ Prudence and Verification:** Because filing physically moves files on disk, always inspect proposed destinations carefully before approving. Never assume everything will work without checking: test your first few filing proposals on small sample files, verify the resulting paths in Stash and Finder/Explorer, and ensure your Stash database and media backups are up to date before relying on automated workflows.
 
 ### 5. Filename formatting and sidecars
 
@@ -108,7 +114,7 @@ Watchtower also checks filename-length and collision conditions and handles supp
 
 ### Option 2: Manual installation
 
-1. Download [`librarymanager.zip` from the v1.0.16 release](https://github.com/kmarsh2311/watchtower/releases/download/v1.0.16/librarymanager.zip).
+1. Download [`librarymanager.zip` from the v1.0.17 release](https://github.com/kmarsh2311/watchtower/releases/download/v1.0.17/librarymanager.zip).
 2. Extract it into the Watchtower plugin directory, for example `~/.stash/plugins/librarymanager/` on macOS/Linux or `C:\Users\<Username>\.stash\plugins\librarymanager\` on Windows.
 3. Reload plugins in Stash.
 

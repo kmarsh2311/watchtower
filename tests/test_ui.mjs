@@ -522,12 +522,17 @@ test("Automatic Filing unresolved imports and Retry Filing appear in Command Cen
   assert.match(javascript, /FILING NEEDS ATTENTION:/);
   assert.match(javascript, /item\.filing_diagnostic/);
 
-  // 2. Retry Filing is enabled while idle and invokes the existing focused handler.
+  // 2. Retry Filing, Dismiss Alert, and interactive scene/FastTag actions on attention card.
   assert.match(javascript, /handleRetryFiling/);
   assert.match(javascript, /onClick: \(\) => handleRetryFiling\(item\.path\)/);
   assert.match(javascript, /disabled: !!busy/);
   assert.match(javascript, /"⟳ RETRYING…" : "⟳ RETRY FILING"/);
   assert.match(javascript, /operation\("retry_filing_proposal", \{ path \}\)/);
+  assert.match(javascript, /onClick: \(\) => handleDismissIncoming\(item\.path\)/);
+  assert.match(javascript, /"✕ DISMISS ALERT"/);
+  assert.match(javascript, /"data-scene-id": sceneId/);
+  assert.match(javascript, /openBacklogFastTag\(e, sceneId\)/);
+  assert.match(javascript, /window\.FastTag \? "⚡ EDIT WITH FASTTAG" : "🎬 OPEN SCENE"/);
   assert.doesNotMatch(javascript, /Incoming File Status & Diagnostics/);
 
   // 3. Organise Existing Files backlog entry point and informational modal
