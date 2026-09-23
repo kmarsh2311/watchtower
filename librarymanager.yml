@@ -1,6 +1,6 @@
 name: Watchtower
 description: Safely inventories Stash scene files and reports filesystem differences.
-version: 1.0.15
+version: 1.0.16
 ui:
   javascript:
     - librarymanager.js
@@ -226,6 +226,10 @@ tasks:
     description: Rename only the configured Test Scene ID after confirmation. Uses Stash's native file operation.
     defaultArgs:
       mode: apply_test_rename
+  - name: Process Filing Queue
+    description: Internal serialized worker that executes approved filing transfers in the background.
+    defaultArgs:
+      mode: process_filing_queue
   - name: Process Rename Queue
     description: Internal serialized worker for queued automatic renames.
     defaultArgs:

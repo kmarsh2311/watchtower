@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.16 — 2026-09-23
+
+- **Background Filing Queue**: Transformed proposal execution into non-blocking server-side background tasks via Stash's task system, allowing users to safely navigate away or queue multiple approvals without stalled or aborted transfers.
+- **Interrupted Transfer Recovery**: Added automatic startup and periodic recovery to verify file positions on disk, reconcile Stash scene associations, and restore abandoned or stalled transfers without data loss.
+- **Cross-Drive Companion Moves**: Fixed companion relocation across separate filesystem volumes and physical mount points (`shutil.move` cross-device stream fallback), preventing `[Errno 18] Cross-device link` errors.
+- **OS Junk-File Filtering**: Excluded system metadata files (`.DS_Store`, `Thumbs.db`, `desktop.ini`) from incoming baseline scans and companion tracking so clean folders show zero remaining files.
+- **Filing Approval & Navigation UX**: Enforced single-candidate destination selection, added in-place button confirmation with zero layout shift, auto-scrolled to progress and review proposals, and aligned search controls.
+
 ## 1.0.15 — 2026-09-22
 
 - **On-Demand Disk Rescan**: Added **`⟳ Rescan Folders & Recalculate`** to the filing proposal actions menu (`⋮ ACTIONS`), immediately invalidating the 1-hour directory cache to discover newly created, deleted, or renamed folders on physical storage drives without waiting or restarting Stash.

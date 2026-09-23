@@ -29,7 +29,7 @@ from librarymanager_core import (
                                  find_duplicate_scene_file, inspect_backlog_duplicate,
                                  get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
                                  cancel_expected_filesystem_delete, _is_pid_alive)
-from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing, prune_resolved_filing_baseline, invalidate_incoming_discovery_cache
+from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing, prune_resolved_filing_baseline, invalidate_incoming_discovery_cache, enqueue_filing_transfer, claim_next_filing_transfer, finish_filing_transfer, fail_filing_transfer, set_filing_transfer_job_id, recover_abandoned_processing_queue, recover_stale_active_transfers, get_active_filing_transfers
 
 
 from librarymanager_reconciliation import (dismiss_review_batch, execute_grouped_move_reconciliation,
@@ -1526,6 +1526,7 @@ def main():
             "grouped_reconciliation": list_review_batches(database_path),
             "transcoder_candidates": pending_transcoder_candidates(database_path),
             "filing_proposals": filing_proposals,
+            "active_filing_transfers": get_active_filing_transfers(database_path),
             "server_time": time.time(),
             "current_scene_count": current_scene_count(stash),
         }
@@ -1861,6 +1862,99 @@ def main():
         stash = StashInterface(plugin_input["server_connection"])
         result = {"proposals": get_pending_filing_proposals(database_path, stash=stash)}
         message = json.dumps(result, ensure_ascii=False)
+    elif mode == "queue_filing_proposal":
+        args = plugin_input.get("args") or {}
+        proposal_id = int(args.get("proposal_id"))
+        target_destination_folder = args.get("target_destination_folder") or ""
+        target_entity_type = args.get("target_entity_type")
+        target_entity_id = args.get("target_entity_id")
+        update_metadata = bool(args.get("update_metadata", False))
+        if not target_destination_folder:
+            conn = connect(database_path)
+            try:
+                p_row = conn.execute(
+                    "SELECT destination_folder, candidate_destinations_json, organize_by, matched_entity_id FROM filing_proposals WHERE id=?",
+                    (proposal_id,)
+                ).fetchone()
+                if p_row:
+                    target_destination_folder = p_row["destination_folder"] or ""
+                    if not target_destination_folder and p_row["candidate_destinations_json"]:
+                        try:
+                            cands = json.loads(p_row["candidate_destinations_json"])
+                            if len(cands) == 1:
+                                target_destination_folder = cands[0].get("destination_folder") if isinstance(cands[0], dict) else str(cands[0])
+                        except Exception:
+                            pass
+                    if not target_entity_type:
+                        target_entity_type = p_row["organize_by"]
+                    if not target_entity_id:
+                        target_entity_id = p_row["matched_entity_id"]
+            finally:
+                conn.close()
+        if not target_destination_folder:
+            message = json.dumps({"queued": False, "error": "target_destination_folder is required"})
+        else:
+            queued = enqueue_filing_transfer(
+                database_path, proposal_id, target_destination_folder,
+                target_entity_type=target_entity_type,
+                target_entity_id=target_entity_id,
+                update_metadata=update_metadata,
+            )
+            if queued:
+                stash = StashInterface(plugin_input["server_connection"])
+                try:
+                    _ftq_job_id = stash.run_plugin_task("librarymanager", "Process Filing Queue")
+                    if _ftq_job_id:
+                        set_filing_transfer_job_id(database_path, proposal_id, str(_ftq_job_id))
+                except Exception as task_err:
+                    logging.getLogger("librarymanager").warning("queue_filing_proposal: failed to trigger task: %s", task_err)
+                message = json.dumps({"queued": True, "proposal_id": proposal_id})
+            else:
+                message = json.dumps({"queued": False, "error": "Proposal not eligible for queuing (wrong status or not found)"})
+    elif mode == "process_filing_queue":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = filing_config_with_library_roots(stash)
+        processed = 0
+        errors_list = []
+        while True:
+            # First, recover any stale active_filing_transfers from previous crashes
+            recover_stale_active_transfers(database_path, stash=stash)
+            queue_row = claim_next_filing_transfer(database_path)
+            if not queue_row:
+                break
+            queue_id = queue_row["id"]
+            proposal_id = queue_row["proposal_id"]
+            target_dest = queue_row["target_destination_folder"]
+            update_meta = bool(queue_row.get("update_metadata"))
+            target_etype = queue_row.get("target_entity_type")
+            target_eid = queue_row.get("target_entity_id")
+            try:
+                result = apply_filing_proposal(
+                    database_path, stash, int(proposal_id),
+                    config=config,
+                    update_metadata=update_meta,
+                    target_destination_folder=target_dest,
+                    target_entity_type=target_etype,
+                    target_entity_id=target_eid,
+                )
+                status = result.get("status", "")
+                if status == "completed":
+                    finish_filing_transfer(database_path, queue_id)
+                    processed += 1
+                elif status in ("blocked", "failed"):
+                    fail_filing_transfer(database_path, queue_id, result.get("reason", status))
+                    errors_list.append(f"proposal {proposal_id}: {result.get('reason', status)}")
+                else:
+                    # needs_recovery or unexpected — do not reset to pending
+                    fail_filing_transfer(database_path, queue_id, result.get("reason", "transfer error"))
+                    errors_list.append(f"proposal {proposal_id}: {result.get('reason', status)}")
+            except Exception as exc:
+                fail_filing_transfer(database_path, queue_id, str(exc))
+                errors_list.append(f"proposal {proposal_id}: {exc}")
+        msg_parts = [f"{processed} transfer(s) completed"]
+        if errors_list:
+            msg_parts.append(f"{len(errors_list)} error(s): {'; '.join(errors_list[:3])}")
+        message = "; ".join(msg_parts)
     elif mode == "approve_filing_proposal":
         args = plugin_input.get("args") or {}
         proposal_id = args.get("proposal_id")

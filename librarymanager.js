@@ -148,7 +148,7 @@
     const allowed = new Set([
       ...Object.values(readOnlyTasks), "Preview Configured Test Rename", "Apply Configured Test Rename",
       "Start Read-Only Filesystem Monitor", "Stop Filesystem Monitor", "Filesystem Monitor Status",
-      "Generate Missing Contact Sheets for Incoming Folder"
+      "Generate Missing Contact Sheets for Incoming Folder", "Process Filing Queue"
     ]);
     if (!allowed.has(name)) throw new Error("Unknown Library Manager task");
     const data = await gql(`mutation { runPluginTask(plugin_id: "${PLUGIN_ID}", task_name: ${JSON.stringify(name)}) }`);
@@ -1319,6 +1319,7 @@
     const [helpSectionId, setHelpSectionId] = React.useState("getting-started");
     const [helpSearch, setHelpSearch] = React.useState("");
     const [filingOptions, setFilingOptions] = React.useState({});
+    const [approvedFiling, setApprovedFiling] = React.useState({});
     const [activeFilingMenuId, setActiveFilingMenuId] = React.useState(null);
 
     React.useEffect(() => {
@@ -1606,6 +1607,14 @@
       backlogCancelRequested.current = false;
       setBacklogCompletedSummary(null);
 
+      // Automatically scroll the modal back to top so evaluation progress is immediately in view
+      window.setTimeout(() => {
+        const modalBody = document.querySelector(".lm-backlog-modal .modal-body");
+        if (modalBody && typeof modalBody.scrollTo === "function") {
+          modalBody.scrollTo({ top: 0, behavior: "smooth" });
+        }
+      }, 0);
+
       const total = eligibleList.length;
       let evaluated = 0;
       const runningTally = {
@@ -1694,6 +1703,21 @@
         setBacklogCompletedSummary(null);
       }
     }, [showBacklogModal, loadBacklog]);
+
+    React.useEffect(() => {
+      if (isBacklogEvaluating || backlogCompletedSummary) {
+        window.setTimeout(() => {
+          const progressCard = document.querySelector(".lm-backlog-eval-progress-card, .lm-backlog-summary-card");
+          if (progressCard && typeof progressCard.scrollIntoView === "function") {
+            progressCard.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+          const modalBody = document.querySelector(".lm-backlog-modal .modal-body");
+          if (modalBody && typeof modalBody.scrollTo === "function") {
+            modalBody.scrollTo({ top: 0, behavior: "smooth" });
+          }
+        }, 30);
+      }
+    }, [isBacklogEvaluating, backlogCompletedSummary]);
     React.useEffect(() => {
       if (!["overview", "manage"].includes(tab)) return undefined;
       let stopped = false;
@@ -2444,11 +2468,35 @@
       setBusy(`filing_${proposalId}`); setError("");
       try {
         const opts = filingOptions[proposalId] || {};
+        const prop = (data?.filing_proposals || []).find(p => p.id === proposalId);
         const shouldUpdateMetadata = updateMetadata || Boolean(opts.updateMetadata);
-        const selectedDestination = targetDest || opts.targetDest || undefined;
-        const selectedEntityType = targetEntityType || opts.targetEntityType || undefined;
-        const selectedEntityId = targetEntityId || opts.targetEntityId || undefined;
-        const raw = await operation("approve_filing_proposal", {
+
+        let selectedDestination = targetDest || opts.targetDest;
+        if (!selectedDestination && prop) {
+          const rawCandidates = prop.candidate_destinations || [];
+          if (rawCandidates.length === 1) {
+            selectedDestination = typeof rawCandidates[0] === "string" ? rawCandidates[0] : rawCandidates[0]?.destination_folder;
+          } else if (rawCandidates.length === 0 && prop.destination_folder) {
+            selectedDestination = prop.destination_folder;
+          }
+        }
+
+        let selectedEntityType = targetEntityType || opts.targetEntityType;
+        if (!selectedEntityType && prop) {
+          selectedEntityType = prop.organize_by;
+        }
+
+        let selectedEntityId = targetEntityId || opts.targetEntityId;
+        if (!selectedEntityId && prop) {
+          selectedEntityId = prop.matched_entity_id;
+        }
+
+        if (!selectedDestination) {
+          setError("Filing failed: no destination folder selected.");
+          return;
+        }
+
+        const raw = await operation("queue_filing_proposal", {
           proposal_id: proposalId,
           update_metadata: shouldUpdateMetadata,
           target_destination_folder: selectedDestination,
@@ -2456,20 +2504,40 @@
           target_entity_id: selectedEntityId
         });
         const res = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (res && res.status === "completed") {
+        if (res && res.queued === true) {
+          // Show 1.2s in-card confirmation before transitioning to the next proposal
+          setApprovedFiling(prev => ({
+            ...prev,
+            [proposalId]: {
+              destination: selectedDestination,
+              prop: prop ? { ...prop } : null
+            }
+          }));
+          setNotice("⏳ Transfer queued — running in background…");
+          window.setTimeout(async () => {
+            try {
+              await refresh(true);
+            } finally {
+              setApprovedFiling(prev => {
+                const next = { ...prev };
+                delete next[proposalId];
+                return next;
+              });
+            }
+          }, 1200);
+        } else if (res && res.status === "completed") {
           let msg = `✓ Video successfully moved to ${res.destination_folder || (res.proposed_path ? res.proposed_path.split("/").slice(-2).join("/") : "destination")}`;
           if (res.companions_moved > 0) msg += ` (${res.companions_moved} companion file${res.companions_moved === 1 ? "" : "s"} moved)`;
           if (res.metadata_updated) msg += " — metadata updated in Stash";
           else if (res.metadata_error) msg += ` (metadata note: ${res.metadata_error})`;
           setNotice(msg);
+          await refresh(true);
         } else if (res && res.status === "needs_recovery") {
           setError(`CRITICAL: Move incomplete / uncertain. Recovery required: ${res.reason || "Transaction halted safely"}`);
-        } else if (res && (res.status === "blocked" || res.status === "failed" || res.reason)) {
-          setError(`Filing failed: ${res.reason || "The operation was rejected by safety verification"}`);
+          await refresh(true);
         } else {
-          setError("Filing approval returned an unexpected result.");
+          setError(`Filing failed: ${(res && (res.error || res.reason)) || "The operation was rejected by safety verification"}`);
         }
-        await refresh(true);
       } catch (err) {
         setError(err.message || String(err));
       } finally {
@@ -2586,6 +2654,13 @@
       const isAnyTransferActive = activeFilingTransfers.length > 0 || String(busy || "").startsWith("filing_");
       const pendingFilingProposals = filingProposals.filter(p => p.status !== "needs_recovery");
       const filingRecoveryProposals = filingProposals.filter(p => p.status === "needs_recovery");
+      const displayPendingProposals = [...pendingFilingProposals];
+      Object.entries(approvedFiling).forEach(([id, item]) => {
+        const numId = Number(id);
+        if (item?.prop && !displayPendingProposals.some(p => p.id === numId)) {
+          displayPendingProposals.unshift(item.prop);
+        }
+      });
       const filingRecoveryCount = filingRecoveryProposals.length;
 
       const inFlightCount = reconnectingMoves.length + waitingMoves.length + deferredMoves.length;
@@ -3083,8 +3158,8 @@
             React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: ".65rem" } },
               React.createElement("span", { className: "lm-terminal-filing-tag" }, "📁 FILING PROPOSALS"),
               React.createElement("span", { className: "lm-terminal-filing-count" },
-                `${pendingFilingProposals.length} proposal${pendingFilingProposals.length === 1 ? "" : "s"} ready for review`))),
-          pendingFilingProposals.map(prop => {
+                `${displayPendingProposals.length} proposal${displayPendingProposals.length === 1 ? "" : "s"} ready for review`))),
+          displayPendingProposals.map(prop => {
             const opts = filingOptions[prop.id] || {};
             const rawCandidates = prop.candidate_destinations || [];
             const candidates = rawCandidates.map(c => {
@@ -3189,8 +3264,22 @@
                       border: "1px solid rgba(56, 189, 248, 0.35)",
                       borderRadius: "5px",
                       fontSize: "0.83rem",
+                      cursor: singleDestPath ? "pointer" : "default",
                       wordBreak: "break-all",
                       overflowWrap: "anywhere"
+                    },
+                    onClick: () => {
+                      if (singleDestPath) {
+                        setFilingOptions(prev => ({
+                          ...prev,
+                          [prop.id]: {
+                            ...(prev[prop.id] || {}),
+                            targetDest: singleDestPath,
+                            targetEntityType: candidates[0]?.entity_type || prop.organize_by,
+                            targetEntityId: candidates[0]?.entity_id || prop.matched_entity_id
+                          }
+                        }));
+                      }
                     }
                   },
                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
@@ -3211,12 +3300,15 @@
                 );
 
             const activeTransfer = activeTransferMap[prop.id];
-            const isCurrentTransferring = Boolean(activeTransfer) || busy === `filing_${prop.id}`;
-            const isAnotherTransferActive = isAnyTransferActive && !isCurrentTransferring;
-            const isApproveDisabled = Boolean(busy) || isAnyTransferActive || (hasMultiple && !selectedTarget);
+            const isApproved = Boolean(approvedFiling[prop.id]);
+            const isCurrentTransferring = Boolean(activeTransfer) || (prop.status === "queued" && Boolean(activeTransfer));
+            const isAnotherTransferActive = isAnyTransferActive && !isCurrentTransferring && !isApproved;
+            const isApproveDisabled = isApproved || Boolean(busy) || isAnyTransferActive || (hasMultiple && !selectedTarget);
 
             let approveButtonLabel = "✓ APPROVE & MOVE";
-            if (isCurrentTransferring) {
+            if (isApproved) {
+              approveButtonLabel = "✓ APPROVED & QUEUED";
+            } else if (isCurrentTransferring) {
               approveButtonLabel = "⟳ IN PROGRESS…";
             } else if (isAnotherTransferActive) {
               approveButtonLabel = "⚠️ TRANSFER IN PROGRESS";
@@ -3250,13 +3342,17 @@
             const isRefreshing = busy === `refresh_prop_${prop.source_path}`;
 
             return React.createElement("div", {
-              className: "lm-terminal-attention-item filing",
+              className: "lm-terminal-attention-item filing" + (isApproved ? " lm-filing-approved" : ""),
+              style: isApproved ? {
+                borderColor: "rgba(34, 197, 94, 0.45)",
+                boxShadow: "0 0 12px rgba(34, 197, 94, 0.12)",
+                transition: "border-color 0.3s ease, box-shadow 0.3s ease"
+              } : { transition: "border-color 0.3s ease, box-shadow 0.3s ease" },
               key: `filing-${prop.id}`
             },
               React.createElement("div", {
-                className: "lm-terminal-attention-title scene-card",
-                "data-scene-id": prop.scene_id || "",
-                style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }
+                className: "lm-filing-card-header lm-terminal-attention-title scene-card",
+                "data-scene-id": prop.scene_id || ""
               },
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
                   React.createElement("strong", null,
@@ -3277,7 +3373,7 @@
                   React.createElement("button", {
                     type: "button",
                     className: "lm-terminal-btn details lm-filing-menu-trigger",
-                    style: { padding: "2px 8px", fontSize: "0.78rem", lineHeight: "1.2", height: "auto", minWidth: "26px" },
+                    style: { padding: "3px 10px", fontSize: "0.78rem", lineHeight: "1.2", height: "auto", minWidth: "26px" },
                     title: "Scene actions (Open in Stash, FastTag, Refresh)",
                     onClick: (e) => {
                       e.stopPropagation();
@@ -3332,88 +3428,102 @@
                       title: "Rescan physical storage disks for created, renamed, or deleted destination folders"
                     }, "⟳ Rescan Folders & Recalculate")
                   )
-                )),
-              React.createElement("p", { className: "lm-terminal-attention-detail" },
-                React.createElement(React.Fragment, null,
-                  React.createElement("b", null, "Matched: "),
-                  `${currentEntityName}${prop.matched_alias ? ` (via alias "${prop.matched_alias}")` : ""}`,
-                  React.createElement("span", { style: { marginLeft: "8px", opacity: 0.8 } }, `(${selectedCandidate?.match_source || prop.match_source})`))),
-              React.createElement("p", { className: "lm-terminal-attention-sub", style: { wordBreak: "break-all", overflowWrap: "anywhere" } },
-                React.createElement("b", null, "From: "), prop.source_path),
-              (isRescanning || isRefreshing) ? React.createElement("div", {
-                className: "lm-filing-rescan-indicator",
-                style: {
-                  margin: "8px 0",
-                  padding: "6px 10px",
-                  background: isRescanning ? "rgba(56, 189, 248, 0.12)" : "rgba(148, 163, 184, 0.12)",
-                  border: isRescanning ? "1px solid rgba(56, 189, 248, 0.3)" : "1px solid rgba(148, 163, 184, 0.3)",
-                  borderRadius: "4px",
-                  color: isRescanning ? "#38bdf8" : "#94a3b8",
-                  fontSize: "0.82rem",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "6px"
-                }
-              },
-                React.createElement("span", { className: "lm-filing-spinner" }, "⟳"),
-                isRescanning ? "Scanning physical storage disks for folder changes…" : "Fetching Stash metadata and recalculating choices…"
-              ) : null,
-              destDisplay,
-              prop.in_nested_folder ? React.createElement("div", {
-                className: "lm-filing-torrent-warning",
-                style: { marginTop: "6px", fontSize: "0.8rem", color: "#f59e0b", background: "rgba(245, 158, 11, 0.1)", padding: "4px 8px", borderRadius: "4px" }
-              }, "⚠️ Nested download folder: moving this file may interrupt torrent seeding.") : null,
-              progressPanel,
-              React.createElement("div", { style: { marginTop: "8px" } },
-                React.createElement("label", {
-                  style: { fontSize: "0.85rem", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "6px" }
+                )
+              ),
+              React.createElement("div", { className: "lm-filing-card-body" },
+                React.createElement("p", { className: "lm-terminal-attention-detail", style: { margin: "0 0 4px" } },
+                  React.createElement(React.Fragment, null,
+                    React.createElement("b", null, "Matched: "),
+                    `${currentEntityName}${prop.matched_alias ? ` (via alias "${prop.matched_alias}")` : ""}`,
+                    React.createElement("span", { style: { marginLeft: "8px", opacity: 0.8 } }, `(${selectedCandidate?.match_source || prop.match_source})`))),
+                React.createElement("p", { className: "lm-terminal-attention-sub", style: { wordBreak: "break-all", overflowWrap: "anywhere", margin: "0 0 6px" } },
+                  React.createElement("b", null, "From: "), prop.source_path),
+                (isRescanning || isRefreshing) ? React.createElement("div", {
+                  className: "lm-filing-rescan-indicator",
+                  style: {
+                    margin: "8px 0",
+                    padding: "6px 10px",
+                    background: isRescanning ? "rgba(56, 189, 248, 0.12)" : "rgba(148, 163, 184, 0.12)",
+                    border: isRescanning ? "1px solid rgba(56, 189, 248, 0.3)" : "1px solid rgba(148, 163, 184, 0.3)",
+                    borderRadius: "4px",
+                    color: isRescanning ? "#38bdf8" : "#94a3b8",
+                    fontSize: "0.82rem",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px"
+                  }
                 },
-                  React.createElement("input", {
-                    type: "checkbox",
-                    checked: Boolean(opts.updateMetadata),
-                    onChange: e => setFilingOptions(prev => ({ ...prev, [prop.id]: { ...(prev[prop.id] || {}), updateMetadata: e.target.checked } }))
-                  }),
-                  isDualMatch
-                    ? `Tag matched entity in Stash scene (Default: Move only)`
-                    : `Tag matched ${currentTagEntity} in Stash scene (Default: Move only)`
-                ),
-                isDualMatch && Boolean(opts.updateMetadata) ? React.createElement("div", {
-                  style: { marginTop: "6px", marginLeft: "22px", display: "flex", gap: "12px", fontSize: "0.82rem" }
-                },
-                  selectedCandidate.matched_entities.map(me => React.createElement("label", {
-                    key: `${me.entity_type}:${me.entity_id}`,
-                    style: { cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "4px" }
+                  React.createElement("span", { className: "lm-filing-spinner" }, "⟳"),
+                  isRescanning ? "Scanning physical storage disks for folder changes…" : "Fetching Stash metadata and recalculating choices…"
+                ) : null,
+                destDisplay,
+                prop.in_nested_folder ? React.createElement("div", {
+                  className: "lm-filing-torrent-warning",
+                  style: { marginTop: "6px", fontSize: "0.8rem", color: "#f59e0b", background: "rgba(245, 158, 11, 0.1)", padding: "4px 8px", borderRadius: "4px" }
+                }, "⚠️ Nested download folder: moving this file may interrupt torrent seeding.") : null,
+                progressPanel,
+                React.createElement("div", { style: { marginTop: "8px" } },
+                  React.createElement("label", {
+                    style: { fontSize: "0.85rem", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "6px" }
                   },
                     React.createElement("input", {
-                      type: "radio",
-                      name: `meta_choice_${prop.id}`,
-                      value: `${me.entity_type}:${me.entity_id}`,
-                      checked: (opts.targetEntityType || selectedCandidate.matched_entities[0].entity_type) === me.entity_type &&
-                        String(opts.targetEntityId || selectedCandidate.matched_entities[0].entity_id) === String(me.entity_id),
-                      onChange: () => setFilingOptions(prev => ({ ...prev, [prop.id]: { ...(prev[prop.id] || {}), targetEntityType: me.entity_type, targetEntityId: me.entity_id } }))
+                      type: "checkbox",
+                      checked: Boolean(opts.updateMetadata),
+                      onChange: e => setFilingOptions(prev => ({ ...prev, [prop.id]: { ...(prev[prop.id] || {}), updateMetadata: e.target.checked } }))
                     }),
-                    `Use ${me.entity_type.charAt(0).toUpperCase() + me.entity_type.slice(1)} (${me.entity_name})`
-                  ))
-                ) : null
+                    isDualMatch
+                      ? `Tag matched entity in Stash scene (Default: Move only)`
+                      : `Tag matched ${currentTagEntity} in Stash scene (Default: Move only)`
+                  ),
+                  isDualMatch && Boolean(opts.updateMetadata) ? React.createElement("div", {
+                    style: { marginTop: "6px", marginLeft: "22px", display: "flex", gap: "12px", fontSize: "0.82rem" }
+                  },
+                    selectedCandidate.matched_entities.map(me => React.createElement("label", {
+                      key: `${me.entity_type}:${me.entity_id}`,
+                      style: { cursor: "pointer", display: "inline-flex", alignItems: "center", gap: "4px" }
+                    },
+                      React.createElement("input", {
+                        type: "radio",
+                        name: `meta_choice_${prop.id}`,
+                        value: `${me.entity_type}:${me.entity_id}`,
+                        checked: (opts.targetEntityType || selectedCandidate.matched_entities[0].entity_type) === me.entity_type &&
+                          String(opts.targetEntityId || selectedCandidate.matched_entities[0].entity_id) === String(me.entity_id),
+                        onChange: () => setFilingOptions(prev => ({ ...prev, [prop.id]: { ...(prev[prop.id] || {}), targetEntityType: me.entity_type, targetEntityId: me.entity_id } }))
+                      }),
+                      `Use ${me.entity_type.charAt(0).toUpperCase() + me.entity_type.slice(1)} (${me.entity_name})`
+                    ))
+                  ) : null
+                )
               ),
-              React.createElement("div", { className: "lm-terminal-actions", style: { marginTop: "10px" } },
+              React.createElement("div", { className: "lm-filing-card-footer lm-terminal-actions" },
                 React.createElement("button", {
                   type: "button",
-                  className: "lm-terminal-btn filing-approve",
+                  className: "lm-terminal-btn filing-approve" + (isApproved ? " approved" : ""),
+                  style: isApproved ? {
+                    background: "rgba(34, 197, 94, 0.22)",
+                    borderColor: "#22c55e",
+                    color: "#4ade80",
+                    fontWeight: "600",
+                    cursor: "default",
+                    boxShadow: "0 0 8px rgba(34, 197, 94, 0.3)",
+                    transition: "all 0.2s ease"
+                  } : { transition: "all 0.2s ease" },
                   disabled: isApproveDisabled,
                   onClick: () => handleApproveFiling(prop.id)
                 }, approveButtonLabel),
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn retry",
-                  disabled: Boolean(busy) || isAnyTransferActive,
+                  style: isApproved ? { opacity: 0.3, pointerEvents: "none", transition: "opacity 0.2s ease" } : { transition: "opacity 0.2s ease" },
+                  disabled: isApproved || Boolean(busy) || isAnyTransferActive,
                   onClick: () => handleRefreshFilingProposal(prop.source_path, prop.id),
                   title: "Fetch current Stash metadata and recalculate choices using the cached folder list"
                 }, isRescanning ? "⟳ SCANNING DISKS…" : (isRefreshing ? "⟳ REFRESHING…" : "⟳ REFRESH CHOICES")),
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn dismiss",
-                  disabled: Boolean(busy) || isAnyTransferActive,
+                  style: isApproved ? { opacity: 0.3, pointerEvents: "none", transition: "opacity 0.2s ease" } : { transition: "opacity 0.2s ease" },
+                  disabled: isApproved || Boolean(busy) || isAnyTransferActive,
                   onClick: () => handleIgnoreFiling(prop.id)
                 }, "✕ IGNORE")
               )
@@ -4519,7 +4629,7 @@
                     }, "+ Save")
                   )
                 ),
-                folderMappingsList.length > 0 && React.createElement("div", { className: "lm-custom-mappings-filter", style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px" } },
+                folderMappingsList.length > 0 && React.createElement("div", { className: "lm-custom-mappings-filter", style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", paddingLeft: "12px" } },
                   React.createElement("input", {
                     type: "text",
                     className: "form-control form-control-sm",
@@ -5336,7 +5446,15 @@
               React.createElement(Button, {
                 variant: "secondary",
                 size: "sm",
-                onClick: () => setBacklogCompletedSummary(null),
+                onClick: () => {
+                  setBacklogCompletedSummary(null);
+                  window.setTimeout(() => {
+                    const modalBody = document.querySelector(".lm-backlog-modal .modal-body");
+                    if (modalBody && typeof modalBody.scrollTo === "function") {
+                      modalBody.scrollTo({ top: 0, behavior: "smooth" });
+                    }
+                  }, 0);
+                },
                 style: { background: "rgba(255,255,255,0.1)", color: "#fff" }
               }, "Back to Backlog List"),
               ((backlogCompletedSummary.tally?.proposal_ready || 0) + (backlogCompletedSummary.tally?.candidate_selection_required || 0)) > 0 ?
@@ -5349,6 +5467,19 @@
                     setBacklogCompletedSummary(null);
                     setTab("overview");
                     refresh(true);
+                    const scrollToTarget = () => {
+                      const filingSection = document.querySelector(".lm-terminal-filing-card");
+                      if (filingSection && typeof filingSection.scrollIntoView === "function") {
+                        filingSection.scrollIntoView({ behavior: "smooth", block: "start" });
+                      } else {
+                        window.scrollTo({ top: 0, behavior: "smooth" });
+                        if (document.documentElement && typeof document.documentElement.scrollTo === "function") {
+                          document.documentElement.scrollTo({ top: 0, behavior: "smooth" });
+                        }
+                      }
+                    };
+                    window.setTimeout(scrollToTarget, 50);
+                    window.setTimeout(scrollToTarget, 180);
                   },
                   style: { background: "#2fa66d", borderColor: "#3ab87b" }
                 }, `Review Proposals (${(backlogCompletedSummary.tally?.proposal_ready || 0) + (backlogCompletedSummary.tally?.candidate_selection_required || 0)})`) : null

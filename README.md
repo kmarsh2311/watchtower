@@ -5,7 +5,7 @@
 # 🗼 Watchtower for Stash
 ### Filesystem monitoring, media ingest and library management for Stash
 
-[![Version](https://img.shields.io/badge/version-1.0.15-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases/tag/v1.0.15)
+[![Version](https://img.shields.io/badge/version-1.0.16-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases/tag/v1.0.16)
 [![Stash](https://img.shields.io/badge/Stash-v0.26+-ff0055?style=for-the-badge)](https://github.com/stashapp/stash)
 [![Python](https://img.shields.io/badge/Python-3.10+-39ff64?style=for-the-badge)](https://python.org)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
@@ -108,7 +108,7 @@ Watchtower also checks filename-length and collision conditions and handles supp
 
 ### Option 2: Manual installation
 
-1. Download [`librarymanager.zip` from the v1.0.15 release](https://github.com/kmarsh2311/watchtower/releases/download/v1.0.15/librarymanager.zip).
+1. Download [`librarymanager.zip` from the v1.0.16 release](https://github.com/kmarsh2311/watchtower/releases/download/v1.0.16/librarymanager.zip).
 2. Extract it into the Watchtower plugin directory, for example `~/.stash/plugins/librarymanager/` on macOS/Linux or `C:\Users\<Username>\.stash\plugins\librarymanager\` on Windows.
 3. Reload plugins in Stash.
 

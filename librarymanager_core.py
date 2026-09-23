@@ -20,7 +20,7 @@ import sys
 import time
 import threading
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from librarymanager_reconciliation import RECONCILIATION_SCHEMA
@@ -363,6 +363,22 @@ CREATE TABLE IF NOT EXISTS active_filing_transfers (
     started_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS filing_transfer_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    proposal_id INTEGER NOT NULL UNIQUE,
+    target_destination_folder TEXT NOT NULL,
+    target_entity_type TEXT,
+    target_entity_id TEXT,
+    update_metadata INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'queued',
+    stash_job_id TEXT,
+    enqueued_at TEXT NOT NULL,
+    processing_started_at TEXT,
+    finished_at TEXT,
+    last_error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ftq_status ON filing_transfer_queue(status);
+CREATE INDEX IF NOT EXISTS idx_ftq_proposal ON filing_transfer_queue(proposal_id);
 CREATE TABLE IF NOT EXISTS filing_proposals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id TEXT NOT NULL,
@@ -422,6 +438,7 @@ COMPANION_EXTENSIONS = {
 TEMPORARY_DOWNLOAD_EXTENSIONS = {
     ".part", ".partial", ".crdownload", ".download", ".tmp", ".temp", ".!qb", ".mega", ".aria2",
 }
+SYSTEM_JUNK_FILENAMES = {".ds_store", "thumbs.db", "desktop.ini"}
 ACTIVE_INCOMING_LIFECYCLE_STATUSES = {
     "waiting", "downloading", "scanning", "generating_sheet", "renaming",
 }
@@ -742,6 +759,8 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> Non
                     "ALTER TABLE incoming_files ADD COLUMN settle_seconds INTEGER NOT NULL DEFAULT 300")
         _safe_alter(connection, "inventory_runs", "stash_scene_count",
                     "ALTER TABLE inventory_runs ADD COLUMN stash_scene_count INTEGER NOT NULL DEFAULT 0")
+        _safe_alter(connection, "filing_transfer_queue", "stash_job_id",
+                    "ALTER TABLE filing_transfer_queue ADD COLUMN stash_job_id TEXT")
         _safe_alter(connection, "rename_queue", "processing_started_at",
                     "ALTER TABLE rename_queue ADD COLUMN processing_started_at REAL")
         _safe_alter(connection, "filesystem_monitor_status", "auto_restart_attempted_at",
@@ -5839,6 +5858,8 @@ def snapshot_incoming_baseline(database_path: Path, incoming_folders: list[str])
 
             for root, dirs, files in os.walk(folder):
                 for fname in files:
+                    if fname.lower() in SYSTEM_JUNK_FILENAMES:
+                        continue
                     fpath = Path(root) / fname
                     if is_temporary_download(fpath):
                         continue
@@ -7037,18 +7058,510 @@ def _clear_active_transfer(database_path: Path, proposal_id: int):
     finally:
         connection.close()
 
+# ---------------------------------------------------------------------------
+# Filing transfer queue — enqueue / claim / complete / fail / restart-recovery
+# ---------------------------------------------------------------------------
+
+def enqueue_filing_transfer(
+    database_path: Path,
+    proposal_id: int,
+    target_destination_folder: str,
+    target_entity_type: str = None,
+    target_entity_id: str = None,
+    update_metadata: bool = False,
+) -> bool:
+    """Insert a filing job into the queue and mark its proposal as 'queued'.
+
+    Returns True if the row was inserted (or was already queued), False if the
+    proposal is not in a state that allows queuing.
+    """
+    now = utc_now()
+    conn = connect(database_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status FROM filing_proposals WHERE id=?", (proposal_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["status"] not in ("pending",):
+            return False
+        conn.execute(
+            """INSERT INTO filing_transfer_queue
+               (proposal_id, target_destination_folder, target_entity_type, target_entity_id,
+                update_metadata, status, enqueued_at)
+               VALUES (?, ?, ?, ?, ?, 'queued', ?)
+               ON CONFLICT(proposal_id) DO UPDATE SET
+                 target_destination_folder=excluded.target_destination_folder,
+                 target_entity_type=excluded.target_entity_type,
+                 target_entity_id=excluded.target_entity_id,
+                 update_metadata=excluded.update_metadata,
+                 status='queued',
+                 enqueued_at=excluded.enqueued_at,
+                 processing_started_at=NULL,
+                 finished_at=NULL,
+                 last_error=NULL""",
+            (
+                proposal_id,
+                str(target_destination_folder),
+                target_entity_type,
+                target_entity_id,
+                int(bool(update_metadata)),
+                now,
+            ),
+        )
+        conn.execute(
+            "UPDATE filing_proposals SET status='queued', updated_at=? WHERE id=?",
+            (now, proposal_id),
+        )
+        conn.commit()
+        return True
+    except Exception as exc:
+        logger.warning("enqueue_filing_transfer: %s", exc)
+        return False
+    finally:
+        conn.close()
+
+
+def claim_next_filing_transfer(database_path: Path):
+    """Atomically claim the next queued filing transfer for processing.
+
+    Returns the queue row as a dict, or None if the queue is empty.
+    Uses BEGIN IMMEDIATE to prevent two workers claiming the same row.
+    """
+    now = utc_now()
+    conn = connect(database_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """SELECT * FROM filing_transfer_queue
+               WHERE status='queued'
+               ORDER BY enqueued_at
+               LIMIT 1"""
+        ).fetchone()
+        if not row:
+            conn.commit()
+            return None
+        row = dict(row)
+        conn.execute(
+            "UPDATE filing_transfer_queue SET status='processing', processing_started_at=? WHERE id=?",
+            (now, row["id"]),
+        )
+        conn.commit()
+        return row
+    except Exception as exc:
+        logger.warning("claim_next_filing_transfer: %s", exc)
+        return None
+    finally:
+        conn.close()
+
+
+def finish_filing_transfer(database_path: Path, queue_id: int) -> None:
+    """Mark a filing queue entry as done after a successful apply."""
+    now = utc_now()
+    conn = connect(database_path)
+    try:
+        conn.execute(
+            "UPDATE filing_transfer_queue SET status='done', finished_at=?, last_error=NULL WHERE id=?",
+            (now, queue_id),
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("finish_filing_transfer: %s", exc)
+    finally:
+        conn.close()
+
+
+def fail_filing_transfer(database_path: Path, queue_id: int, error: str) -> None:
+    """Mark a filing queue entry as failed and reset its proposal to pending."""
+    now = utc_now()
+    conn = connect(database_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT proposal_id FROM filing_transfer_queue WHERE id=?", (queue_id,)
+        ).fetchone()
+        conn.execute(
+            "UPDATE filing_transfer_queue SET status='failed', finished_at=?, last_error=? WHERE id=?",
+            (now, str(error), queue_id),
+        )
+        if row:
+            # Reset proposal back to pending so user can retry
+            conn.execute(
+                "UPDATE filing_proposals SET status='pending', last_error=?, updated_at=? WHERE id=? AND status='queued'",
+                (str(error)[:500], now, row["proposal_id"]),
+            )
+        conn.commit()
+    except Exception as exc:
+        logger.warning("fail_filing_transfer: %s", exc)
+    finally:
+        conn.close()
+
+
+
+def set_filing_transfer_job_id(database_path: Path, proposal_id: int, job_id: str) -> None:
+    """Record the Stash task job ID executing this queue row.
+
+    Called immediately after ``run_plugin_task`` returns so that startup recovery
+    can query job liveness instead of guessing.  If the row has already moved to
+    ``done`` (task completed before this call ran — the job-ID race), the UPDATE
+    matches 0 rows, which is harmless.
+    """
+    conn = connect(database_path)
+    try:
+        conn.execute(
+            "UPDATE filing_transfer_queue SET stash_job_id=? "
+            "WHERE proposal_id=? AND status IN ('queued','processing')",
+            (str(job_id), proposal_id),
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.debug("set_filing_transfer_job_id: %s", exc)
+    finally:
+        conn.close()
+
+
+def recover_abandoned_processing_queue(
+    database_path: Path, stash=None
+) -> dict:
+    """Resolve filing queue rows stuck in 'processing' after a restart.
+
+    A Stash task running ``process_filing_queue`` is a *separate process* from
+    the monitor.  To avoid killing a legitimately-running transfer (which can
+    exceed any fixed time threshold for large files), we query Stash's job
+    scheduler for the specific job that claimed each row.
+
+    Decision matrix per processing row:
+    - Stash job RUNNING / READY       → alive, leave it (do NOT reset)
+    - Stash job FINISHED/CANCELLED/FAILED, or job not found in Stash
+                                      → worker gone, safe to reset to 'queued'
+    - stash_job_id not stored (legacy or bug) → uncertain: preserve and log
+    - Stash unavailable / GQL error   → uncertain: preserve and log
+    - stash=None supplied             → uncertain: preserve and log
+
+    Uncertain rows are NEVER auto-reset.  The operator receives a WARNING log
+    with proposal IDs and is expected to check the Stash Tasks UI manually.
+
+    Race-condition tolerance
+    ------------------------
+    ``set_filing_transfer_job_id`` is called by ``queue_filing_proposal`` *after*
+    ``run_plugin_task`` returns.  In the narrow window between those two calls,
+    the spawned Stash task may already have claimed and even completed the row.
+
+    * If the task finishes before ``set_filing_transfer_job_id`` runs:
+      the row is already ``done``; the UPDATE touches 0 rows (harmless).
+    * If this function runs in that window (startup or periodic check):
+      ``stash_job_id`` is still NULL → outcome is *uncertain* → row is
+      **preserved, never reset**.  The worker completes normally.  The only
+      side-effect is a spurious WARNING log entry, which is the correct
+      conservative behaviour (false warning beats false reset).
+
+    Returns:
+        {"reset": int, "uncertain": list[int]}  (uncertain = proposal_id list)
+    """
+    _ALIVE_STATUSES = {"RUNNING", "READY"}
+
+    conn = connect(database_path)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM filing_transfer_queue WHERE status='processing'"
+        ).fetchall()]
+    except Exception as exc:
+        logger.warning("recover_abandoned_processing_queue: could not read queue: %s", exc)
+        return {"reset": 0, "uncertain": []}
+    finally:
+        conn.close()
+
+    reset_count = 0
+    uncertain = []
+
+    for row in rows:
+        proposal_id = row["proposal_id"]
+        job_id = row.get("stash_job_id")
+
+        if stash is None:
+            logger.warning(
+                "Filing queue recovery: no Stash connection supplied; cannot verify "
+                "liveness of processing job for proposal %s — preserving (uncertain).",
+                proposal_id,
+            )
+            uncertain.append(proposal_id)
+            continue
+
+        if not job_id:
+            logger.warning(
+                "Filing queue recovery: proposal %s has no stash_job_id recorded — "
+                "cannot verify worker liveness; preserving (uncertain).", proposal_id
+            )
+            uncertain.append(proposal_id)
+            continue
+
+        # Query Stash job liveness
+        job_status = None
+        try:
+            result = stash.call_GQL(
+                "query FindJob($id: ID!) { findJob(input: {id: $id}) { status } }",
+                {"id": str(job_id)},
+            )
+            job_info = (result or {}).get("findJob")
+            if job_info:
+                job_status = (job_info.get("status") or "").upper()
+            # job_info None means Stash purged the record — treat as dead (FINISHED)
+        except Exception as gql_exc:
+            logger.warning(
+                "Filing queue recovery: Stash GQL failed for job_id=%s (proposal %s): %s "
+                "— cannot verify liveness; preserving (uncertain).",
+                job_id, proposal_id, gql_exc,
+            )
+            uncertain.append(proposal_id)
+            continue
+
+        if job_status in _ALIVE_STATUSES:
+            logger.info(
+                "Filing queue recovery: Stash job %s is still %s for proposal %s "
+                "— leaving processing row intact.",
+                job_id, job_status, proposal_id,
+            )
+            continue  # alive — do not touch
+
+        # Worker is confirmed dead (job FINISHED / CANCELLED / FAILED / not found)
+        reason = (
+            f"Reset after monitor restart: Stash job {job_id} "
+            f"status={job_status or 'not found in Stash'}"
+        )
+        try:
+            conn2 = connect(database_path)
+            conn2.execute(
+                """UPDATE filing_transfer_queue
+                   SET status='queued', processing_started_at=NULL, last_error=?
+                   WHERE proposal_id=? AND status='processing'""",
+                (reason, proposal_id),
+            )
+            conn2.commit()
+            conn2.close()
+            reset_count += 1
+            logger.info(
+                "Filing queue recovery: reset proposal %s to queued "
+                "(Stash job %s was %s).",
+                proposal_id, job_id, job_status or "not found",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Filing queue recovery: failed to reset proposal %s: %s",
+                proposal_id, exc,
+            )
+
+    return {"reset": reset_count, "uncertain": uncertain}
+
 
 def get_active_filing_transfers(database_path: Path) -> list[dict]:
     connection = connect(database_path)
     try:
-        # Prune transfers that died over 1 hour ago
-        now = datetime.now().timestamp()
         rows = connection.execute("SELECT * FROM active_filing_transfers ORDER BY started_at ASC").fetchall()
         return [dict(r) for r in rows]
     except Exception:
         return []
     finally:
         connection.close()
+
+
+def recover_stale_active_transfers(database_path: Path, stale_threshold_minutes: int = 10, stash=None) -> list[dict]:
+    """Detect and recover filing transfers that were abandoned mid-flight.
+
+    When a browser navigates away while a transfer is running, the OS-level file
+    move may complete successfully but the Python cleanup path (which removes the
+    active_filing_transfers row and marks the proposal completed) is never reached.
+    This leaves the UI permanently stuck showing 'TRANSFER IN PROGRESS'.
+
+    Call this at monitor startup and periodically (every ~5 minutes) in the loop.
+
+    A row is stale when its ``updated_at`` has not changed for
+    ``stale_threshold_minutes`` minutes — real transfers heartbeat every few seconds.
+
+    Outcomes per stale row:
+    - Source gone + dest present at expected size → proposal marked *completed*.
+    - Source still present (move incomplete)      → proposal reset to *pending*.
+    - Neither (unknown partial state)             → proposal marked *needs_recovery*.
+    """
+    recovered = []
+    try:
+        connection = connect(database_path)
+        try:
+            rows = [dict(r) for r in connection.execute(
+                "SELECT * FROM active_filing_transfers ORDER BY started_at ASC"
+            ).fetchall()]
+        finally:
+            connection.close()
+    except Exception as exc:
+        logger.debug("recover_stale_active_transfers: could not read transfers: %s", exc)
+        return recovered
+
+    now_dt = datetime.now(timezone.utc)
+    threshold_seconds = stale_threshold_minutes * 60
+
+    for row in rows:
+        proposal_id = row["proposal_id"]
+        updated_at_str = row.get("updated_at", "")
+        source_path = Path(row["source_path"])
+        destination_path = Path(row["destination_path"])
+        total_bytes = int(row.get("total_bytes") or 0)
+        file_id = str(row.get("file_id") or "")
+        destination_folder = row.get("destination_folder", "")
+
+        try:
+            updated_dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+            if updated_dt.tzinfo is None:
+                updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+            age_seconds = (now_dt - updated_dt).total_seconds()
+        except Exception:
+            age_seconds = threshold_seconds + 1  # treat unparseable timestamp as stale
+
+        if age_seconds < threshold_seconds:
+            continue  # Transfer heartbeat is recent — still genuinely active
+
+        source_exists = source_path.exists()
+        try:
+            dest_stat = destination_path.stat()
+            dest_exists = True
+            dest_size = dest_stat.st_size
+        except Exception:
+            dest_exists = False
+            dest_size = 0
+
+        size_matches = (dest_size == total_bytes) if total_bytes > 0 else dest_exists
+        now_str = now_dt.strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+        # --- Disk-level outcome assessment ---
+        if dest_exists and size_matches and not source_exists:
+            disk_outcome = "completed"
+        elif source_exists and not dest_exists:
+            disk_outcome = "pending"   # move never happened; safe to reset
+        else:
+            disk_outcome = "needs_recovery"  # ambiguous (both or neither exist)
+
+        # --- Stash GQL verification (mandatory for completion) ---
+        # completed requires THREE-WAY agreement: disk + Stash + Watchtower.
+        # Any state that cannot be fully verified becomes needs_recovery so the
+        # user can inspect and resolve without risk of a repeat move.
+        stale_reason = None
+        if disk_outcome == "completed":
+            if stash is None:
+                # No Stash connection supplied — cannot verify.
+                disk_outcome = "needs_recovery"
+                stale_reason = (
+                    "Stash connection unavailable during recovery; "
+                    "cannot confirm file location. Re-run after monitor restarts with Stash."
+                )
+            elif not file_id:
+                # No file_id recorded — cannot query Stash.
+                disk_outcome = "needs_recovery"
+                stale_reason = "No file_id recorded in transfer row; cannot query Stash to verify."
+            else:
+                try:
+                    gql_res = stash.call_GQL(
+                        "query FindFileForRecovery($id: ID!) { findFile(id: $id) { ... on VideoFile { id path } } }",
+                        {"id": str(file_id)},
+                    )
+                    stash_file = (gql_res or {}).get("findFile")
+                    if not stash_file:
+                        # Stash has no record of this file — unverifiable.
+                        disk_outcome = "needs_recovery"
+                        stale_reason = (
+                            f"Stash returned no record for file_id={file_id}. "
+                            "Run a Stash library scan on the destination folder, then use manual recovery."
+                        )
+                    else:
+                        stash_path_str = stash_file.get("path") or ""
+                        stash_resolved = str(Path(stash_path_str).resolve()) if stash_path_str else ""
+                        dest_resolved = str(destination_path.resolve())
+                        src_resolved = str(source_path.resolve())
+                        if stash_resolved == dest_resolved:
+                            pass  # Full agreement: disk + Stash both at destination → completed
+                        elif stash_resolved == src_resolved:
+                            # Disk says moved; Stash still shows source path (not yet rescanned).
+                            # We cannot mark completed until Stash confirms the new location.
+                            disk_outcome = "needs_recovery"
+                            stale_reason = (
+                                f"File is at destination on disk but Stash still records the source "
+                                f"path '{stash_path_str}'. Run a Stash library scan on "
+                                f"'{str(destination_path.parent)}' then use manual recovery to clear."
+                            )
+                        else:
+                            # Stash reports an entirely different location — ambiguous.
+                            disk_outcome = "needs_recovery"
+                            stale_reason = (
+                                f"Stash path '{stash_path_str}' matches neither source nor "
+                                "destination. File location is ambiguous; manual verification required."
+                            )
+                except Exception as gql_exc:
+                    # Stash GQL call failed (offline, timeout, etc.) — unverifiable.
+                    disk_outcome = "needs_recovery"
+                    stale_reason = (
+                        f"Stash GQL query failed during recovery ({gql_exc}). "
+                        "Cannot confirm file location without Stash. Re-run after Stash is reachable."
+                    )
+
+        outcome, new_status = {
+            "completed":      ("completed",       "completed"),
+            "pending":        ("reset_to_pending", "pending"),
+            "needs_recovery": ("needs_recovery",   "needs_recovery"),
+        }[disk_outcome]
+
+        try:
+            conn = connect(database_path)
+            try:
+                conn.execute("DELETE FROM active_filing_transfers WHERE proposal_id=?", (proposal_id,))
+                if new_status == "completed":
+                    conn.execute(
+                        "UPDATE filing_proposals SET status='completed', proposed_path=?, "
+                        "destination_folder=?, last_error=NULL, updated_at=? WHERE id=?",
+                        (str(destination_path), destination_folder, now_str, proposal_id)
+                    )
+                    if file_id:
+                        conn.execute(
+                            "UPDATE files SET path=?, basename=?, exists_on_disk=1, last_seen_at=? "
+                            "WHERE file_id=?",
+                            (str(destination_path), destination_path.name, now_str, file_id)
+                        )
+                    conn.execute(
+                        "UPDATE incoming_files SET filing_diagnostic=NULL, status='filed' WHERE path=?",
+                        (str(source_path),)
+                    )
+                elif new_status == "pending":
+                    conn.execute(
+                        "UPDATE filing_proposals SET status='pending', last_error=NULL, "
+                        "destination_folder='', updated_at=? WHERE id=?",
+                        (now_str, proposal_id)
+                    )
+                else:
+                    err_msg = stale_reason or "Transfer interrupted — file state uncertain. Verify location manually."
+                    conn.execute(
+                        "UPDATE filing_proposals SET status='needs_recovery', last_error=?, "
+                        "updated_at=? WHERE id=?",
+                        (err_msg, now_str, proposal_id)
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+
+            result = {
+                "proposal_id": proposal_id,
+                "outcome": outcome,
+                "source": str(source_path),
+                "destination": str(destination_path),
+                "age_minutes": round(age_seconds / 60, 1),
+            }
+            recovered.append(result)
+            logger.info(
+                "Stale filing transfer recovered: proposal=%s outcome=%s age=%.1fmin src=%s",
+                proposal_id, outcome, age_seconds / 60, source_path.name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "recover_stale_active_transfers: failed to recover proposal %s: %s", proposal_id, exc
+            )
+
+    return recovered
 
 
 def apply_filing_proposal(
@@ -7089,7 +7602,7 @@ def apply_filing_proposal(
         finally:
             connection.close()
 
-        if proposal["status"] != "pending":
+        if proposal["status"] not in ("pending", "queued"):
             return {"id": proposal_id, "status": "blocked", "reason": f"Proposal is already '{proposal['status']}'"}
 
         if config is None:
@@ -8130,6 +8643,8 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None, forc
             baseline_path = row["path"]
             path_str = current_recorded_path(baseline_path)
             p_obj = Path(path_str)
+            if p_obj.name.lower() in SYSTEM_JUNK_FILENAMES:
+                continue
             ext = p_obj.suffix.lower()
             is_video = ext in VIDEO_EXTENSIONS
             is_file = p_obj.is_file()

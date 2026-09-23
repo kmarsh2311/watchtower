@@ -2750,8 +2750,51 @@ a.lm-activity-scene-pill:hover {
   color: #93c5fd;
 }
 .lm-terminal-attention-item.filing {
-  border-left-color: #3b82f6;
-  background: rgba(59, 130, 246, 0.05);
+  margin-bottom: 1.35rem;
+  padding: 0;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(56, 189, 248, 0.28);
+  border-left: 4px solid #38bdf8;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.lm-terminal-attention-item.filing:hover {
+  border-color: rgba(56, 189, 248, 0.5);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.55), 0 0 14px rgba(56, 189, 248, 0.12);
+}
+
+.lm-terminal-attention-item.filing:last-child {
+  margin-bottom: 0.5rem;
+}
+
+.lm-filing-card-header {
+  padding: 0.75rem 1rem;
+  background: rgba(15, 23, 42, 0.92);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.15);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 0 !important;
+}
+
+.lm-filing-card-body {
+  padding: 0.85rem 1rem 0.6rem;
+}
+
+.lm-filing-card-footer {
+  padding: 0.75rem 1rem;
+  background: rgba(15, 23, 42, 0.45);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0 !important;
 }
 
 .lm-terminal-badge.filing {

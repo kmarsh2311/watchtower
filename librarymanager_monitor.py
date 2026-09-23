@@ -383,7 +383,11 @@ from librarymanager_core import (
     TEMPORARY_DOWNLOAD_EXTENSIONS, ACTIVE_INCOMING_LIFECYCLE_STATUSES,
                                  opensubtitles_hash, record_activity, record_filesystem_event, record_monitor_lifecycle,
                                  resolve_filesystem_event, refresh_scene_inventory, utc_now,
-                                 process_next_checksum_job, reset_checksum_jobs_for_monitor_restart, _is_pid_alive)
+                                 process_next_checksum_job, reset_checksum_jobs_for_monitor_restart, _is_pid_alive,
+    recover_stale_active_transfers,
+    recover_abandoned_processing_queue,
+    _move_file,
+)
 from librarymanager_reconciliation import ReconciliationCoordinator
 
 
@@ -709,7 +713,7 @@ def relocate_companions_transactionally(database_path: Path, source_path: str, d
     try:
         for source_companion, target_companion in planned:
             expect_filesystem_move(database_path, str(source_companion), str(target_companion))
-            source_companion.rename(target_companion)
+            _move_file(source_companion, target_companion)
             moved.append((source_companion, target_companion))
     except Exception as move_error:
         rollback_errors = []
@@ -717,7 +721,7 @@ def relocate_companions_transactionally(database_path: Path, source_path: str, d
             try:
                 if target_companion.exists() and not source_companion.exists():
                     expect_filesystem_move(database_path, str(target_companion), str(source_companion))
-                    target_companion.rename(source_companion)
+                    _move_file(target_companion, source_companion)
             except Exception as rollback_error:
                 rollback_errors.append(f"{target_companion.name}: {rollback_error}")
         detail = f"Companion relocation failed and completed moves were restored: {move_error}"
@@ -2558,7 +2562,7 @@ class CompletedDownloadWorker(threading.Thread):
                         continue
                     try:
                         expect_filesystem_move(self.database_path, str(cand), str(target_path))
-                        cand.rename(target_path)
+                        _move_file(cand, target_path)
                     except OSError:
                         continue
 
@@ -2654,7 +2658,7 @@ class CompletedDownloadWorker(threading.Thread):
                         return
                     try:
                         expect_filesystem_move(self.database_path, str(cand_path), str(target_path))
-                        cand_path.rename(target_path)
+                        _move_file(cand_path, target_path)
                     except OSError as err:
                         self._save_companion_waiting(path, candidate, f"Could not relocate to {target_path}: {err}")
                         return
@@ -3633,6 +3637,19 @@ def main():
     # will retry them automatically (up to max_attempts) without user action.
     _reset_stale_failed_incoming(database_path)
     reset_checksum_jobs_for_monitor_restart(database_path)
+    # Recover any transfers that were interrupted when the plugin was last unloaded
+    _abandoned_result = recover_abandoned_processing_queue(database_path, stash=stash)
+    if _abandoned_result["reset"]:
+        logger.info("Startup: reset %d abandoned filing queue job(s) to queued", _abandoned_result["reset"])
+    if _abandoned_result["uncertain"]:
+        logger.warning(
+            "Startup: %d filing queue job(s) have uncertain worker state and were preserved: "
+            "proposal_ids=%s. Check the Stash Tasks UI or this log for job status.",
+            len(_abandoned_result["uncertain"]), _abandoned_result["uncertain"]
+        )
+    _stale_transfer_recovered = recover_stale_active_transfers(database_path, stash=stash)
+    if _stale_transfer_recovered:
+        logger.info("Startup: recovered %d stale filing transfer(s)", len(_stale_transfer_recovered))
     checksum_worker = ChecksumWorker(database_path)
     reconciliation_worker = (
         GroupedReconciliationWorker(reconciliation_coordinator, roots)
@@ -3647,6 +3664,7 @@ def main():
     if worker.transcoder_compatibility:
         handler.restore_transcoder_candidates()
     tracker = RootAvailabilityTracker(roots, probe_timeout=5.0)
+    _last_stale_transfer_check = 0.0  # epoch seconds; check every 5 minutes
     handler.availability_tracker = tracker
     if incoming_worker:
         incoming_worker.availability_tracker = tracker
@@ -3743,6 +3761,16 @@ def main():
                                 pass
             active_moves = worker.active_moves_summary() if hasattr(worker, "active_moves_summary") else []
             update_status(database_path, args.token, os.getpid(), "running", available, unavailable, active_moves=active_moves)
+            # Periodically recover stale filing transfers (every 5 minutes)
+            _now_epoch = time.monotonic()
+            if _now_epoch - _last_stale_transfer_check >= 300:
+                _last_stale_transfer_check = _now_epoch
+                try:
+                    _stale = recover_stale_active_transfers(database_path, stash=stash)
+                    if _stale:
+                        logger.info("Periodic check: recovered %d stale filing transfer(s)", len(_stale))
+                except Exception as _exc:
+                    logger.debug("Stale transfer check error: %s", _exc)
             time.sleep(2)
     except KeyboardInterrupt:
         pass
