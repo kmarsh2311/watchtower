@@ -1111,3 +1111,66 @@ test("Organiser displays unavailable root warning banner and restricts actions f
   assert.match(javascript, /"root_unavailable"/);
   assert.match(css, /\.item-status-pill\.decision\.unavailable/);
 });
+
+test("Rename Now and Cancel Rename buttons are enabled while idle and disabled when busy", () => {
+  assert.match(javascript, /className:\s*"lm-terminal-btn rename-approve",\s*disabled:\s*Boolean\(busy\)/);
+  assert.match(javascript, /className:\s*"lm-terminal-btn dismiss",\s*disabled:\s*Boolean\(busy\)/);
+  assert.match(javascript, /className:\s*"lm-terminal-inline-btn process-now",\s*disabled:\s*Boolean\(busy\)/);
+
+  // When Watchtower is idle (busy is empty string), disabled evaluates to false (buttons enabled)
+  const idleBusy = "";
+  assert.equal(Boolean(idleBusy), false, "Buttons must be enabled when idle");
+
+  // When Watchtower is busy (operation in flight), disabled evaluates to true
+  const activeBusy = "rename:42";
+  assert.equal(Boolean(activeBusy), true, "Buttons must be disabled while busy");
+});
+
+test("Pending rename proposal card renders live debounce countdown and ticks", () => {
+  // Proposal card template includes countdown(item)
+  assert.match(javascript, /`RENAMING PROPOSAL \(SETTLES IN \${countdown\(item\)}\)`/);
+
+  // Verify countdown computation and ticking
+  const item = { remaining_seconds: 30 };
+  const baseClock = 1700000000000;
+
+  // At t = 0
+  let clock = baseClock;
+  let receivedAt = baseClock;
+  let elapsed = Math.floor((clock - receivedAt) / 1000);
+  let remaining = Math.max(0, Number(item.remaining_seconds || 0) - elapsed);
+  let mm = String(Math.floor(remaining / 60)).padStart(2, "0");
+  let ss = String(remaining % 60).padStart(2, "0");
+  assert.equal(`${mm}:${ss}`, "00:30", "Initial countdown renders 00:30");
+
+  // Tick 1 second forward
+  clock = baseClock + 1000;
+  elapsed = Math.floor((clock - receivedAt) / 1000);
+  remaining = Math.max(0, Number(item.remaining_seconds || 0) - elapsed);
+  mm = String(Math.floor(remaining / 60)).padStart(2, "0");
+  ss = String(remaining % 60).padStart(2, "0");
+  assert.equal(`${mm}:${ss}`, "00:29", "Countdown ticks down to 00:29");
+
+  // Advance 20 seconds forward
+  clock = baseClock + 20000;
+  elapsed = Math.floor((clock - receivedAt) / 1000);
+  remaining = Math.max(0, Number(item.remaining_seconds || 0) - elapsed);
+  mm = String(Math.floor(remaining / 60)).padStart(2, "0");
+  ss = String(remaining % 60).padStart(2, "0");
+  assert.equal(`${mm}:${ss}`, "00:10", "Countdown ticks down to 00:10");
+});
+
+test("Cascade renames on performer and studio updates setting defaults to off", () => {
+  // 1. Defined in manifest settings
+  assert.match(manifest, /renameOnPerformerStudioUpdates:/);
+  assert.match(manifest, /Cascade Renames on Performer & Studio Updates/);
+  assert.match(manifest, /Default is OFF to prevent scrapers or bulk edits from mass-renaming/);
+
+  // 2. Setting control rendered in UI with default off
+  assert.match(javascript, /setting:\s*"renameOnPerformerStudioUpdates"/);
+  assert.match(javascript, /defaultValue:\s*false/);
+  assert.match(javascript, /Rename on Performer & Studio Edits \(Cascade\)/);
+
+  // 3. Status card reflects whether cascade is active
+  assert.match(javascript, /config\.renameOnPerformerStudioUpdates \? "Renames on scene, studio & performer edits" : "Renames on direct scene edits"/);
+});

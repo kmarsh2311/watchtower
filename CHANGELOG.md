@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.18 — 2026-09-24
+
+- **Rename & Filing Action Controls**: Enabled `Rename Now` and `Cancel Rename` action buttons while idle and properly disabled during in-flight operations, ensuring quick execution without race conditions.
+- **Pending Rename Countdown**: Added real-time countdown timer to pending rename proposals indicating settling status and remaining debounce time.
+- **Cascade Renames Opt-In Safeguard**: Added `renameOnPerformerStudioUpdates` setting (defaulting to OFF) to protect against unintended mass renames when third-party scrapers or bulk edits modify performers or studios.
+
 ## 1.0.17 — 2026-09-23
 
 - **Unresolved Filing Attention Actions**: Added **`✕ DISMISS ALERT`** to safely clear unresolved filing warnings from Needs Attention, plus direct **`⚡ EDIT WITH FASTTAG`** / **`🎬 OPEN SCENE`** buttons to assign missing metadata without leaving Watchtower.

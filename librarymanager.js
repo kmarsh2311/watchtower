@@ -3712,7 +3712,7 @@
                   React.createElement("div", {
                     style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: ".4rem" }
                   },
-                    React.createElement("strong", { style: { color: "#4ade80", fontSize: "0.85rem" } }, "RENAMING PROPOSAL (PENDING USER CONFIRMATION)"),
+                    React.createElement("strong", { style: { color: "#4ade80", fontSize: "0.85rem" } }, `RENAMING PROPOSAL (SETTLES IN ${countdown(item)})`),
                     React.createElement("span", { className: "lm-terminal-badge rename" }, "RENAME")),
                   React.createElement("div", { style: { fontSize: "0.82rem", color: "#94a3b8", marginBottom: "3px" } },
                     React.createElement("span", null, "Current: "),
@@ -3724,7 +3724,7 @@
                     React.createElement("button", {
                       type: "button",
                       className: "lm-terminal-btn rename-approve",
-                      disabled: !busy,
+                      disabled: Boolean(busy),
                       onClick: async () => {
                         setBusy(`rename:${item.scene_id}`);
                         setError("");
@@ -3741,7 +3741,7 @@
                     React.createElement("button", {
                       type: "button",
                       className: "lm-terminal-btn dismiss",
-                      disabled: !busy,
+                      disabled: Boolean(busy),
                       onClick: async () => {
                         setBusy(`cancel:${item.scene_id}`);
                         setError("");
@@ -3791,7 +3791,7 @@
                   showProcessNow && React.createElement("button", {
                     type: "button",
                     className: "lm-terminal-inline-btn process-now",
-                    disabled: !busy,
+                    disabled: Boolean(busy),
                     title: "Bypass settling delay and import this video into Stash immediately",
                     onClick: () => handleProcessIncomingNow(item.path, displayName)
                   }, "▶ PROCESS NOW")
@@ -3951,7 +3951,9 @@
             value: config.automaticRenaming ? (config.testSceneId ? "Test Scene" : "On") : "Off",
             detail: config.testSceneId
               ? `Limited to scene ${config.testSceneId}`
-              : (config.automaticRenaming ? "Renames on title, studio & performer edits" : "Metadata-based renaming is off"),
+              : (config.automaticRenaming
+                  ? (config.renameOnPerformerStudioUpdates ? "Renames on scene, studio & performer edits" : "Renames on direct scene edits")
+                  : "Metadata-based renaming is off"),
             tone: "ok"
           }),
           React.createElement(StatusCard, {
@@ -3988,6 +3990,12 @@
         React.createElement(React.Fragment, null,
           React.createElement(Switch, { setting: "automaticRenaming", label: "Automatic Renaming",
             help: "Rename edited scenes using the stable filename base. Turning this off leaves filenames untouched while filesystem monitoring continues running." }),
+          config.automaticRenaming && React.createElement(Switch, {
+            setting: "renameOnPerformerStudioUpdates",
+            defaultValue: false,
+            label: "Rename on Performer & Studio Edits (Cascade)",
+            help: "When a performer or studio is edited in Stash, automatically queue and rename all associated scenes in your library. Default is OFF to prevent scrapers or bulk edits from mass-renaming historical files."
+          }),
           React.createElement("div", { className: "lm-filename-style-grid", style: { marginTop: "12px" } },
             React.createElement(ChoiceField, {
               label: "Metadata Edit Settle Delay",

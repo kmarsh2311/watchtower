@@ -501,6 +501,16 @@ def scene_hook_has_naming_changes(changed):
     return bool(SCENE_NAMING_HOOK_FIELDS.intersection(changed))
 
 
+def should_process_parent_entity_hook(hook_type: str, config: dict) -> bool:
+    """Cascade renaming on Performer or Studio updates requires explicit opt-in.
+    
+    Default is False to prevent scrapers or bulk edits from mass-renaming historical scenes.
+    """
+    if "Performer" in str(hook_type) or "Studio" in str(hook_type):
+        return bool((config or {}).get("renameOnPerformerStudioUpdates"))
+    return True
+
+
 def fetch_library_roots(stash):
     result = stash.call_GQL(ROOTS_QUERY)
     stashes = (((result or {}).get("configuration") or {}).get("general") or {}).get("stashes") or []
@@ -1080,6 +1090,9 @@ def main():
 
         target_scene_ids = []
         if "Performer" in hook_type:
+            if not should_process_parent_entity_hook(hook_type, config):
+                print(json.dumps({"output": "Performer update skipped: cascade renaming on performer/studio updates is disabled."}))
+                return
             relevant = bool({"name", "disambiguation", "alias_list"} & set(changed)) if changed else True
             if not relevant:
                 print(json.dumps({"output": "Performer update has no relevant naming changes; skipping."}))
@@ -1090,6 +1103,9 @@ def main():
             except Exception as e:
                 activity_logger().error("Failed to query scenes for performer %s: %s", entity_id, e)
         elif "Studio" in hook_type:
+            if not should_process_parent_entity_hook(hook_type, config):
+                print(json.dumps({"output": "Studio update skipped: cascade renaming on performer/studio updates is disabled."}))
+                return
             relevant = bool({"name"} & set(changed)) if changed else True
             if not relevant:
                 print(json.dumps({"output": "Studio update has no name changes; skipping."}))

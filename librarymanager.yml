@@ -1,6 +1,6 @@
 name: Watchtower
 description: Safely inventories Stash scene files and reports filesystem differences.
-version: 1.0.17
+version: 1.0.18
 ui:
   javascript:
     - librarymanager.js
@@ -20,6 +20,10 @@ settings:
   automaticRenaming:
     displayName: Automatic Renaming
     description: Rename an edited scene from its stable base, studio and performers. Test Scene ID restricts this to one scene while testing.
+    type: BOOLEAN
+  renameOnPerformerStudioUpdates:
+    displayName: Cascade Renames on Performer & Studio Updates
+    description: When a performer or studio is updated in Stash, automatically queue and rename all associated scenes in your library. Default is OFF to prevent scrapers or bulk edits from mass-renaming historical scenes.
     type: BOOLEAN
   contactSheetScope:
     displayName: Contact Sheet Location Scope

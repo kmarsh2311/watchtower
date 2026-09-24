@@ -521,3 +521,52 @@ class TestQueueFilingProposalHandler:
         # Proposal stays completed; queue row is failed
         assert _get_proposal_status(db, 1) == "completed"
         assert _get_queue_row(db, 1)["status"] == "failed"
+
+    def test_cancel_pending_rename_removes_from_queue_and_preserves_filename(self, tmp_path):
+        """Cancel removes the pending rename and preserves the current filename."""
+        from librarymanager_core import connect, enqueue_rename, cancel_pending_rename, claim_due_rename
+        db = _make_db(tmp_path)
+
+        video = tmp_path / "yb_17_sc04.vid-720.mp4"
+        video.write_bytes(b"video-content")
+
+        now = time.time()
+        conn = connect(db)
+        conn.execute(
+            "INSERT INTO files(path, basename, scene_id, exists_on_disk, first_seen_at, last_seen_at) VALUES (?, ?, '42', 1, ?, ?)",
+            (str(video), video.name, now, now)
+        )
+        conn.commit()
+        conn.close()
+
+        # Enqueue rename with 30s debounce
+        enqueue_rename(db, "42", now, debounce_seconds=30.0)
+
+        conn = connect(db)
+        row = conn.execute("SELECT status FROM rename_queue WHERE scene_id='42'").fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "pending"
+
+        # User clicks CANCEL RENAME
+        cancelled = cancel_pending_rename(db, "42")
+        assert cancelled is True
+
+        # Verify removed from rename queue and recorded in audit log
+        conn = connect(db)
+        row_after = conn.execute("SELECT status FROM rename_queue WHERE scene_id='42'").fetchone()
+        activity = conn.execute("SELECT status, detail FROM activity_log WHERE scene_id='42' ORDER BY id DESC LIMIT 1").fetchone()
+        conn.close()
+
+        assert row_after is None
+        assert activity[0] == "cancelled"
+        assert "original filename preserved on disk" in activity[1]
+
+        # Verify nothing is claimed even after debounce period expires
+        scene_id, next_at, pending = claim_due_rename(db, now + 60.0)
+        assert scene_id is None
+        assert pending == 0
+
+        # Filename on disk remains untouched
+        assert video.exists()
+        assert video.name == "yb_17_sc04.vid-720.mp4"
