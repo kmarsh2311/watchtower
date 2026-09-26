@@ -1174,3 +1174,18 @@ test("Cascade renames on performer and studio updates setting defaults to off", 
   // 3. Status card reflects whether cascade is active
   assert.match(javascript, /config\.renameOnPerformerStudioUpdates \? "Renames on scene, studio & performer edits" : "Renames on direct scene edits"/);
 });
+
+test("Failed automatic renames appear in Needs Attention with Retry and Dismiss actions", () => {
+  assert.match(javascript, /failedRenames = \(payload\.failed_renames \|\| \[\]\)\.length/);
+  assert.match(javascript, /failedRenames = data\?\.failed_renames \|\| \[\]/);
+  assert.match(javascript, /handleRetryRename/);
+  assert.match(javascript, /handleDismissRename/);
+  assert.match(javascript, /handleRetryAllRenames/);
+  assert.match(javascript, /handleDismissAllRenames/);
+  assert.match(javascript, /RETRY ALL RENAMES/);
+  assert.match(javascript, /DISMISS ALL RENAMES/);
+  assert.match(javascript, /! RENAME FAILED:/);
+  assert.match(javascript, /RENAME FAILED/);
+  assert.match(javascript, /⟳ RETRY RENAME/);
+  assert.match(javascript, /✕ DISMISS ALERT/);
+});

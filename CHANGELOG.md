@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.19 — 2026-09-26
+
+- **Amber Lighthouse Alert & Quick Actions for Failed Renames**: Top navbar lighthouse beacon now glows amber (`warning` tone) whenever an automatic rename fails or requires attention. Failed renames appear directly under **Needs Attention** with full error descriptions, direct **`⟳ RETRY RENAME`**, **`✕ DISMISS ALERT`**, and **`⚡ EDIT WITH FASTTAG`** / **`🎬 OPEN SCENE`** links, plus batch retry/dismiss.
+- **Self-Healing Duplicate & Ghost File Pruning**: When scenes are updated or refreshed, Watchtower now automatically purges stale or deleted duplicate file records from its inventory (`DELETE FROM files WHERE scene_id=? AND file_id NOT IN (...)`) and prioritizes active on-disk files. This permanently prevents ghost file references from causing rename errors after duplicate resolution in Stash.
+- **Failed Rename Queue Recovery**: Calling retry on a pending rename immediately resets failed renames to available with cleared errors, allowing immediate reprocessing without database intervention.
+
 ## 1.0.18 — 2026-09-24
 
 - **Rename & Filing Action Controls**: Enabled `Rename Now` and `Cancel Rename` action buttons while idle and properly disabled during in-flight operations, ensuring quick execution without race conditions.

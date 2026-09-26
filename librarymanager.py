@@ -1483,6 +1483,13 @@ def main():
         result = filesystem_monitor_summary(database_path)
         result.pop("token", None)
         result["incoming"] = incoming_summary(database_path, config=config)
+        connection = connect(database_path)
+        try:
+            result["rename_queue"] = {row["status"]: row["count"] for row in connection.execute(
+                "SELECT status,COUNT(*) AS count FROM rename_queue GROUP BY status"
+            )}
+        finally:
+            connection.close()
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "live_status":
         stash = StashInterface(plugin_input["server_connection"])

@@ -1176,7 +1176,8 @@
     const attentionEvents = (payload.pending_events || []).filter(event => !event.processing_state).length;
     const groupedReconciliation = (payload.grouped_reconciliation || []).length;
     const filingRecovery = (payload.filing_proposals || []).filter(item => item.status === "needs_recovery").length;
-    const alertCount = failedIncoming + filingAttentionIncoming + unavailableRoots + attentionEvents + groupedReconciliation + filingRecovery + (stale ? 1 : 0);
+    const failedRenames = (payload.failed_renames || []).length;
+    const alertCount = failedIncoming + filingAttentionIncoming + unavailableRoots + attentionEvents + groupedReconciliation + filingRecovery + failedRenames + (stale ? 1 : 0);
     return {
       watcher: {
         active: watcherRunning,
@@ -2366,6 +2367,58 @@
     
 
 
+    async function handleRetryRename(sceneId) {
+      setBusy(`retry_rename:${sceneId}`); setError("");
+      try {
+        await operation("execute_pending_rename_now", { scene_id: sceneId });
+        await refresh();
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleDismissRename(sceneId) {
+      setBusy(`dismiss_rename:${sceneId}`); setError("");
+      try {
+        await operation("cancel_pending_rename", { scene_id: sceneId });
+        await refresh();
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleRetryAllRenames() {
+      setBusy("retry_all_renames"); setError("");
+      try {
+        for (const item of failedRenames) {
+          await operation("execute_pending_rename_now", { scene_id: item.scene_id });
+        }
+        await refresh();
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleDismissAllRenames(count) {
+      setBusy("dismiss_all_renames"); setError("");
+      try {
+        for (const item of failedRenames) {
+          await operation("cancel_pending_rename", { scene_id: item.scene_id });
+        }
+        await refresh();
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
     async function handleRetryIncoming(path) {
       setBusy("retry_incoming"); setError("");
       try {
@@ -2645,6 +2698,7 @@
       const deferredMoves = unresolved.filter(e => e.processing_state === "deferred");
       const attentionEvents = unresolved.filter(e => !e.processing_state);
       const groupedReconciliation = data?.grouped_reconciliation || [];
+      const failedRenames = data?.failed_renames || [];
 
       const filingProposals = data?.filing_proposals || [];
       const activeFilingTransfers = data?.active_filing_transfers || [];
@@ -2751,6 +2805,18 @@
                 disabled: !!busy,
                 onClick: () => handleDismissAllIncoming(failedIncoming.length)
               }, `✕ DISMISS ALL (${failedIncoming.length})`),
+              failedRenames.length > 1 && React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn retry",
+                disabled: !!busy,
+                onClick: handleRetryAllRenames
+              }, React.createElement(React.Fragment, null, React.createElement(RestartIcon, { size: 13 }), ` RETRY ALL RENAMES (${failedRenames.length})`)),
+              failedRenames.length > 1 && React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn dismiss",
+                disabled: !!busy,
+                onClick: () => handleDismissAllRenames(failedRenames.length)
+              }, `✕ DISMISS ALL RENAMES (${failedRenames.length})`),
               attentionCount > 1 && React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn dismiss",
@@ -2770,6 +2836,57 @@
               monitor.stale_reason || "The watcher stopped sending its expected heartbeat."),
             React.createElement("p", { className: "lm-terminal-attention-fix" },
               "→ Fix: Click RESTART WATCHER above. This restarts monitoring without changing your library or saved settings.")),
+
+          failedRenames.map(item => {
+            const sceneId = item.scene_id;
+            const displayTitle = item.title || item.basename || `Scene ${sceneId}`;
+            return React.createElement("div", {
+              className: "lm-terminal-attention-item failed",
+              key: `failed-rename-${sceneId}`,
+              "data-scene-id": sceneId
+            },
+              React.createElement("div", { className: "lm-terminal-attention-title" },
+                React.createElement("strong", null, `! RENAME FAILED: ${displayTitle}`),
+                React.createElement("span", { className: "lm-terminal-badge error" }, "RENAME FAILED")),
+              React.createElement("p", { className: "lm-terminal-attention-detail" },
+                React.createElement("b", null, "Reason: "),
+                item.last_error || "Automatic rename query failed."),
+              React.createElement("p", { className: "lm-terminal-attention-sub" },
+                `Scene: `,
+                React.createElement("span", { className: "scene-card lm-scene-pill-card", onClick: e => e.stopPropagation() },
+                  SceneLink(sceneId, `Scene ${sceneId}`, "lm-terminal-stream-pill")
+                ),
+                item.path ? ` • Location: ${item.path}` : "",
+                ` • Attempts: ${item.attempts || 1}`),
+              React.createElement("p", { className: "lm-terminal-attention-fix" },
+                "→ Fix: Click RETRY RENAME to re-evaluate this scene now. Click DISMISS ALERT to clear this warning and keep the current filename."),
+              React.createElement("div", { className: "lm-terminal-actions" },
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn retry",
+                  disabled: !!busy,
+                  onClick: () => handleRetryRename(sceneId)
+                }, busy === `retry_rename:${sceneId}` ? "⟳ RETRYING…" : "⟳ RETRY RENAME"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn dismiss",
+                  disabled: !!busy,
+                  onClick: () => handleDismissRename(sceneId)
+                }, "✕ DISMISS ALERT"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn details",
+                  title: window.FastTag ? "Open this scene in FastTag" : "Open Scene in Stash",
+                  onClick: (e) => {
+                    e.stopPropagation();
+                    if (window.FastTag) {
+                      openBacklogFastTag(e, sceneId);
+                    } else {
+                      window.open(`/scenes/${sceneId}`, "_blank", "noopener");
+                    }
+                  }
+                }, window.FastTag ? "⚡ EDIT WITH FASTTAG" : "🎬 OPEN SCENE")));
+          }),
 
           failedIncoming.map(item => React.createElement("div", { className: "lm-terminal-attention-item failed", key: item.path },
             React.createElement("div", { className: "lm-terminal-attention-title" },
@@ -5876,6 +5993,7 @@
         const attentionCount = status.attention_events != null ? status.attention_events : Math.max(0, pending - activeMovesCount);
         const incomingFailed = status.incoming?.failed || 0;
         const incomingWaiting = status.incoming?.waiting || 0;
+        const renameFailed = status.rename_queue?.failed || 0;
         let tone = "healthy";
         let title = `Library Manager: watching ${status.roots?.length || 0} library folders`;
         if (status.state !== "running" || heartbeatAge > 15000) {
@@ -5886,9 +6004,11 @@
           title = unavailable
             ? `Library Manager warning: ${unavailable} library folder${unavailable === 1 ? " is" : "s are"} unavailable`
             : `Library Manager warning: ${incomingFailed} completed video${incomingFailed === 1 ? " could" : "s could"} not be added`;
-        } else if (attentionCount) {
+        } else if (attentionCount || renameFailed) {
           tone = "warning";
-          title = `Library Manager: listening; ${attentionCount} detected change${attentionCount === 1 ? " needs" : "s need"} review`;
+          title = attentionCount
+            ? `Library Manager: listening; ${attentionCount} detected change${attentionCount === 1 ? " needs" : "s need"} review`
+            : `Library Manager: ${renameFailed} automatic filename rename${renameFailed === 1 ? " requires" : "s require"} attention`;
         } else if (activeMovesCount) {
           tone = "healthy";
           title = `Library Manager: watching; reconnecting moved file`;
@@ -5945,6 +6065,7 @@
           React.createElement("div", null, React.createElement("span", null, "Watched Folders:"), React.createElement("strong", null, `${health.status?.roots?.length || 0}`)),
           React.createElement("div", null, React.createElement("span", null, "Unreviewed Changes:"), React.createElement("strong", null, `${health.status?.attention_events != null ? health.status.attention_events : Math.max(0, (health.status?.pending_events || 0) - (health.status?.active_moves?.length || 0))}`)),
           React.createElement("div", null, React.createElement("span", null, "Failed Downloads:"), React.createElement("strong", null, `${health.status?.incoming?.failed || 0}`)),
+          React.createElement("div", null, React.createElement("span", null, "Failed Renames:"), React.createElement("strong", null, `${health.status?.rename_queue?.failed || 0}`)),
           React.createElement("div", null, React.createElement("span", null, "Incoming Finishing:"), React.createElement("strong", null, `${health.status?.incoming?.waiting || 0}`))),
         React.createElement(NavLink, { to: PATH, className: "lm-navbar-hud-link", onClick: () => setShowHud(false) },
           "Open Watchtower Dashboard ↗"))

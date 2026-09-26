@@ -570,3 +570,53 @@ class TestQueueFilingProposalHandler:
         # Filename on disk remains untouched
         assert video.exists()
         assert video.name == "yb_17_sc04.vid-720.mp4"
+
+    def test_make_pending_rename_due_recovers_failed_status_and_clears_error(self, tmp_path):
+        """Failed renames can be reset to pending and immediately claimed via make_pending_rename_due."""
+        from librarymanager_core import connect, make_pending_rename_due, claim_due_rename, dashboard_data, cancel_pending_rename
+        db = _make_db(tmp_path)
+        video = tmp_path / "scene_99.mp4"
+        video.write_bytes(b"content")
+        now = time.time()
+        conn = connect(db)
+        conn.execute(
+            "INSERT INTO files(file_id, path, basename, scene_id, title, exists_on_disk, first_seen_at, last_seen_at) VALUES ('f99', ?, ?, '99', 'Scene Title 99', 1, ?, ?)",
+            (str(video), video.name, now, now)
+        )
+        conn.execute(
+            "INSERT INTO rename_queue(scene_id, enqueued_at, available_at, status, attempts, last_error) VALUES ('99', ?, ?, 'failed', 2, '200 OK query failed')",
+            (now, now + 100)
+        )
+        conn.commit()
+        conn.close()
+
+        # Check dashboard_data includes failed_renames
+        data = dashboard_data(db)
+        assert data["rename_queue"].get("failed") == 1
+        assert len(data["failed_renames"]) == 1
+        failed_item = data["failed_renames"][0]
+        assert failed_item["scene_id"] == "99"
+        assert failed_item["title"] == "Scene Title 99"
+        assert failed_item["last_error"] == "200 OK query failed"
+        assert failed_item["path"] == str(video)
+
+        # Execute retry: make_pending_rename_due
+        ok = make_pending_rename_due(db, "99")
+        assert ok is True
+
+        conn = connect(db)
+        row = conn.execute("SELECT status, available_at, last_error FROM rename_queue WHERE scene_id='99'").fetchone()
+        conn.close()
+        assert row["status"] == "pending"
+        assert row["last_error"] is None
+        assert row["available_at"] < time.time()
+
+        # Claim due rename succeeds
+        scene_id, next_at, pending = claim_due_rename(db, time.time())
+        assert scene_id == "99"
+
+        # Cancel/dismiss removes from queue
+        cancel_pending_rename(db, "99")
+        data_after = dashboard_data(db)
+        assert data_after["rename_queue"].get("failed", 0) == 0
+        assert len(data_after["failed_renames"]) == 0

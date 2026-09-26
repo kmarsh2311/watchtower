@@ -1542,6 +1542,24 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
         queue_counts = {row["status"]: row["count"] for row in connection.execute(
             "SELECT status,COUNT(*) AS count FROM rename_queue GROUP BY status"
         )}
+        failed_renames = []
+        if queue_counts.get("failed", 0) > 0:
+            failed_renames = [
+                dict(row) for row in connection.execute(
+                    """SELECT q.scene_id, q.enqueued_at, q.available_at, q.attempts, q.last_error,
+                              COALESCE(f.path, '') AS path,
+                              COALESCE(f.basename, '') AS basename,
+                              COALESCE(f.title, '') AS title
+                       FROM rename_queue q
+                       LEFT JOIN (
+                           SELECT scene_id, path, basename, title,
+                                  ROW_NUMBER() OVER (PARTITION BY scene_id ORDER BY exists_on_disk DESC, last_seen_at DESC, CAST(file_id AS INTEGER) DESC) AS rn
+                           FROM files
+                       ) f ON f.scene_id = q.scene_id AND f.rn = 1
+                       WHERE q.status = 'failed'
+                       ORDER BY q.enqueued_at DESC LIMIT 50"""
+                ).fetchall()
+            ]
         preview_run = connection.execute(
             "SELECT * FROM filename_preview_runs WHERE status='complete' ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -1560,6 +1578,7 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
         return {
             "inventory": dict(inventory_row) if inventory_row else None,
             "rename_queue": queue_counts,
+            "failed_renames": failed_renames,
             "monitor": monitor,
             "activity": recent_activity(database_path, activity_limit),
             "filename_preview": {"run": dict(preview_run), "rows": preview_rows} if preview_run else None,
@@ -1976,6 +1995,14 @@ def refresh_scene_inventory(database_path: Path, scene: dict) -> int:
         except Exception:
             pass
 
+        current_file_ids = [str(r["file_id"]) for r in records if r.get("file_id")]
+        if current_file_ids:
+            placeholders = ",".join("?" for _ in current_file_ids)
+            connection.execute(
+                f"DELETE FROM files WHERE scene_id=? AND file_id NOT IN ({placeholders})",
+                (str(scene["id"]), *current_file_ids)
+            )
+
         for record in records:
             try:
                 exists = os.path.isfile(record["path"])
@@ -2100,7 +2127,9 @@ def make_pending_rename_due(database_path: Path, scene_id: str) -> bool:
     connection = connect(database_path)
     try:
         connection.execute(
-            "UPDATE rename_queue SET available_at=? WHERE scene_id=? AND status='pending'",
+            """UPDATE rename_queue
+               SET status='pending', available_at=?, last_error=NULL, processing_started_at=NULL
+               WHERE scene_id=?""",
             (time.time() - 1.0, str(scene_id))
         )
         changes = connection.execute("SELECT changes()").fetchone()[0]
@@ -4090,10 +4119,17 @@ def preview_scene_filename(database_path: Path, scene_id: str, filename_options:
     """Return the latest calculated filename proposal for one scene."""
     connection = connect(database_path)
     try:
-        row = connection.execute(
-            "SELECT * FROM files WHERE scene_id=? AND exists_on_disk=1 ORDER BY file_id LIMIT 1",
+        rows = connection.execute(
+            "SELECT * FROM files WHERE scene_id=? AND exists_on_disk=1 ORDER BY last_seen_at DESC, CAST(file_id AS INTEGER) DESC",
             (str(scene_id),),
-        ).fetchone()
+        ).fetchall()
+        row = None
+        for r in rows:
+            if Path(r["path"]).is_file():
+                row = r
+                break
+        if not row and rows:
+            row = rows[0]
         if not row:
             return {"scene_id": str(scene_id), "status": "blocked", "reason": "No present inventoried file for this scene"}
 
