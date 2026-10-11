@@ -734,9 +734,29 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
         first_bad = incoming_multi["folders"][0]
         audit(database_path, "incoming", "incoming folder", "disabled", severity="warning",
               old_path=first_bad["path"] or None, detail=first_bad["reason"])
+    conn = dict(server_connection or {})
+    if not conn.get("ApiKey") and stash:
+        try:
+            api_key = None
+            session = getattr(stash, "s", None)
+            headers = getattr(session, "headers", None)
+            if isinstance(headers, dict) or hasattr(headers, "get"):
+                raw_header_key = headers.get("ApiKey")
+                if isinstance(raw_header_key, str) and raw_header_key.strip():
+                    api_key = raw_header_key.strip()
+            if not api_key and hasattr(stash, "call_GQL"):
+                cfg = stash.call_GQL("query getApiKey{ configuration { general { apiKey } } }")
+                if isinstance(cfg, dict):
+                    raw_key = ((cfg.get("configuration") or {}).get("general") or {}).get("apiKey")
+                    if isinstance(raw_key, str) and raw_key.strip():
+                        api_key = raw_key.strip()
+            if api_key:
+                conn["ApiKey"] = api_key
+        except Exception:
+            pass
     runtime_path = Path(__file__).with_name("monitor-runtime.json")
     runtime_path.write_text(json.dumps({
-        "server_connection": server_connection or {},
+        "server_connection": conn,
         "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
         "transcoder_replacement_compatibility": config.get("transcoderReplacementCompatibility") is True,
         "mac_notifications": config.get("macNotifications") is True,

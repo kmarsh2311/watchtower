@@ -15,7 +15,10 @@ def main():
     parser.add_argument("--runtime", required=True)
     args = parser.parse_args()
     runtime = json.loads(Path(args.runtime).read_text(encoding="utf-8"))
-    stash = StashInterface(runtime.get("server_connection") or {})
+    try:
+        stash = StashInterface(runtime.get("server_connection") or {}, force_api_key=True)
+    except TypeError:
+        stash = StashInterface(runtime.get("server_connection") or {})
     config = stash.find_plugin_config("librarymanager") or {}
     if config.get("autoStartMonitor") is True:
         start_filesystem_monitor(stash, Path(runtime["database"]), runtime.get("server_connection") or {})

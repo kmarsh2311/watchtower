@@ -1565,11 +1565,17 @@ class MoveWorker(threading.Thread):
         except Exception as error:
             with self.lock:
                 self.deferred_moves.pop((source, destination), None)
+            detail = str(error)
+            if "401" in detail and "Unauthorized" in detail:
+                detail = (
+                    f"401 Unauthorized: Stash session expired or API key missing ({detail}). "
+                    "If authentication is enabled, generate an API Key in Stash Settings -> Security and restart the monitor."
+                )
             record_activity(self.database_path, "reconciliation", "external move", "failed",
-                            severity="error", old_path=source, new_path=destination, detail=str(error))
+                            severity="error", old_path=source, new_path=destination, detail=detail)
             notify(self.notifications, f"Move reconciliation failed: {Path(destination).name}")
             if compatibility_candidate:
-                promote_transcoder_review(self.database_path, source, str(error))
+                promote_transcoder_review(self.database_path, source, detail)
         finally:
             with self.lock:
                 if self.active_move == (source, destination):
@@ -2464,13 +2470,19 @@ class CompletedDownloadWorker(threading.Thread):
                     except Exception as save_err:
                         logger.warning("Could not update state for %s after scan failure: %s", path, save_err)
                 else:
+                    err_detail = str(error)
+                    if "401" in err_detail and "Unauthorized" in err_detail:
+                        err_detail = (
+                            f"401 Unauthorized: Stash session expired or API key missing ({err_detail}). "
+                            "If authentication is enabled, generate an API Key in Stash Settings -> Security and restart the monitor."
+                        )
                     try:
-                        self._save_state(path, "failed", attempts=attempts, detail=str(error))
+                        self._save_state(path, "failed", attempts=attempts, detail=err_detail)
                     except Exception as save_err:
                         logger.warning("Could not mark %s failed: %s", path, save_err)
                     try:
                         record_activity(self.database_path, "incoming", "completed video scan", "failed",
-                                        severity="error", new_path=path, detail=str(error))
+                                        severity="error", new_path=path, detail=err_detail)
                     except Exception as act_err:
                         logger.warning("Could not record failure activity for %s: %s", path, act_err)
                     notify(self.notifications, f"Could not add completed video: {Path(path).name}")
@@ -3595,7 +3607,10 @@ def main():
             runtime_path.unlink(missing_ok=True)
         except Exception as exc:
             logger.debug("Failed to read runtime config from %s: %s", runtime_path, exc)
-    stash = StashInterface(runtime["server_connection"])
+    try:
+        stash = StashInterface(runtime.get("server_connection") or {}, force_api_key=True)
+    except TypeError:
+        stash = StashInterface(runtime.get("server_connection") or {})
     worker = MoveWorker(database_path, stash, runtime.get("automatic_move_reconciliation") is True,
                         runtime.get("mac_notifications") is True,
                         runtime.get("transcoder_replacement_compatibility") is True)

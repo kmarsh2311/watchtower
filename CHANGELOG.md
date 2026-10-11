@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.20 — 2026-10-11
+
+- **Persistent API Key Authentication for Long-Running Daemons**: Instantiated background filesystem monitor daemons with `force_api_key=True` and proactively embedded Stash API keys into the monitor runtime. This prevents GraphQL queries from expiring or failing with `401 Unauthorized` during long-running background tasks (such as Tdarr/external transcoder replacements and file moves) when web session cookies expire.
+- **Actionable 401 Error Guidance**: When Stash authentication fails or credentials expire, Watchtower now displays clear, actionable guidance advising users to verify their API key in Stash Settings → Security rather than displaying raw GraphQL errors.
+
 ## 1.0.19 — 2026-09-26
 
 - **Amber Lighthouse Alert & Quick Actions for Failed Renames**: Top navbar lighthouse beacon now glows amber (`warning` tone) whenever an automatic rename fails or requires attention. Failed renames appear directly under **Needs Attention** with full error descriptions, direct **`⟳ RETRY RENAME`**, **`✕ DISMISS ALERT`**, and **`⚡ EDIT WITH FASTTAG`** / **`🎬 OPEN SCENE`** links, plus batch retry/dismiss.
