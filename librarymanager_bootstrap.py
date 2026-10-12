@@ -5,6 +5,7 @@ running Python interpreter environment, automatically bootstrapping them if miss
 """
 from __future__ import annotations
 
+import importlib
 import subprocess
 import sys
 from pathlib import Path
@@ -38,10 +39,13 @@ def ensure_dependencies(target_dir: Path | str | None = None) -> None:
     last_error = None
     for cmd in install_commands:
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if res.returncode == 0:
                 if str(dest_dir) not in sys.path:
                     sys.path.insert(0, str(dest_dir))
+                # Path finders cache directory listings; clear them so packages
+                # installed moments ago by pip are discoverable in this process.
+                importlib.invalidate_caches()
                 try:
                     import stashapi  # noqa: F401
                     from stashapi.stashapp import StashInterface  # noqa: F401

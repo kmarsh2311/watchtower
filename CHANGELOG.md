@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Dependency bootstrap hardening**: Clear Python import caches after `stashapp-tools` is installed so it is reliably importable in the same process, and reduce the per-attempt pip timeout from 90s to 60s so stalled networks fail faster.
+
 ## 1.0.21 — 2026-10-12
 
 - **Automated Runtime Dependency Bootstrapping (Windows & Fresh Python Installs)**: Added `librarymanager_bootstrap.py` which automatically detects missing `stashapp-tools` (`stashapi`) at startup and silently installs it into the active Python interpreter environment. This eliminates `ModuleNotFoundError: No module named 'stashapi'` (`exit status 1`) errors for users who install or upgrade Python on Windows without pre-installing pip dependencies.
