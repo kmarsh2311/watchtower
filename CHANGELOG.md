@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **Concurrent-startup race no longer reported as a failed start**: When two startups race (the Stash startup hook, the UI start button or the automatic restart), the loser's monitor correctly exits cleanly because the winner already owns the database. `start_filesystem_monitor` treated that clean exit as a failure and raised `Filesystem monitor exited during startup (code 0)`, even though the winning monitor was starting fine. It now waits (up to 60s) for the winning monitor to reach `running` and reports success. Real crashes and clean exits with no live owner are still reported as errors.
 - **Dependency bootstrap hardening**: Clear Python import caches after `stashapp-tools` is installed so it is reliably importable in the same process, and reduce the per-attempt pip timeout from 90s to 60s so stalled networks fail faster.
 
 ## 1.0.21 — 2026-10-12

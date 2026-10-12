@@ -4,8 +4,9 @@ import tempfile
 import unittest
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from librarymanager import start_filesystem_monitor
 from librarymanager_core import SCHEMA, connect, utc_now
 from librarymanager_monitor import claim_monitor_ownership
 
@@ -96,6 +97,44 @@ class MonitorOwnershipTests(unittest.TestCase):
         conn.close()
         self.assertEqual(row["token"], "token-new")
         self.assertEqual(row["pid"], 3003)
+
+
+class DuplicateStartupRaceTests(unittest.TestCase):
+    """Two startups (Stash startup hook + a UI/operation call) can race. The loser's monitor
+    exits cleanly with code 0 because the winner already owns the database. That must not
+    be reported to the user as a failed start."""
+
+    def _run_start(self, summaries, returncode=0):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            process = MagicMock()
+            process.poll.return_value = returncode
+            process.returncode = returncode
+            stash = MagicMock()
+            stash.find_plugin_config.return_value = {}
+            with patch("librarymanager.fetch_library_roots", return_value=[str(root)]), \
+                    patch("librarymanager.filesystem_monitor_summary", side_effect=summaries), \
+                    patch("librarymanager.subprocess.Popen", return_value=process), \
+                    patch("librarymanager.time.sleep"):
+                return start_filesystem_monitor(stash, root / "db.sqlite3", {})
+
+    def test_duplicate_startup_waits_for_the_winning_monitor(self):
+        stopped = {"state": "stopped", "pid": None}
+        winner_starting = {"state": "starting", "pid": 4321, "pid_alive": True, "token": "winner"}
+        winner_running = {"state": "running", "pid": 4321, "pid_alive": True, "token": "winner"}
+        result = self._run_start([stopped, winner_starting, winner_starting, winner_starting, winner_running])
+        self.assertEqual(result["state"], "running")
+
+    def test_clean_exit_with_no_other_owner_is_still_an_error(self):
+        stopped = {"state": "stopped", "pid": None}
+        with self.assertRaisesRegex(RuntimeError, "exited during startup"):
+            self._run_start([stopped] + [stopped] * 400)
+
+    def test_crash_exit_is_still_an_error_even_if_a_stale_owner_is_listed(self):
+        stopped = {"state": "stopped", "pid": None}
+        stale = {"state": "starting", "pid": 4321, "pid_alive": True, "token": "winner"}
+        with self.assertRaisesRegex(RuntimeError, "exited during startup"):
+            self._run_start([stopped, stale], returncode=1)
 
 
 if __name__ == "__main__":

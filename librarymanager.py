@@ -798,10 +798,40 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
         if status.get("state") == "running":
             return {**status, "message": "Read-only filesystem monitor started"}
         if process.poll() is not None:
+            if process.returncode == 0:
+                # A monitor that exits cleanly during startup is the duplicate-startup guard:
+                # another startup (for example the Stash startup hook racing a UI or operation
+                # call) claimed the database first. That is not a failure. Wait for the
+                # winning monitor to finish starting and report it as the running monitor.
+                owner = _wait_for_other_monitor(database_path, token)
+                if owner is not None:
+                    return {**owner, "message": "Filesystem monitor is already running (started by a concurrent startup)"}
             raise RuntimeError(
                 f"Filesystem monitor exited during startup (code {process.returncode}); inspect {log_path}"
             )
     raise RuntimeError(f"Filesystem monitor did not start; inspect {log_path}")
+
+
+def _wait_for_other_monitor(database_path, own_token, timeout=60.0):
+    """Wait for a different, live monitor to reach 'running'. Return its status, or None.
+
+    Returns None immediately when no other live monitor owns the database, so a genuine
+    failed start is still reported to the user.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        status = filesystem_monitor_summary(database_path)
+        if status.get("state") == "running":
+            return status
+        other_is_starting = (
+            status.get("state") == "starting"
+            and status.get("token") not in (None, own_token)
+            and status.get("pid")
+            and status.get("pid_alive")
+        )
+        if not other_is_starting or time.monotonic() >= deadline:
+            return None
+        time.sleep(0.25)
 
 
 def reload_monitor_runtime(stash, database_path):
