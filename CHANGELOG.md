@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.21 — 2026-10-12
+
+- **Automated Runtime Dependency Bootstrapping (Windows & Fresh Python Installs)**: Added `librarymanager_bootstrap.py` which automatically detects missing `stashapp-tools` (`stashapi`) at startup and silently installs it into the active Python interpreter environment. This eliminates `ModuleNotFoundError: No module named 'stashapi'` (`exit status 1`) errors for users who install or upgrade Python on Windows without pre-installing pip dependencies.
+- **Cross-Platform Stale Monitor Lock Eviction (Linux PID Recycling)**: Hardened `claim_monitor_ownership` in `librarymanager_monitor.py` to inspect process commandlines (`_pid_matches_monitor`) and heartbeat age. When a Linux server or service restarts and a recycled PID belongs to an unrelated process or the previous monitor's heartbeat is dead (>45s), Watchtower now automatically evicts the stale lock and launches cleanly instead of blocking startup with `Another Watchtower monitor already owns this database`.
+- **Responsive Stale Monitor Recovery**: Enhanced `stop_filesystem_monitor` to immediately reset stale monitor database status to `stopped` without hanging when an orphaned PID or expired heartbeat is detected.
+
 ## 1.0.20 — 2026-10-11
 
 - **Persistent API Key Authentication for Long-Running Daemons**: Instantiated background filesystem monitor daemons with `force_api_key=True` and proactively embedded Stash API keys into the monitor runtime. This prevents GraphQL queries from expiring or failing with `401 Unauthorized` during long-running background tasks (such as Tdarr/external transcoder replacements and file moves) when web session cookies expire.

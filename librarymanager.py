@@ -16,6 +16,10 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from librarymanager_bootstrap import ensure_dependencies
+
+ensure_dependencies()
+
 from stashapi.stashapp import StashInterface
 
 from librarymanager_core import (
@@ -846,7 +850,9 @@ def stop_filesystem_monitor(database_path):
     status = filesystem_monitor_summary(database_path)
     if status.get("raw_state", status.get("state")) != "running" or not status.get("token"):
         return {**status, "message": "Filesystem monitor is already stopped"}
-    if status.get("is_stale") and status.get("pid") and not status.get("pid_alive"):
+    if status.get("is_stale") and status.get("pid") and (
+        not status.get("pid_alive") or status.get("pid_matches_monitor") is False or (status.get("heartbeat_age") or 0.0) > 45.0
+    ):
         connection = connect(database_path)
         try:
             connection.execute("UPDATE filesystem_monitor_status SET state='stopped' WHERE id=1")

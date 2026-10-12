@@ -5,6 +5,10 @@ import argparse
 import json
 from pathlib import Path
 
+from librarymanager_bootstrap import ensure_dependencies
+
+ensure_dependencies()
+
 from stashapi.stashapp import StashInterface
 
 from librarymanager import start_filesystem_monitor

@@ -366,7 +366,12 @@ import shutil
 import threading
 import queue
 import time
+from datetime import datetime, timezone
 from pathlib import Path
+
+from librarymanager_bootstrap import ensure_dependencies
+
+ensure_dependencies()
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -384,6 +389,7 @@ from librarymanager_core import (
                                  opensubtitles_hash, record_activity, record_filesystem_event, record_monitor_lifecycle,
                                  resolve_filesystem_event, refresh_scene_inventory, utc_now,
                                  process_next_checksum_job, reset_checksum_jobs_for_monitor_restart, _is_pid_alive,
+                                 _pid_matches_monitor,
     recover_stale_active_transfers,
     recover_abandoned_processing_queue,
     _move_file,
@@ -3433,13 +3439,39 @@ def claim_monitor_ownership(database_path, token, pid, roots, unavailable):
     try:
         connection.execute("BEGIN IMMEDIATE")
         current = connection.execute(
-            "SELECT token,pid,state FROM filesystem_monitor_status WHERE id=1"
+            "SELECT token,pid,state,heartbeat_at FROM filesystem_monitor_status WHERE id=1"
         ).fetchone()
         if current and current["token"] != token and current["state"] in ("starting", "running"):
             existing_pid = int(current["pid"] or 0)
             if existing_pid and _is_pid_alive(existing_pid):
-                connection.rollback()
-                return False
+                # Check heartbeat freshness (monitors update heartbeat every 2s)
+                heartbeat_age = None
+                if current["heartbeat_at"]:
+                    try:
+                        hb_dt = datetime.fromisoformat(current["heartbeat_at"])
+                        if hb_dt.tzinfo is None:
+                            hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+                        heartbeat_age = (datetime.now(timezone.utc) - hb_dt).total_seconds()
+                    except Exception:
+                        pass
+
+                # If heartbeat is fresh (<= 45s), an active monitor is owning the database.
+                # However, if heartbeat is older than 5s and the PID demonstrably belongs to
+                # an unrelated process (Linux PID recycling), evict the stale lock.
+                if heartbeat_age is not None and heartbeat_age <= 45.0:
+                    if heartbeat_age > 5.0 and _pid_matches_monitor(existing_pid, current["token"]) is False:
+                        logger.warning(
+                            "Evicting stale monitor ownership: PID %d does not match Watchtower monitor (recycled PID)",
+                            existing_pid
+                        )
+                    else:
+                        connection.rollback()
+                        return False
+                else:
+                    logger.warning(
+                        "Evicting stale monitor ownership: PID %d heartbeat is %.1fs old (>45s)",
+                        existing_pid, heartbeat_age or 0.0
+                    )
         connection.execute(
             """UPDATE filesystem_monitor_status SET token=?,pid=?,state='starting',started_at=?,
                    heartbeat_at=?,roots_json=?,unavailable_roots_json=?,active_moves_json='[]' WHERE id=1""",
