@@ -32,7 +32,8 @@ from librarymanager_core import (
                                  pending_transcoder_candidates, promote_transcoder_candidate, utc_now,
                                  find_duplicate_scene_file, inspect_backlog_duplicate,
                                  get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
-                                 cancel_expected_filesystem_delete, _is_pid_alive, _terminate_pid)
+                                 cancel_expected_filesystem_delete, _is_pid_alive, _terminate_pid,
+                                 get_configured_incoming_folders, _is_subpath_of)
 from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing, prune_resolved_filing_baseline, invalidate_incoming_discovery_cache, enqueue_filing_transfer, claim_next_filing_transfer, finish_filing_transfer, fail_filing_transfer, set_filing_transfer_job_id, recover_abandoned_processing_queue, recover_stale_active_transfers, get_active_filing_transfers
 
 
@@ -1776,6 +1777,7 @@ def main():
             connection.close()
 
         scene_id = str(file_row.get("scene_id")) if file_row and file_row.get("scene_id") else None
+        file_id = str(file_row.get("file_id")) if file_row and file_row.get("file_id") else None
         detail = ""
         status = "resolved"
         if resolution == "dismiss":
@@ -1802,10 +1804,93 @@ def main():
             destination, evidence = validate_filesystem_scan_action(
                 database_path, event, resolution
             )
+            config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}
+
+            # Query Stash ui task defaults so previews, sprites, covers, phashes are generated
+            scan_flags = {
+                "scanGenerateCovers": True,
+                "scanGeneratePreviews": True,
+                "scanGenerateSprites": True,
+                "scanGeneratePhashes": True,
+            }
             try:
-                job_id = stash.metadata_scan(paths=[destination])
+                ui_res = stash.call_GQL("{ configuration { ui } }")
+                ui_conf = (ui_res or {}).get("configuration", {}).get("ui", {}) or {}
+                ui_scan_defaults = (ui_conf.get("taskDefaults", {}) or {}).get("scan") or {}
+                if isinstance(ui_scan_defaults, dict):
+                    for k, v in ui_scan_defaults.items():
+                        if k.startswith("scanGenerate") and isinstance(v, bool):
+                            scan_flags[k] = v
+            except Exception:
+                pass
+
+            try:
+                job_id = stash.metadata_scan(paths=[destination], flags=scan_flags)
                 if not stash.wait_for_job(job_id, timeout=180):
                     raise ValueError(f"Stash scan job {job_id} did not finish within 3 minutes")
+
+                # Discover the newly created or updated scene in Stash
+                found_scene = None
+                try:
+                    matched_scenes = stash.find_scenes(f={"path": {"value": destination, "modifier": "EQUALS"}})
+                    if not matched_scenes:
+                        matched_scenes = stash.find_scenes(f={"path": {"value": Path(destination).name, "modifier": "INCLUDES"}})
+                        matched_scenes = [
+                            s for s in matched_scenes
+                            if any(
+                                (os.path.samefile(f["path"], destination) if os.path.exists(f.get("path") or "") and os.path.exists(destination) else (f.get("path") == destination))
+                                for f in s.get("files", [])
+                            )
+                        ]
+                    if matched_scenes:
+                        found_scene = matched_scenes[0]
+                except Exception as sc_err:
+                    activity_logger().debug("Could not query scene for %s after scan: %s", destination, sc_err)
+
+                if found_scene:
+                    scene_id = str(found_scene.get("id"))
+                    if found_scene.get("files") and found_scene["files"][0].get("id"):
+                        file_id = str(found_scene["files"][0]["id"])
+
+                    # Update Watchtower local files inventory immediately
+                    try:
+                        refresh_scene_inventory(database_path, found_scene)
+                    except Exception as inv_err:
+                        activity_logger().warning("Failed refreshing inventory for scene %s: %s", scene_id, inv_err)
+
+                    # Generate contact sheet if enabled in Watchtower settings
+                    if config.get("generateContactSheets") is True:
+                        scope = config.get("contactSheetScope") or "all"
+                        in_scope = True
+                        if scope == "incoming":
+                            inc_folders = get_configured_incoming_folders(config)
+                            in_scope = any(_is_subpath_of(Path(destination).resolve(), Path(f).resolve()) for f in inc_folders)
+                        if in_scope:
+                            sheet_p = f"{destination}.jpg"
+                            expect_filesystem_create(database_path, sheet_p)
+                            try:
+                                csm_res = generate_video_contact_sheet(
+                                    destination,
+                                    grid=config.get("contactSheetGrid") or "4x4",
+                                    include_banner=config.get("contactSheetBanner") is not False,
+                                    adjust_vertical=config.get("contactSheetAdjustVertical") is not False,
+                                    custom_script=config.get("contactSheetScript") or "",
+                                    allow_custom_script=config.get("allowCustomContactSheetScript") is True
+                                )
+                                if csm_res.get("status") == "generated":
+                                    sheet_p = csm_res.get("path") or sheet_p
+                                    record_activity(
+                                        database_path,
+                                        "companion",
+                                        "contact sheet generated",
+                                        "recorded",
+                                        scene_id=scene_id,
+                                        new_path=sheet_p,
+                                        detail=f"Generated {csm_res.get('grid', '4x4')} contact sheet for visual file browsing"
+                                    )
+                            except Exception as csm_err:
+                                activity_logger().warning("Contact sheet generation failed for %s: %s", destination, csm_err)
+
                 if resolution == "keep_both":
                     detail = f"User confirmed keeping both files; Stash scan job {job_id} checked {destination}"
                 else:
@@ -1828,10 +1913,10 @@ def main():
         finally:
             connection.close()
         audit(database_path, "filesystem", event["event_type"], status, scene_id=scene_id,
-              file_id=file_row.get("file_id") if file_row else None,
+              file_id=file_id,
               old_path=event.get("source_path"), new_path=event.get("destination_path"), detail=detail,
               metadata={"resolution": resolution})
-        message = json.dumps({"status": status, "detail": detail, "scene_id": scene_id}, ensure_ascii=False)
+        message = json.dumps({"status": status, "detail": detail, "scene_id": scene_id, "file_id": file_id}, ensure_ascii=False)
     elif mode == "reconcile_events":
         stash = StashInterface(plugin_input["server_connection"])
         config = stash.find_plugin_config("librarymanager") or {}
