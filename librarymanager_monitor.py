@@ -389,7 +389,7 @@ from librarymanager_core import (
                                  opensubtitles_hash, record_activity, record_filesystem_event, record_monitor_lifecycle,
                                  resolve_filesystem_event, refresh_scene_inventory, utc_now,
                                  process_next_checksum_job, reset_checksum_jobs_for_monitor_restart, _is_pid_alive,
-                                 _pid_matches_monitor,
+                                 _pid_matches_monitor, _terminate_pid,
     recover_stale_active_transfers,
     recover_abandoned_processing_queue,
     _move_file,
@@ -3415,22 +3415,29 @@ def update_status(database_path, token, pid, state, roots, unavailable, active_m
         connection = connect(database_path)
         try:
             if active_moves is not None:
-                connection.execute(
+                cur = connection.execute(
                     """UPDATE filesystem_monitor_status SET token=?,pid=?,state=?,started_at=COALESCE(started_at,?),
                            heartbeat_at=?,roots_json=?,unavailable_roots_json=?,active_moves_json=? WHERE id=1 AND token=?""",
                     (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable), json.dumps(active_moves), token),
                 )
             else:
-                connection.execute(
+                cur = connection.execute(
                     """UPDATE filesystem_monitor_status SET token=?,pid=?,state=?,started_at=COALESCE(started_at,?),
                            heartbeat_at=?,roots_json=?,unavailable_roots_json=? WHERE id=1 AND token=?""",
                     (token, pid, state, utc_now(), utc_now(), json.dumps(roots), json.dumps(unavailable), token),
                 )
             connection.commit()
+            if cur.rowcount == 0:
+                row = connection.execute("SELECT token FROM filesystem_monitor_status WHERE id=1").fetchone()
+                if row and row["token"] != token:
+                    logger.warning("Monitor ownership was superseded by newer monitor token (%s != %s)", row["token"], token)
+                    return False
+            return True
         finally:
             connection.close()
     except (sqlite3.OperationalError, sqlite3.DatabaseError) as err:
         logger.debug("update_status deferred (DB busy): %s", err)
+        return True
 
 
 def claim_monitor_ownership(database_path, token, pid, roots, unavailable):
@@ -3472,6 +3479,8 @@ def claim_monitor_ownership(database_path, token, pid, roots, unavailable):
                         "Evicting stale monitor ownership: PID %d heartbeat is %.1fs old (>45s)",
                         existing_pid, heartbeat_age or 0.0
                     )
+                    if _pid_matches_monitor(existing_pid, current["token"]) is True:
+                        _terminate_pid(existing_pid)
         connection.execute(
             """UPDATE filesystem_monitor_status SET token=?,pid=?,state='starting',started_at=?,
                    heartbeat_at=?,roots_json=?,unavailable_roots_json=?,active_moves_json='[]' WHERE id=1""",
@@ -3730,10 +3739,12 @@ def main():
                 notify(runtime.get("mac_notifications") is True, f"Library root unavailable: {Path(root).name}")
                 watch = watched_roots.pop(root, None)
                 if watch:
-                    try:
-                        observer.unschedule(watch)
-                    except Exception:
-                        pass
+                    def _unschedule_async(w):
+                        try:
+                            observer.unschedule(w)
+                        except Exception:
+                            pass
+                    threading.Thread(target=_unschedule_async, args=(watch,), daemon=True).start()
 
             for root in recovered:
                 logger.info("Library root reconnected: %s", root)
@@ -3807,7 +3818,9 @@ def main():
                             except Exception:
                                 pass
             active_moves = worker.active_moves_summary() if hasattr(worker, "active_moves_summary") else []
-            update_status(database_path, args.token, os.getpid(), "running", available, unavailable, active_moves=active_moves)
+            if update_status(database_path, args.token, os.getpid(), "running", available, unavailable, active_moves=active_moves) is False:
+                logger.info("Monitor ownership superseded; exiting daemon loop")
+                break
             # Periodically recover stale filing transfers (every 5 minutes)
             _now_epoch = time.monotonic()
             if _now_epoch - _last_stale_transfer_check >= 300:

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Stale Monitor Termination & Reset (`RESTART WATCHER`)**: Fixed an issue where `stop_filesystem_monitor` checked `heartbeat_age` instead of `heartbeat_age_seconds`, which prevented unresponsive monitor processes from being cleanly terminated and caused `RESTART WATCHER` to time out and leave the monitor in a stale state. When evicting or stopping a monitor that has missed heartbeats (>30s), Watchtower now forcefully terminates the hung process and cleanly resets the database state to `stopped`.
+- **Non-blocking Root Unscheduling**: When a monitored library root becomes unreachable or disconnected, unscheduling the watchdog emitter now runs asynchronously in a background thread, preventing slow or hung filesystem mounts from freezing the daemon's heartbeat loop.
+- **Graceful Monitor Process Superseding**: When a newer monitor instance claims database ownership, older monitor processes immediately detect that their token was superseded on the next heartbeat and exit cleanly instead of lingering.
 - **Concurrent-startup race no longer reported as a failed start**: When two startups race (the Stash startup hook, the UI start button or the automatic restart), the loser's monitor correctly exits cleanly because the winner already owns the database. `start_filesystem_monitor` treated that clean exit as a failure and raised `Filesystem monitor exited during startup (code 0)`, even though the winning monitor was starting fine. It now waits (up to 60s) for the winning monitor to reach `running` and reports success. Real crashes and clean exits with no live owner are still reported as errors.
 - **Dependency bootstrap hardening**: Clear Python import caches after `stashapp-tools` is installed so it is reliably importable in the same process, and reduce the per-attempt pip timeout from 90s to 60s so stalled networks fail faster.
 

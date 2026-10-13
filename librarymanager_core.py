@@ -2302,6 +2302,25 @@ def _is_pid_alive(pid: int | None) -> bool:
         return False
 
 
+def _terminate_pid(pid: int | None) -> bool:
+    """Forcefully terminate a known stale or hung process."""
+    if not pid or int(pid) <= 0 or not _is_pid_alive(int(pid)):
+        return False
+    pid_int = int(pid)
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/PID", str(pid_int)], capture_output=True, check=False)
+            return True
+        import signal
+        os.kill(pid_int, signal.SIGTERM)
+        time.sleep(0.2)
+        if _is_pid_alive(pid_int):
+            os.kill(pid_int, signal.SIGKILL)
+        return True
+    except (OSError, Exception):
+        return False
+
+
 def _pid_matches_monitor(pid: int | None, token: str | None):
     """Return True/False when process identity can be checked, otherwise None."""
     if not pid or not token:

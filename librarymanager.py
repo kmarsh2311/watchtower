@@ -32,7 +32,7 @@ from librarymanager_core import (
                                  pending_transcoder_candidates, promote_transcoder_candidate, utc_now,
                                  find_duplicate_scene_file, inspect_backlog_duplicate,
                                  get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
-                                 cancel_expected_filesystem_delete, _is_pid_alive)
+                                 cancel_expected_filesystem_delete, _is_pid_alive, _terminate_pid)
 from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing, prune_resolved_filing_baseline, invalidate_incoming_discovery_cache, enqueue_filing_transfer, claim_next_filing_transfer, finish_filing_transfer, fail_filing_transfer, set_filing_transfer_job_id, recover_abandoned_processing_queue, recover_stale_active_transfers, get_active_filing_transfers
 
 
@@ -880,9 +880,15 @@ def stop_filesystem_monitor(database_path):
     status = filesystem_monitor_summary(database_path)
     if status.get("raw_state", status.get("state")) != "running" or not status.get("token"):
         return {**status, "message": "Filesystem monitor is already stopped"}
+    hb_age = status.get("heartbeat_age_seconds")
+    if hb_age is None:
+        hb_age = status.get("heartbeat_age") or 0.0
     if status.get("is_stale") and status.get("pid") and (
-        not status.get("pid_alive") or status.get("pid_matches_monitor") is False or (status.get("heartbeat_age") or 0.0) > 45.0
+        not status.get("pid_alive") or status.get("pid_matches_monitor") is False or hb_age > 30.0
     ):
+        stale_pid = int(status["pid"])
+        if status.get("pid_alive") and status.get("pid_matches_monitor") is not False:
+            _terminate_pid(stale_pid)
         connection = connect(database_path)
         try:
             connection.execute("UPDATE filesystem_monitor_status SET state='stopped' WHERE id=1")
@@ -891,8 +897,8 @@ def stop_filesystem_monitor(database_path):
             connection.close()
         record_monitor_lifecycle(
             database_path, "MONITOR STOPPED", "stopped",
-            detail=f"MONITOR STOPPED — stale monitor process (PID {status.get('pid')}) reset to stopped",
-            metadata={"pid": status.get("pid")}
+            detail=f"MONITOR STOPPED — stale monitor process (PID {stale_pid}) reset to stopped",
+            metadata={"pid": stale_pid}
         )
         return {**status, "state": "stopped", "raw_state": "stopped", "is_stale": False, "message": "Filesystem monitor was dead and is now reset to stopped"}
     control_path = Path(__file__).with_name("monitor-control.json")

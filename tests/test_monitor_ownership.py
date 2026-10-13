@@ -6,7 +6,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from librarymanager import start_filesystem_monitor
+from librarymanager import start_filesystem_monitor, stop_filesystem_monitor
 from librarymanager_core import SCHEMA, connect, utc_now
 from librarymanager_monitor import claim_monitor_ownership
 
@@ -97,6 +97,44 @@ class MonitorOwnershipTests(unittest.TestCase):
         conn.close()
         self.assertEqual(row["token"], "token-new")
         self.assertEqual(row["pid"], 3003)
+
+    def test_evict_stale_monitor_terminates_old_pid(self):
+        stale_hb = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+        conn = connect(self.db_path)
+        conn.execute(
+            """UPDATE filesystem_monitor_status
+               SET token='token-old', pid=7777, state='running', heartbeat_at=?
+               WHERE id=1""",
+            (stale_hb,),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("librarymanager_monitor._is_pid_alive", return_value=True), \
+             patch("librarymanager_monitor._pid_matches_monitor", return_value=True), \
+             patch("librarymanager_monitor._terminate_pid") as mock_term:
+            claimed = claim_monitor_ownership(self.db_path, "token-new", 3003, ["/data"], [])
+            self.assertTrue(claimed)
+            mock_term.assert_called_once_with(7777)
+
+    def test_stop_stale_monitor_terminates_pid_and_resets_state(self):
+        stale_hb = (datetime.now(timezone.utc) - timedelta(seconds=55)).isoformat()
+        conn = connect(self.db_path)
+        conn.execute(
+            """UPDATE filesystem_monitor_status
+               SET token='token-stale', pid=1212, state='running', heartbeat_at=?
+               WHERE id=1""",
+            (stale_hb,),
+        )
+        conn.commit()
+        conn.close()
+
+        with patch("librarymanager_core._is_pid_alive", return_value=True), \
+             patch("librarymanager_core._pid_matches_monitor", return_value=True), \
+             patch("librarymanager._terminate_pid") as mock_term:
+            result = stop_filesystem_monitor(self.db_path)
+            self.assertEqual(result["state"], "stopped")
+            mock_term.assert_called_once_with(1212)
 
 
 class DuplicateStartupRaceTests(unittest.TestCase):
