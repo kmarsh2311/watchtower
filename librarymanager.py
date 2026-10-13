@@ -1404,8 +1404,11 @@ def main():
         requested_roots = arguments.get("roots")
         if isinstance(requested_roots, list) and len(requested_roots) > 0:
             roots = [r for r in requested_roots if r in all_roots or os.path.exists(r)]
+        elif isinstance(requested_roots, list) and len(requested_roots) == 0:
+            roots = []
         else:
-            roots = all_roots
+            cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
+            roots = [r for r in all_roots if r not in cold_storage_roots]
         result = reconcile_missing_media_across_roots(database_path, stash, roots, config=config)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "add_unindexed_media":

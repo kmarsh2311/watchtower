@@ -172,7 +172,46 @@ class ColdStorageDrivesTests(unittest.TestCase):
                 self.assertIsNone(res)
                 mock_connect.assert_not_called()
 
+    def test_reconcile_missing_media_scans_manually_selected_cold_storage_root(self):
+        import tempfile
+        from librarymanager_core import connect, reconcile_missing_media_across_roots, SCHEMA
+
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "test.sqlite3"
+            conn = connect(db_path)
+            conn.executescript(SCHEMA)
+            conn.close()
+
+            cold_root = "/Volumes/Vault2/Vault2"
+            config = {"coldStorageRoots": [cold_root]}
+
+            walked_roots = []
+            def mock_walk_fn(top, **kwargs):
+                walked_roots.append(top)
+                return []
+
+            with patch("os.path.isdir", return_value=True), patch("os.walk", side_effect=mock_walk_fn):
+                # When caller explicitly passes cold_root (manual sync), it MUST be scanned
+                res = reconcile_missing_media_across_roots(
+                    db_path, stash=None, roots=[cold_root], config=config
+                )
+                self.assertEqual(res["status"], "ok")
+                self.assertIn(cold_root, walked_roots)
+
+                # When roots is None (default sweep), cold_root MUST NOT be scanned
+                walked_roots.clear()
+                mock_stash = MagicMock()
+                mock_stash.call_GQL.return_value = {
+                    "configuration": {"general": {"stashes": [{"path": cold_root}]}}
+                }
+                res_default = reconcile_missing_media_across_roots(
+                    db_path, stash=mock_stash, roots=None, config=config
+                )
+                self.assertEqual(res_default["status"], "ok")
+                self.assertNotIn(cold_root, walked_roots)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

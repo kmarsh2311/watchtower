@@ -3575,14 +3575,19 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
     elif config is None:
         config = {}
 
-    cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
-    candidate_roots = [r for r in (roots or []) if r not in cold_storage_roots]
-
-    if candidate_roots:
-        accessible_roots = [str(r) for r in candidate_roots if os.path.isdir(str(r))]
+    if roots is not None:
+        accessible_roots = [str(r) for r in roots if os.path.isdir(str(r))]
     else:
+        cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
         unavailable = set(get_authoritative_unavailable_roots(database_path)) | cold_storage_roots
-        accessible_roots = [str(r) for r in candidate_roots if r not in unavailable and os.path.isdir(str(r))]
+        all_roots = []
+        if stash:
+            try:
+                res = stash.call_GQL("query { configuration { general { stashes { path } } } }")
+                all_roots = [s["path"] for s in (((res or {}).get("configuration") or {}).get("general") or {}).get("stashes") or [] if s.get("path")]
+            except Exception:
+                all_roots = []
+        accessible_roots = [str(r) for r in all_roots if r not in unavailable and os.path.isdir(str(r))]
 
     now = utc_now()
     connection = connect(database_path)
