@@ -998,24 +998,50 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
             "SELECT initial_count,completed_at FROM filing_baseline_summary WHERE id=1"
         ).fetchone()
         baseline_established = bool(baseline_state and baseline_state["status"] == "complete")
+        incoming_folders = get_configured_incoming_folders(config)
         backlog_eligible_count = 0
         b_paths_set = set()
         active_props = {
             p["source_path"]: p["status"]
             for p in connection.execute("SELECT source_path, status FROM filing_proposals").fetchall()
         }
+
+        renamed_paths = {}
+        for rename_row in connection.execute(
+            """SELECT old_path,new_path FROM activity_log
+               WHERE old_path IS NOT NULL AND new_path IS NOT NULL
+                 AND status IN ('renamed','complete')
+               ORDER BY id ASC"""
+        ).fetchall():
+            renamed_paths[str(rename_row["old_path"])] = str(rename_row["new_path"])
+
+        def current_recorded_path(original_path: str) -> str:
+            candidate = original_path
+            visited = set()
+            while candidate in renamed_paths and candidate not in visited:
+                visited.add(candidate)
+                candidate = renamed_paths[candidate]
+            return candidate if Path(candidate).is_file() else original_path
+
         if baseline_count > 0:
             b_rows = connection.execute("SELECT path FROM filing_incoming_baseline").fetchall()
             for b_row in b_rows:
                 b_path_str = b_row["path"]
+                cur_b_path = current_recorded_path(b_path_str)
+                b_paths_set.add(cur_b_path)
                 b_paths_set.add(b_path_str)
-                b_p = Path(b_path_str)
+                b_p = Path(cur_b_path)
                 if b_p.suffix.lower() in VIDEO_EXTENSIONS:
-                    p_st = active_props.get(b_path_str)
+                    p_st = active_props.get(cur_b_path) or active_props.get(b_path_str)
                     if p_st in ("completed", "pending", "needs_recovery"):
                         continue
                     if b_p.is_file():
-                        backlog_eligible_count += 1
+                        try:
+                            is_inside = any(_is_subpath_of(b_p.resolve(), Path(f).resolve()) for f in incoming_folders) if incoming_folders else True
+                        except Exception:
+                            is_inside = False
+                        if is_inside:
+                            backlog_eligible_count += 1
 
         for ign_row in connection.execute("SELECT path FROM incoming_files WHERE status='ignored'").fetchall():
             ign_p_str = ign_row["path"]
@@ -1025,8 +1051,33 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
                     continue
                 ign_p = Path(ign_p_str)
                 if ign_p.suffix.lower() in VIDEO_EXTENSIONS and ign_p.is_file():
-                    backlog_eligible_count += 1
-        incoming_folders = get_configured_incoming_folders(config)
+                    try:
+                        is_inside = any(_is_subpath_of(ign_p.resolve(), Path(f).resolve()) for f in incoming_folders) if incoming_folders else True
+                    except Exception:
+                        is_inside = False
+                    if is_inside:
+                        backlog_eligible_count += 1
+                        b_paths_set.add(ign_p_str)
+
+        if incoming_folders:
+            active_incoming_states = {
+                r["path"]: r["status"] for r in connection.execute("SELECT path, status FROM incoming_files").fetchall()
+            }
+            discovered_files = discover_incoming_files_cached(
+                incoming_folders,
+                active_incoming_states=active_incoming_states,
+                force_refresh=False
+            )
+            for disc in discovered_files:
+                disc_p_str = disc.get("path")
+                if disc_p_str and disc_p_str not in b_paths_set:
+                    p_st = active_props.get(disc_p_str)
+                    if p_st in ("completed", "pending", "needs_recovery"):
+                        continue
+                    disc_p = Path(disc_p_str)
+                    if disc_p.suffix.lower() in VIDEO_EXTENSIONS and disc_p.is_file():
+                        backlog_eligible_count += 1
+                        b_paths_set.add(disc_p_str)
 
         for row in connection.execute(
             """SELECT path,status,size,stable_since,settle_seconds,attempts,scan_job_id,detail,filing_diagnostic,last_checked_at
