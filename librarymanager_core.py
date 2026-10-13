@@ -419,6 +419,14 @@ CREATE TABLE IF NOT EXISTS duplicate_file_repairs (
     completed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_duplicate_repairs_status ON duplicate_file_repairs(status);
+CREATE TABLE IF NOT EXISTS unindexed_external_media (
+    path TEXT PRIMARY KEY,
+    basename TEXT,
+    size INTEGER,
+    discovered_at TEXT,
+    ignored INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_unindexed_ignored ON unindexed_external_media(ignored);
 """
 
 SCHEMA += RECONCILIATION_SCHEMA
@@ -732,9 +740,10 @@ def _safe_alter(connection: "sqlite3.Connection", table: str, column: str, ddl: 
             raise
 
 
-def _ensure_schema(connection: "sqlite3.Connection", database_path: Path) -> None:
+def _ensure_schema(connection: "sqlite3.Connection", database_path: Path | str) -> None:
     """Run CREATE TABLE / ALTER TABLE migrations exactly once per process per database."""
-    key = str(database_path.resolve())
+    db_p = Path(database_path)
+    key = str(db_p.resolve())
     if key in _schema_applied:
         return
     with _schema_lock:
@@ -950,16 +959,17 @@ def recent_activity(database_path: Path, limit: int = 250) -> list[dict]:
         connection.close()
 
 
-def _is_subpath_of(path: Path, parent: Path) -> bool:
-    """Return True if path is equal to or inside parent directory."""
+def _is_subpath_of(path: Path | str, parent: Path | str) -> bool:
+    """Return True if path is equal to or inside parent directory without touching the disk."""
     try:
-        p_res = path.resolve()
-        parent_res = parent.resolve()
-        if p_res == parent_res:
+        p_str = os.path.normcase(os.path.abspath(str(path)))
+        parent_str = os.path.normcase(os.path.abspath(str(parent)))
+        if p_str == parent_str:
             return True
-        p_res.relative_to(parent_res)
-        return True
-    except (ValueError, RuntimeError, Exception):
+        if not parent_str.endswith(os.sep):
+            parent_str += os.sep
+        return p_str.startswith(parent_str)
+    except Exception:
         return False
 
 
@@ -1023,6 +1033,12 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
                 candidate = renamed_paths[candidate]
             return candidate if Path(candidate).is_file() else original_path
 
+        cold_roots = [
+            os.path.normpath(str(c))
+            for c in parse_cold_storage_roots((config or {}).get("coldStorageRoots"))
+            if str(c).strip()
+        ]
+
         if baseline_count > 0:
             b_rows = connection.execute("SELECT path FROM filing_incoming_baseline").fetchall()
             for b_row in b_rows:
@@ -1035,13 +1051,12 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
                     p_st = active_props.get(cur_b_path) or active_props.get(b_path_str)
                     if p_st in ("completed", "pending", "needs_recovery"):
                         continue
-                    if b_p.is_file():
-                        try:
-                            is_inside = any(_is_subpath_of(b_p.resolve(), Path(f).resolve()) for f in incoming_folders) if incoming_folders else True
-                        except Exception:
-                            is_inside = False
-                        if is_inside:
-                            backlog_eligible_count += 1
+                    try:
+                        is_inside = any(_is_subpath_of(b_p, f) for f in incoming_folders) if incoming_folders else False
+                    except Exception:
+                        is_inside = False
+                    if is_inside and b_p.is_file():
+                        backlog_eligible_count += 1
 
         for ign_row in connection.execute("SELECT path FROM incoming_files WHERE status='ignored'").fetchall():
             ign_p_str = ign_row["path"]
@@ -1050,12 +1065,12 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
                 if p_st in ("completed", "pending", "needs_recovery"):
                     continue
                 ign_p = Path(ign_p_str)
-                if ign_p.suffix.lower() in VIDEO_EXTENSIONS and ign_p.is_file():
+                if ign_p.suffix.lower() in VIDEO_EXTENSIONS:
                     try:
-                        is_inside = any(_is_subpath_of(ign_p.resolve(), Path(f).resolve()) for f in incoming_folders) if incoming_folders else True
+                        is_inside = any(_is_subpath_of(ign_p, f) for f in incoming_folders) if incoming_folders else False
                     except Exception:
                         is_inside = False
-                    if is_inside:
+                    if is_inside and ign_p.is_file():
                         backlog_eligible_count += 1
                         b_paths_set.add(ign_p_str)
 
@@ -1096,17 +1111,29 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
         ):
             item = dict(row)
             p_obj = Path(item["path"])
-            is_file = p_obj.is_file()
-            item["exists_on_disk"] = is_file
+            p_norm = os.path.normpath(str(p_obj))
+            is_cold = bool(cold_roots and any(
+                p_norm == c or p_norm.startswith(c + os.sep) or c.startswith(p_norm + os.sep)
+                for c in cold_roots
+            ))
 
             # Check if physically located inside a configured incoming folder
             is_inside_incoming = True
             if incoming_folders:
                 is_inside_incoming = any(
-                    _is_subpath_of(p_obj.resolve(), Path(f).resolve())
+                    _is_subpath_of(p_obj, f)
                     for f in incoming_folders
                 )
             item["is_in_incoming_folder"] = is_inside_incoming
+
+            if is_cold or not is_inside_incoming:
+                is_file = False
+            else:
+                try:
+                    is_file = p_obj.is_file()
+                except OSError:
+                    is_file = False
+            item["exists_on_disk"] = is_file
 
             f_row = connection.execute(
                 "SELECT scene_id, file_id, path FROM files WHERE path=? OR basename=?",
@@ -1626,6 +1653,18 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
         pending_events = pending_filesystem_events(database_path)
         is_running = monitor.get("state") == "running" and not monitor.get("is_stale") and monitor.get("pid_alive")
         annotate_pending_events_processing_state(pending_events, monitor.get("active_moves", []), monitor_running=is_running, database_path=database_path)
+        missing_count_row = connection.execute(
+            "SELECT COUNT(*) FROM files WHERE exists_on_disk = 0"
+        ).fetchone()
+        missing_files_count = int(missing_count_row[0]) if missing_count_row else 0
+        unindexed_rows = connection.execute(
+            "SELECT path, basename, size, discovered_at FROM unindexed_external_media WHERE ignored = 0 ORDER BY discovered_at DESC"
+        ).fetchall()
+        unindexed_media = [dict(r) for r in unindexed_rows if os.path.isfile(r["path"])]
+        ignored_count_row = connection.execute(
+            "SELECT count(*) FROM unindexed_external_media WHERE ignored = 1"
+        ).fetchone()
+        ignored_unindexed_count = int(ignored_count_row[0]) if ignored_count_row else 0
         return {
             "inventory": dict(inventory_row) if inventory_row else None,
             "rename_queue": queue_counts,
@@ -1640,6 +1679,9 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
             "filing_proposals": filing_proposals,
             "active_filing_transfers": get_active_filing_transfers(database_path),
             "filing_folder_mappings": get_filing_folder_mappings(database_path),
+            "missing_files_count": missing_files_count,
+            "unindexed_media": unindexed_media,
+            "ignored_unindexed_count": ignored_unindexed_count,
         }
     finally:
         connection.close()
@@ -1865,6 +1907,32 @@ def flatten_scene_files(scenes):
             }
 
 
+def parse_cold_storage_roots(raw) -> list[str]:
+    """Parse configured cold storage root paths from JSON list, Python list, comma-separated, or newline-separated string."""
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(p).strip() for p in raw if str(p).strip()]
+    if isinstance(raw, str):
+        trimmed = raw.strip()
+        if not trimmed:
+            return []
+        if trimmed.startswith("["):
+            try:
+                parsed = json.loads(trimmed)
+                if isinstance(parsed, list):
+                    return [str(p).strip() for p in parsed if str(p).strip()]
+            except (ValueError, json.JSONDecodeError):
+                pass
+        items = []
+        for line in trimmed.replace("\r", "\n").replace(",", "\n").split("\n"):
+            item = line.strip()
+            if item:
+                items.append(item)
+        return items
+    return []
+
+
 def is_file_on_unavailable_root(path_str: str, unavailable_roots=None) -> bool:
     """Check if a file's root or mount point is currently offline or unreachable.
     Uses normalized path prefix resolution against the configured unavailable roots.
@@ -1889,15 +1957,14 @@ def get_authoritative_unavailable_roots(database_path: Path = None, extra_roots:
     Probes filesystem directly; discards stale monitor status entries if the root is now accessible.
     """
     candidates = set()
-    if extra_roots:
+    if extra_roots is not None:
         for r in extra_roots:
             if r and str(r).strip():
                 try:
                     candidates.add(str(Path(r).expanduser()))
                 except Exception:
                     candidates.add(str(r))
-
-    if database_path:
+    elif database_path:
         try:
             conn = connect(database_path)
             try:
@@ -3491,6 +3558,664 @@ def reconcile_missing_files(database_path: Path) -> tuple[dict, list[dict]]:
     except Exception:
         connection.rollback()
         raise
+    finally:
+        connection.close()
+
+
+def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list, config: dict = None) -> dict:
+    """Find and reconnect moved scene media across monitored library roots without full Stash scans.
+    Designed for files moved via phones, tablets, or external file managers where filesystem
+    events were bypassed.
+    """
+    if config is None and stash:
+        try:
+            config = stash.find_plugin_config("librarymanager") or {}
+        except Exception:
+            config = {}
+    elif config is None:
+        config = {}
+
+    cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
+    candidate_roots = [r for r in (roots or []) if r not in cold_storage_roots]
+
+    if candidate_roots:
+        accessible_roots = [str(r) for r in candidate_roots if os.path.isdir(str(r))]
+    else:
+        unavailable = set(get_authoritative_unavailable_roots(database_path)) | cold_storage_roots
+        accessible_roots = [str(r) for r in candidate_roots if r not in unavailable and os.path.isdir(str(r))]
+
+    now = utc_now()
+    connection = connect(database_path)
+    missing_candidates = []
+    try:
+        rows = connection.execute(
+            "SELECT file_id, scene_id, path, basename, size, fingerprints_json, exists_on_disk FROM files"
+        ).fetchall()
+        for r in rows:
+            p = r["path"]
+            if not any(_is_subpath_of(p, root) for root in accessible_roots):
+                continue
+            if r["exists_on_disk"]:
+                exists = False
+                try:
+                    exists = os.path.isfile(p)
+                except OSError:
+                    exists = False
+                if not exists:
+                    connection.execute(
+                        "UPDATE files SET exists_on_disk=0, missing_since=? WHERE file_id=?",
+                        (now, r["file_id"]),
+                    )
+                    missing_candidates.append(dict(r))
+            else:
+                missing_candidates.append(dict(r))
+        connection.commit()
+    finally:
+        connection.close()
+
+    if not missing_candidates and stash:
+        try:
+            result = stash.call_GQL(
+                """query FindMissingScenes {
+                     findScenes(filter: {per_page: 500}) {
+                       scenes {
+                         id
+                         title
+                         files { id path basename size fingerprints { type value } }
+                       }
+                     }
+                   }"""
+            )
+            scenes = ((result or {}).get("findScenes") or {}).get("scenes") or []
+            for sc in scenes:
+                sc_id = str(sc.get("id"))
+                for f in sc.get("files") or []:
+                    p = f.get("path")
+                    if not p:
+                        continue
+                    if not any(_is_subpath_of(p, root) for root in accessible_roots):
+                        continue
+                    try:
+                        if not os.path.isfile(p):
+                            missing_candidates.append({
+                                "file_id": str(f.get("id") or ""),
+                                "scene_id": sc_id,
+                                "path": str(p),
+                                "basename": f.get("basename") or Path(p).name,
+                                "size": f.get("size"),
+                                "fingerprints_json": json.dumps(f.get("fingerprints") or []),
+                            })
+                    except OSError:
+                        pass
+        except Exception as gql_err:
+            logger.debug("Failed querying Stash scenes for missing files: %s", gql_err)
+
+    known_paths = set()
+    ignored_paths = set()
+    conn_kp = connect(database_path)
+    try:
+        for r in conn_kp.execute("SELECT path FROM files").fetchall():
+            known_paths.add(os.path.normcase(os.path.abspath(r["path"])))
+        for r in conn_kp.execute("SELECT path FROM unindexed_external_media WHERE ignored = 1").fetchall():
+            ignored_paths.add(os.path.normcase(os.path.abspath(r["path"])))
+    finally:
+        conn_kp.close()
+
+    record_activity(
+        database_path, "reconciliation", "reconcile missing media", "starting",
+        severity="info",
+        detail=f"Searching library roots for {len(missing_candidates)} missing scene file(s) and unindexed media..."
+    )
+
+    target_map = {}
+    for item in missing_candidates:
+        bn = (item.get("basename") or Path(item.get("path", "")).name).lower()
+        if bn:
+            target_map.setdefault(bn, []).append(item)
+
+    candidates_found = []
+    unindexed_found = []
+    visited_dirs = set()
+    for root in accessible_roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith(".")
+                and d not in ("$RECYCLE.BIN", "System Volume Information", "@eaDir", "#recycle", ".Trash")
+            ]
+            norm_dir = os.path.normcase(os.path.abspath(dirpath))
+            if norm_dir in visited_dirs:
+                continue
+            visited_dirs.add(norm_dir)
+
+            for fn in filenames:
+                cand_path = os.path.join(dirpath, fn)
+                norm_cand = os.path.normcase(os.path.abspath(cand_path))
+                fn_lower = fn.lower()
+
+                # Check if this resolves a missing scene file
+                if fn_lower in target_map:
+                    for item in target_map[fn_lower]:
+                        norm_old = os.path.normcase(os.path.abspath(item["path"]))
+                        if norm_cand == norm_old:
+                            continue
+                        try:
+                            st = os.stat(cand_path)
+                            cand_size = st.st_size
+                        except OSError:
+                            continue
+
+                        expected_size = item.get("size")
+                        if expected_size is not None and cand_size != expected_size:
+                            continue
+
+                        expected_oshash = fingerprint_value(item.get("fingerprints_json"), "oshash")
+                        oshash_verified = False
+                        if expected_oshash:
+                            try:
+                                cand_hash = opensubtitles_hash(Path(cand_path))
+                                if cand_hash and cand_hash.lower() == expected_oshash.lower():
+                                    oshash_verified = True
+                                else:
+                                    continue
+                            except Exception:
+                                continue
+                        else:
+                            oshash_verified = True
+
+                        candidates_found.append({
+                            "item": item,
+                            "candidate_path": cand_path,
+                            "oshash_verified": oshash_verified,
+                        })
+
+                # Check if this is unindexed new video on disk
+                if Path(fn).suffix.lower() in VIDEO_EXTENSIONS:
+                    if norm_cand not in known_paths and norm_cand not in ignored_paths:
+                        if not is_temporary_download(cand_path):
+                            try:
+                                st = os.stat(cand_path)
+                                if st.st_size > 0:
+                                    unindexed_found.append((cand_path, fn, st.st_size, now))
+                            except OSError:
+                                pass
+
+    # Persist newly discovered unindexed media
+    if unindexed_found:
+        conn_unindex = connect(database_path)
+        try:
+            for u_path, u_name, u_size, u_time in unindexed_found:
+                conn_unindex.execute(
+                    """INSERT INTO unindexed_external_media (path, basename, size, discovered_at, ignored)
+                       VALUES (?, ?, ?, ?, 0)
+                       ON CONFLICT(path) DO UPDATE SET size=excluded.size
+                       WHERE ignored = 0""",
+                    (u_path, u_name, u_size, u_time),
+                )
+            conn_unindex.commit()
+        finally:
+            conn_unindex.close()
+
+    conn_clean = connect(database_path)
+    try:
+        conn_clean.execute(
+            "DELETE FROM unindexed_external_media WHERE path IN (SELECT path FROM files)"
+        )
+        conn_clean.commit()
+    finally:
+        conn_clean.close()
+
+    auto_ingested_count = 0
+    if unindexed_found and (config.get("autoIngestUnindexedMedia") is True or config.get("auto_ingest_unindexed_media") is True) and stash:
+        try:
+            ingest_res = add_all_unindexed_media_files(database_path, stash, config=config, roots=accessible_roots)
+            auto_ingested_count = ingest_res.get("count", 0)
+        except Exception as auto_ingest_err:
+            logger.warning("Automatic ingestion of discovered unindexed media failed: %s", auto_ingest_err)
+
+    reconciled = []
+    unmatched = []
+    connection = connect(database_path)
+    try:
+        for item in missing_candidates:
+            matches_for_item = [
+                c for c in candidates_found if c["item"].get("file_id") == item.get("file_id")
+            ]
+            if len(matches_for_item) == 1:
+                cand_path = matches_for_item[0]["candidate_path"]
+                scan_job_id = None
+                if stash:
+                    try:
+                        scan_job_id = stash.metadata_scan(paths=[cand_path])
+                        stash.wait_for_job(scan_job_id, timeout=60)
+                    except Exception as scan_err:
+                        logger.warning("Targeted scan failed for %s: %s", cand_path, scan_err)
+
+                connection.execute(
+                    """UPDATE files SET path=?, basename=?, exists_on_disk=1, last_seen_at=?, missing_since=NULL
+                       WHERE file_id=?""",
+                    (cand_path, Path(cand_path).name, utc_now(), item.get("file_id")),
+                )
+                connection.execute(
+                    "UPDATE filesystem_events SET status='reviewed' WHERE source_path=? OR source_path=?",
+                    (item["path"], cand_path),
+                )
+                connection.commit()
+
+                # Relocate any companion files left behind in the old folder
+                moved_companions = []
+                old_p = Path(item["path"])
+                new_p = Path(cand_path)
+                if (
+                    any(_is_subpath_of(str(old_p), root) for root in accessible_roots)
+                    and old_p.parent.is_dir()
+                    and new_p.parent.is_dir()
+                    and old_p.parent != new_p.parent
+                ):
+                    for comp_name in get_companion_files(old_p):
+                        src_comp = old_p.parent / comp_name
+                        tgt = associated_file_target(src_comp, old_p, new_p)
+                        if tgt:
+                            dst_comp = new_p.parent / tgt.name
+                            if src_comp.is_file() and not dst_comp.exists():
+                                try:
+                                    expect_filesystem_move(database_path, str(src_comp), str(dst_comp))
+                                    shutil.move(str(src_comp), str(dst_comp))
+                                    moved_companions.append(dst_comp.name)
+                                    record_activity(
+                                        database_path, "companion", "moved companion", "recorded",
+                                        severity="info",
+                                        scene_id=item.get("scene_id"), file_id=item.get("file_id"),
+                                        old_path=str(src_comp), new_path=str(dst_comp),
+                                        detail=f"Moved companion file alongside {new_p.name}"
+                                    )
+                                except Exception as comp_err:
+                                    logger.warning("Failed moving companion %s to %s: %s", src_comp, dst_comp, comp_err)
+
+                comp_detail = f" (along with {len(moved_companions)} companion file{'s' if len(moved_companions) != 1 else ''})" if moved_companions else ""
+                record_activity(
+                    database_path, "reconciliation", "missing file reconnected", "updated",
+                    severity="info", scene_id=item.get("scene_id"), file_id=item.get("file_id"),
+                    old_path=item["path"], new_path=cand_path,
+                    detail=f"Reconnected {Path(cand_path).name} in Stash via targeted scan{comp_detail}"
+                )
+                reconciled.append({
+                    "scene_id": item.get("scene_id"),
+                    "file_id": item.get("file_id"),
+                    "old_path": item["path"],
+                    "new_path": cand_path,
+                    "filename": Path(cand_path).name,
+                    "moved_companions": moved_companions,
+                })
+            else:
+                reason = (
+                    "Multiple matching files found across library roots; manual review required"
+                    if len(matches_for_item) > 1
+                    else "File not found in monitored library roots"
+                )
+                unmatched.append({
+                    "scene_id": item.get("scene_id"),
+                    "file_id": item.get("file_id"),
+                    "old_path": item["path"],
+                    "filename": item.get("basename"),
+                    "reason": reason,
+                })
+    finally:
+        connection.close()
+
+    status_str = "complete" if (reconciled or auto_ingested_count) else ("warning" if unmatched else "info")
+    record_activity(
+        database_path, "reconciliation", "reconcile missing media", status_str,
+        severity="info" if (reconciled or auto_ingested_count) else "warning",
+        detail=f"Reconciliation complete: {len(reconciled)} reconnected, {len(unmatched)} unresolved, {auto_ingested_count if auto_ingested_count else len(unindexed_found)} {'automatically ingested into Stash' if auto_ingested_count else 'unindexed media discovered'}"
+    )
+
+    msg = ""
+    if reconciled:
+        msg = f"Successfully reconnected {len(reconciled)} of {len(missing_candidates)} missing scene file(s)."
+    elif missing_candidates:
+        msg = f"Checked {len(missing_candidates)} missing file(s); none were found in monitored library roots."
+    else:
+        msg = "All tracked scene files verified present on disk."
+    if auto_ingested_count > 0:
+        msg += f" Automatically ingested {auto_ingested_count} new video(s) into Stash with full previews & contact sheets."
+    elif unindexed_found:
+        msg += f" Found {len(unindexed_found)} unindexed new video(s) on disk."
+
+    return {
+        "status": "ok",
+        "missing_checked": len(missing_candidates),
+        "reconciled_count": len(reconciled),
+        "reconciled": reconciled,
+        "unmatched": unmatched,
+        "unindexed_found_count": len(unindexed_found),
+        "auto_ingested_count": auto_ingested_count,
+        "message": msg,
+    }
+
+
+def get_unindexed_external_media(database_path: Path) -> list[dict]:
+    """Return all non-ignored unindexed video files found on disk."""
+    connection = connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT path, basename, size, discovered_at FROM unindexed_external_media WHERE ignored = 0 ORDER BY discovered_at DESC"
+        ).fetchall()
+        result = []
+        to_clean = []
+        for r in rows:
+            p = r["path"]
+            try:
+                if os.path.isfile(p):
+                    result.append(dict(r))
+                else:
+                    to_clean.append(p)
+            except OSError:
+                to_clean.append(p)
+        if to_clean:
+            connection.executemany("DELETE FROM unindexed_external_media WHERE path = ?", [(p,) for p in to_clean])
+            connection.commit()
+        return result
+    finally:
+        connection.close()
+
+
+INCOMING_SCAN_FLAGS = {
+    "scanGenerateCovers": True,
+    "scanGeneratePreviews": True,
+    "scanGenerateSprites": True,
+    "scanGeneratePhashes": True,
+    "scanGenerateThumbnails": True,
+}
+
+
+def _ensure_stash_supports_extension(stash, path: str):
+    """Ensure Stash's configured videoExtensions include this file's extension so the scanner accepts it."""
+    if not stash or not path:
+        return
+    ext = Path(path).suffix.lstrip(".").lower()
+    if not ext:
+        return
+    try:
+        cfg = stash.call_GQL("query { configuration { general { videoExtensions } } }")
+        current_exts = set(((cfg or {}).get("configuration") or {}).get("general", {}).get("videoExtensions") or [])
+        if ext not in current_exts:
+            current_exts.add(ext)
+            stash.call_GQL(
+                "mutation ConfigureGeneral($input: ConfigGeneralInput!) { configureGeneral(input: $input) { videoExtensions } }",
+                {"input": {"videoExtensions": sorted(list(current_exts))}}
+            )
+            logger.info("Added supported extension '%s' to Stash videoExtensions", ext)
+    except Exception as ext_err:
+        logger.debug("Failed checking/updating Stash videoExtensions: %s", ext_err)
+
+
+def notify_desktop(message: str, title: str = "Stash Library Manager"):
+    """Send native desktop notification across macOS, Windows, Linux."""
+    try:
+        if sys.platform == "darwin":
+            subprocess.run([
+                "/usr/bin/osascript", "-e", "on run argv", "-e",
+                "display notification (item 1 of argv) with title (item 2 of argv)",
+                "-e", "end run", "--", str(message), str(title),
+            ], capture_output=True, text=True, timeout=10, check=False)
+        elif sys.platform == "win32":
+            import base64
+            title_b64 = base64.b64encode(str(title).encode("utf-8")).decode("ascii")
+            message_b64 = base64.b64encode(str(message).encode("utf-8")).decode("ascii")
+            ps_cmd = (
+                f'[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null; '
+                f'$title = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{title_b64}")); '
+                f'$message = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String("{message_b64}")); '
+                f'$template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02); '
+                f'$textNodes = $template.GetElementsByTagName("text"); '
+                f'$textNodes.Item(0).AppendChild($template.CreateTextNode($title)) > $null; '
+                f'$textNodes.Item(1).AppendChild($template.CreateTextNode($message)) > $null; '
+                f'$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("Stash Library Manager"); '
+                f'$notification = [Windows.UI.Notifications.ToastNotification]::new($template); '
+                f'$notifier.Show($notification)'
+            )
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                           capture_output=True, text=True, timeout=10, check=False)
+        elif shutil.which("notify-send"):
+            subprocess.run(["notify-send", "-a", "Stash Library Manager", str(title), str(message)],
+                           capture_output=True, text=True, timeout=5, check=False)
+    except Exception as exc:
+        logger.debug("Desktop notification failed: %s", exc)
+
+
+def add_unindexed_media_file(database_path: Path, stash, path: str, config: dict = None) -> dict:
+    """Trigger a full Stash ingestion scan for an unindexed video file, including previews, sprites, companions, and contact sheets."""
+    if not os.path.isfile(path):
+        return {"status": "error", "message": f"File not found on disk: {path}"}
+    if config is None and stash:
+        try:
+            cfg = stash.find_plugin_config("librarymanager") or {}
+        except Exception:
+            cfg = {}
+    else:
+        cfg = config or {}
+    scene = None
+    if stash:
+        _ensure_stash_supports_extension(stash, path)
+        try:
+            scan_job_id = stash.metadata_scan(paths=[path], flags=INCOMING_SCAN_FLAGS)
+            stash.wait_for_job(scan_job_id, timeout=180)
+        except Exception as scan_err:
+            logger.warning("Targeted scan failed for %s: %s", path, scan_err)
+
+        # Look up the newly created scene in Stash
+        try:
+            res = stash.call_GQL(
+                """query FindSceneByPath($path: String!) {
+                  findScenes(scene_filter: {path: {value: $path, modifier: EQUALS}}) {
+                    scenes {
+                      id title details date director code rating100 organized urls
+                      studio { name }
+                      performers { id name }
+                      tags { id name aliases }
+                      galleries { id title }
+                      stash_ids { endpoint stash_id }
+                      groups { group { id name } scene_index }
+                      files { id path basename size duration fingerprints { type value } }
+                    }
+                  }
+                }""",
+                {"path": path}
+            )
+            scenes = ((res or {}).get("findScenes") or {}).get("scenes") or []
+            if not scenes:
+                bn = Path(path).name
+                res = stash.call_GQL(
+                    """query FindSceneByBasename($name: String!) {
+                      findScenes(scene_filter: {path: {value: $name, modifier: INCLUDES}}, filter: {per_page: 20}) {
+                        scenes {
+                          id title details date director code rating100 organized urls
+                          studio { name }
+                          performers { id name }
+                          tags { id name aliases }
+                          galleries { id title }
+                          stash_ids { endpoint stash_id }
+                          groups { group { id name } scene_index }
+                          files { id path basename size duration fingerprints { type value } }
+                        }
+                      }
+                    }""",
+                    {"name": bn}
+                )
+                for candidate_sc in ((res or {}).get("findScenes") or {}).get("scenes") or []:
+                    for f in candidate_sc.get("files") or []:
+                        fpath = str(f.get("path") or "")
+                        if fpath == path or os.path.normcase(os.path.abspath(fpath)) == os.path.normcase(os.path.abspath(path)):
+                            scene = candidate_sc
+                            break
+                    if scene:
+                        break
+            else:
+                scene = scenes[0]
+
+            if scene:
+                refresh_scene_inventory(database_path, scene)
+        except Exception as query_err:
+            logger.debug("Failed querying scene by path after scan for %s: %s", path, query_err)
+
+        # Trigger metadata generation to guarantee previews/covers/sprites/phashes are generated
+        if scene and scene.get("id"):
+            try:
+                gen_job = stash.call_GQL(
+                    """mutation GenerateForScene($input: GenerateMetadataInput!) {
+                      metadataGenerate(input: $input)
+                    }""",
+                    {
+                        "input": {
+                            "sceneIDs": [str(scene["id"])],
+                            "covers": True,
+                            "previews": True,
+                            "sprites": True,
+                            "phashes": True,
+                            "imagePreviews": True,
+                        }
+                    }
+                )
+                if isinstance(gen_job, dict) and gen_job.get("metadataGenerate"):
+                    stash.wait_for_job(gen_job["metadataGenerate"], timeout=180)
+            except Exception as gen_err:
+                logger.debug("Failed generating previews for scene %s: %s", scene.get("id"), gen_err)
+
+    # Relocate or associate any companion files existing alongside the video
+    if scene and scene.get("id"):
+        try:
+            companions = get_companion_files(path)
+            for comp in companions:
+                comp_path = str(Path(path).parent / comp)
+                record_activity(
+                    database_path, "companion", "auto-paired companion", "recorded",
+                    scene_id=str(scene["id"]),
+                    old_path=comp_path,
+                    new_path=comp_path,
+                    detail=f"Paired companion {comp} with newly ingested scene {scene['id']}"
+                )
+        except Exception as comp_err:
+            logger.debug("Failed pairing companions for %s: %s", path, comp_err)
+
+    # Generate visual contact sheet if enabled
+    if cfg.get("generateContactSheets") is True or cfg.get("generate_contact_sheets") is True:
+        try:
+            sheet_p = f"{path}.jpg"
+            expect_filesystem_create(database_path, sheet_p)
+            csm_res = generate_video_contact_sheet(
+                path,
+                grid=cfg.get("contactSheetGrid") or cfg.get("contact_sheet_grid") or "4x4",
+                include_banner=cfg.get("contactSheetBanner") is not False and cfg.get("contact_sheet_banner") is not False,
+                adjust_vertical=cfg.get("contactSheetAdjustVertical") is not False and cfg.get("contact_sheet_adjust_vertical") is not False,
+                custom_script=cfg.get("contactSheetScript") or cfg.get("contact_sheet_script") or "",
+                allow_custom_script=cfg.get("allowCustomContactSheetScript") is True or cfg.get("allow_custom_contact_sheet_script") is True,
+            )
+            if csm_res.get("status") == "generated":
+                record_activity(
+                    database_path, "companion", "contact sheet generated", "recorded",
+                    scene_id=str(scene["id"]) if (scene and scene.get("id")) else None,
+                    new_path=sheet_p,
+                    detail=f"Generated {csm_res.get('grid', '4x4')} contact sheet for visual file browsing"
+                )
+                if cfg.get("macNotifications") is not False and cfg.get("mac_notifications") is not False:
+                    notify_desktop(f"Contact sheet created & paired: {Path(sheet_p).name} → Scene {scene['id']}")
+        except Exception as csm_err:
+            logger.debug("Failed generating contact sheet for %s: %s", path, csm_err)
+
+    # Evaluate automatic filing if enabled
+    if scene and (cfg.get("autoFilingEnabled") or cfg.get("auto_filing_enabled")):
+        try:
+            trigger = (cfg.get("autoFilingTrigger") or cfg.get("auto_filing_trigger") or "import").strip().lower()
+            if trigger in ("import", "scan"):
+                evaluate_filing_proposal(database_path, stash, path, scene, cfg)
+        except Exception as filing_err:
+            logger.debug("Automatic filing evaluation failed for %s: %s", path, filing_err)
+
+    connection = connect(database_path)
+    try:
+        connection.execute("DELETE FROM unindexed_external_media WHERE path = ?", (path,))
+        connection.commit()
+    finally:
+        connection.close()
+
+    scene_id = str(scene["id"]) if (scene and scene.get("id")) else None
+    if scene_id:
+        record_activity(
+            database_path, "incoming", "add external video", "imported",
+            scene_id=scene_id,
+            new_path=path, detail=f"Added external video {Path(path).name} to Stash with previews & contact sheet"
+        )
+        if cfg.get("macNotifications") is not False and cfg.get("mac_notifications") is not False:
+            notify_desktop(f"Added to Stash: {Path(path).name} → Scene {scene_id}")
+        return {"status": "ok", "scene_id": scene_id, "message": f"Successfully added {Path(path).name} as Scene {scene_id}!"}
+    else:
+        record_activity(
+            database_path, "incoming", "add external video", "failed",
+            severity="warning",
+            new_path=path, detail=f"Stash scan did not produce a scene record for {Path(path).name}"
+        )
+        return {"status": "warning", "message": f"Stash scan did not produce a scene record for {Path(path).name}."}
+
+
+def add_all_unindexed_media_files(database_path: Path, stash, config: dict = None, roots: list = None) -> dict:
+    """Trigger full Stash ingestion for all discovered unindexed video files."""
+    items = get_unindexed_external_media(database_path)
+    if roots:
+        items = [i for i in items if any(_is_subpath_of(i["path"], r) for r in roots)]
+    paths = [i["path"] for i in items if os.path.isfile(i["path"])]
+    if not paths:
+        return {"status": "ok", "count": 0, "message": "No unindexed media to add."}
+    added_count = 0
+    for p in paths:
+        res = add_unindexed_media_file(database_path, stash, p, config=config)
+        if res.get("status") == "ok":
+            added_count += 1
+    return {"status": "ok", "count": added_count, "message": f"Successfully added {added_count} video(s) to Stash with previews & contact sheets!"}
+
+
+def ignore_unindexed_media_file(database_path: Path, path: str) -> dict:
+    """Mark an unindexed video file as ignored so it does not prompt again."""
+    connection = connect(database_path)
+    try:
+        connection.execute("UPDATE unindexed_external_media SET ignored = 1 WHERE path = ?", (path,))
+        connection.commit()
+    finally:
+        connection.close()
+    return {"status": "ok"}
+
+
+def ignore_all_unindexed_media_files(database_path: Path) -> dict:
+    """Mark all currently discovered unindexed video files as ignored."""
+    connection = connect(database_path)
+    try:
+        connection.execute("UPDATE unindexed_external_media SET ignored = 1 WHERE ignored = 0")
+        connection.commit()
+    finally:
+        connection.close()
+    return {"status": "ok"}
+
+
+def reset_ignored_unindexed_media_files(database_path: Path) -> dict:
+    """Un-ignore all previously ignored external media files so they immediately reappear in active review."""
+    connection = connect(database_path)
+    try:
+        count_row = connection.execute("SELECT count(*) FROM unindexed_external_media WHERE ignored = 1").fetchone()
+        count = int(count_row[0]) if count_row else 0
+        connection.execute("UPDATE unindexed_external_media SET ignored = 0 WHERE ignored = 1")
+        # Clean up any that are already in files or no longer on disk
+        connection.execute("DELETE FROM unindexed_external_media WHERE path IN (SELECT path FROM files)")
+        connection.commit()
+        record_activity(
+            database_path, "reconciliation", "reset ignored media", "cleared",
+            severity="info",
+            detail=f"Restored {count} ignored media file(s) to active review"
+        )
+        return {
+            "status": "ok",
+            "count": count,
+            "message": f"Restored {count} ignored file(s) to active review."
+        }
     finally:
         connection.close()
 
@@ -5150,7 +5875,8 @@ def match_studio_for_filing(scene: dict, filename: str, all_studios: list[dict],
 
 
 def get_configured_filing_destination_roots(config: dict | None) -> list[str]:
-    """Return a cleaned, deduplicated list of configured destination roots for automatic filing."""
+    """Return a cleaned, deduplicated list of configured destination roots for automatic filing,
+    excluding any roots configured as cold storage."""
     if not config or not isinstance(config, dict):
         return []
     explicit_raw = config.get("autoFilingDestinationRoots")
@@ -5176,15 +5902,28 @@ def get_configured_filing_destination_roots(config: dict | None) -> list[str]:
         if legacy:
             roots.append(legacy)
 
-    # Deduplicate while preserving order
+    # Filter out cold storage roots (never target cold storage drives for automatic filing)
+    cold_roots = [
+        os.path.normpath(str(c)).rstrip(os.sep)
+        for c in parse_cold_storage_roots(config.get("coldStorageRoots"))
+        if str(c).strip()
+    ]
+
+    # Deduplicate while preserving order and excluding cold storage roots
     seen = set()
     deduped = []
     for r in roots:
-        norm = os.path.normpath(r)
+        norm = os.path.normpath(str(r)).rstrip(os.sep)
         if norm not in seen:
             seen.add(norm)
+            if cold_roots and any(
+                norm == c or norm.startswith(c + os.sep) or c.startswith(norm + os.sep)
+                for c in cold_roots
+            ):
+                continue
             deduped.append(r)
     return deduped
+
 
 
 def get_filing_folder_mappings(database_path: Path) -> list[dict]:
@@ -5446,12 +6185,25 @@ def invalidate_destination_dir_cache(root_path: str | Path | None = None, databa
 def refresh_destination_dir_cache(
     database_path: Path,
     roots: list[str],
-    max_depth: int = 4
+    max_depth: int = 4,
+    cold_storage_roots: list[str] | set[str] | None = None
 ) -> dict:
     """Explicitly rescan destination roots on disk and store a fresh snapshot in SQLite database."""
     safe_depth = max(1, min(8, int(max_depth)))
     total_folders = 0
     scanned_roots = []
+
+    if cold_storage_roots:
+        cold_norms = [os.path.normpath(str(c)) for c in cold_storage_roots if str(c).strip()]
+        roots = [
+            r for r in roots
+            if not any(
+                os.path.normpath(str(r)) == c or
+                os.path.normpath(str(r)).startswith(c + os.sep) or
+                c.startswith(os.path.normpath(str(r)) + os.sep)
+                for c in cold_norms
+            )
+        ]
 
     invalidate_destination_dir_cache(database_path=database_path)
 
@@ -5533,15 +6285,28 @@ def _is_excluded_destination_discovery_dir(dirname: str) -> bool:
 
 def _scan_destination_subdirectories(
     root_path: Path,
-    max_depth: int = 4
+    max_depth: int = 4,
+    cold_storage_roots: list[str] | set[str] | None = None
 ) -> list[tuple[Path, str]]:
     """Recursively scan a destination root up to a bounded depth for existing subdirectories.
     Skips hidden/system directories, maintenance, recovery, and orphaned-cover directories.
     In-place filtering of dirnames ensures all descendants of excluded directories are skipped.
     Returns list of (resolved_path, normalized_name) tuples."""
+    if cold_storage_roots:
+        root_str = os.path.normpath(str(root_path))
+        for c in cold_storage_roots:
+            c_norm = os.path.normpath(str(c))
+            if root_str == c_norm or root_str.startswith(c_norm + os.sep) or c_norm.startswith(root_str + os.sep):
+                return []
     results: list[tuple[Path, str]] = []
     try:
         root_resolved = root_path.expanduser().resolve()
+        if cold_storage_roots:
+            root_res_str = os.path.normpath(str(root_resolved))
+            for c in cold_storage_roots:
+                c_norm = os.path.normpath(str(c))
+                if root_res_str == c_norm or root_res_str.startswith(c_norm + os.sep) or c_norm.startswith(root_res_str + os.sep):
+                    return []
         if not root_resolved.is_dir():
             return []
         base_depth = len(root_resolved.parts)
@@ -5573,17 +6338,32 @@ def _get_cached_destination_subdirectories(
     root_path: Path,
     max_depth: int = 4,
     ttl: float = _DESTINATION_DIR_CACHE_TTL,
-    database_path: Path | None = None
+    database_path: Path | None = None,
+    cold_storage_roots: list[str] | set[str] | None = None
 ) -> list[tuple[Path, str]]:
     """Retrieve subdirectories for a root from memory cache or persistent SQLite cache,
     or scan and store if missing/expired."""
+    if cold_storage_roots:
+        root_str = os.path.normpath(str(root_path))
+        for c in cold_storage_roots:
+            c_norm = os.path.normpath(str(c))
+            if root_str == c_norm or root_str.startswith(c_norm + os.sep) or c_norm.startswith(root_str + os.sep):
+                return []
     safe_depth = max(1, min(8, int(max_depth)))
     try:
         root_resolved = root_path.expanduser().resolve()
+        if cold_storage_roots:
+            root_res_str = os.path.normpath(str(root_resolved))
+            for c in cold_storage_roots:
+                c_norm = os.path.normpath(str(c))
+                if root_res_str == c_norm or root_res_str.startswith(c_norm + os.sep) or c_norm.startswith(root_res_str + os.sep):
+                    return []
         if not root_resolved.is_dir():
             return []
         root_key = str(root_resolved)
     except Exception:
+        if cold_storage_roots is not None:
+            return _scan_destination_subdirectories(root_path, safe_depth, cold_storage_roots=cold_storage_roots)
         return _scan_destination_subdirectories(root_path, safe_depth)
 
     cache_key = (root_key, safe_depth)
@@ -5627,7 +6407,10 @@ def _get_cached_destination_subdirectories(
             logger.debug("Error reading SQLite destination cache: %s", exc)
 
     # 3. Cache miss or expired: scan destination root on disk
-    fresh_entries = _scan_destination_subdirectories(root_resolved, safe_depth)
+    if cold_storage_roots is not None:
+        fresh_entries = _scan_destination_subdirectories(root_resolved, safe_depth, cold_storage_roots=cold_storage_roots)
+    else:
+        fresh_entries = _scan_destination_subdirectories(root_resolved, safe_depth)
     with _DESTINATION_DIR_CACHE_LOCK:
         _DESTINATION_DIR_CACHE[cache_key] = (now_mono, fresh_entries)
 
@@ -5703,7 +6486,13 @@ def resolve_filing_destinations(
             valid_mapped: list[Path] = []
             seen_mapped: set[str] = set()
             for row in rows:
-                mapped_path = Path(row["folder_path"]).expanduser()
+                folder_raw = str(row["folder_path"] or "").strip()
+                if not folder_raw:
+                    continue
+                # Fast check without disk access: must be inside one of destination_roots
+                if not any(_is_subpath_of(folder_raw, r) for r in destination_roots):
+                    continue
+                mapped_path = Path(folder_raw).expanduser()
                 if mapped_path.is_dir():
                     res_mapped = str(mapped_path.resolve())
                     for r in destination_roots:
@@ -6103,7 +6892,7 @@ def prune_resolved_filing_baseline(database_path: Path, config: dict | None = No
 
         def is_inside_incoming(path_str: str) -> bool:
             try:
-                return any(_is_subpath_of(Path(path_str).resolve(), Path(folder).resolve()) for folder in incoming_folders)
+                return any(_is_subpath_of(path_str, folder) for folder in incoming_folders)
             except OSError:
                 return False
 
@@ -6324,6 +7113,19 @@ def evaluate_filing_proposal(database_path: Path, stash, file_path: str, scene: 
     """
     if not config.get("autoFilingEnabled"):
         record_incoming_filing_diagnostic(database_path, file_path, "Automatic filing is disabled in settings.")
+        return None
+
+    # Never evaluate or touch files located on cold storage roots
+    cold_roots = [
+        os.path.normpath(str(c)).rstrip(os.sep)
+        for c in parse_cold_storage_roots(config.get("coldStorageRoots"))
+        if str(c).strip()
+    ]
+    src_norm = os.path.normpath(str(file_path)).rstrip(os.sep)
+    if cold_roots and any(
+        src_norm == c or src_norm.startswith(c + os.sep) or c.startswith(src_norm + os.sep)
+        for c in cold_roots
+    ):
         return None
 
     src = Path(file_path)
@@ -6955,7 +7757,7 @@ def retry_filing_proposal(
     is_inside_incoming = True
     if incoming_folders:
         is_inside_incoming = any(
-            _is_subpath_of(src, Path(f).resolve())
+            _is_subpath_of(src, f)
             for f in incoming_folders
         )
 
@@ -8776,9 +9578,8 @@ def get_backlog_items(database_path: Path, stash=None, config: dict = None, forc
             is_inside_incoming = False
             if is_file and incoming_folders:
                 try:
-                    p_res = p_obj.resolve()
                     is_inside_incoming = any(
-                        _is_subpath_of(p_res, Path(f).resolve())
+                        _is_subpath_of(p_obj, f)
                         for f in incoming_folders
                     )
                 except Exception:

@@ -5,7 +5,7 @@
 # 🗼 Watchtower for Stash
 ### Filesystem monitoring, media ingest and library management for Stash
 
-[![Version](https://img.shields.io/badge/version-1.0.22-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases/tag/v1.0.22)
+[![Version](https://img.shields.io/badge/version-1.0.23-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases/tag/v1.0.23)
 [![Stash](https://img.shields.io/badge/Stash-v0.26+-ff0055?style=for-the-badge)](https://github.com/stashapp/stash)
 [![Python](https://img.shields.io/badge/Python-3.10+-39ff64?style=for-the-badge)](https://python.org)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
@@ -97,6 +97,14 @@ Watchtower also checks filename-length and collision conditions and handles supp
 
 <img src="assets/contact_sheets.png" alt="Contact-sheet examples" width="100%" />
 
+### 7. Cold Storage library drives and Manual Sync
+
+Designate auxiliary, external USB, or sleeping network disks as **Cold Storage**:
+- **Drive Sleep & Zero-I/O Guarantee:** Cold storage roots are completely excluded from background filesystem watchers (`watchdog` / `FSEvents`), startup disk probing, periodic heartbeat polling, incoming folder checks, and transcoder candidate stat calls. External mechanical hard drives can spin down and sleep undisturbed without head chatter or unintended wakeups when organizing files on other drives.
+- **100% Playback Accessible:** Media stored on cold storage drives remains completely accessible in Stash for video streaming and playback at all times.
+- **⚡️ MANUAL SYNC:** Synchronize changes on cold storage drives on demand via the header sync button or configure an optional periodic sweep interval (`manual` [default], `1h`, `6h`, `12h`, `24h`, `7d`).
+- **Unindexed Media & Reconnection:** Automatically detects new unindexed external video files and reconnects missing Stash files moved across drives while preserving all scene metadata, tags, performers, and companion files.
+
 ---
 
 ## Installation
@@ -114,7 +122,7 @@ Watchtower also checks filename-length and collision conditions and handles supp
 
 ### Option 2: Manual installation
 
-1. Download [`librarymanager.zip` from the v1.0.22 release](https://github.com/kmarsh2311/watchtower/releases/download/v1.0.22/librarymanager.zip).
+1. Download [`librarymanager.zip` from the v1.0.23 release](https://github.com/kmarsh2311/watchtower/releases/download/v1.0.23/librarymanager.zip).
 2. Extract it into the Watchtower plugin directory, for example `~/.stash/plugins/librarymanager/` on macOS/Linux or `C:\Users\<Username>\.stash\plugins\librarymanager\` on Windows.
 3. Reload plugins in Stash.
 
@@ -143,7 +151,10 @@ The filesystem-monitoring dependency is bundled with the plugin. Contact-sheet g
 | Start with OS | Off | Starts the background watcher when you log in or start the system. |
 | Automatic Incoming Scan | Off | Scans completed files from configured incoming folders into Stash. |
 | Incoming Settle Minutes | 5 minutes | Waits for files to remain unchanged before ingest. |
-| Reconcile External Moves | Off | Enables reconciliation of verified external file movements. |
+| Reconcile External Moves | Off | Reconnects verified file movements and renames on live watched drives. |
+| Cold Storage Library Drives | None | Designates drives to exclude from background watchers so disks can sleep; changes sync on demand. |
+| Periodic Drive Sync Interval | Manual | Sweeps library drives on a schedule for changes made remotely over SMB or mobile. |
+| Automatically Ingest Discovered Media | Off | Automatically adds discovered external videos into Stash with full previews during sweeps. |
 | Generate Contact Sheets | Off | Generates optional media contact sheets. |
 | Automatic Renaming | Off | Renames files when relevant scene metadata changes, according to your chosen rules. |
 | Include Video Quality | Off | Adds a resolution token to generated filenames when resolution is available. |

@@ -156,7 +156,15 @@ class FSEventsEmitter(EventEmitter):
         """Returns True if the event indicates a change in metadata."""
         return event.is_inode_meta_mod or event.is_xattr_mod or event.is_owner_change
 
+    cold_roots: set[str] = set()
+
     def queue_events(self, timeout: float, events: list[_fsevents.NativeEvent]) -> None:  # type: ignore[override]
+        cold = getattr(FSEventsEmitter, "cold_roots", set())
+        watch_p = os.fsdecode(self.watch.path) if isinstance(self.watch.path, bytes) else str(self.watch.path)
+        if watch_p in cold or self._absolute_watch_path in cold:
+            events.clear()
+            return
+
         if logger.getEffectiveLevel() <= logging.DEBUG:
             for event in events:
                 flags = ", ".join(attr for attr in dir(event) if getattr(event, attr) is True)
@@ -172,12 +180,41 @@ class FSEventsEmitter(EventEmitter):
             src_path = self._encode_path(event.path)
             src_dirname = os.path.dirname(src_path)
 
-            try:
-                stat = os.stat(src_path)
-            except OSError:
-                stat = None
+            stat = None
 
-            exists = stat and stat.st_ino == event.inode
+            def _is_cold_path(path_val) -> bool:
+                cold_roots = getattr(FSEventsEmitter, "cold_roots", set())
+                if not cold_roots:
+                    return False
+                p = os.fsdecode(path_val) if isinstance(path_val, bytes) else str(path_val)
+                p_norm = os.path.normpath(p)
+                for c in cold_roots:
+                    c_norm = os.path.normpath(str(c))
+                    if p_norm == c_norm or p_norm.startswith(c_norm + os.sep) or c_norm.startswith(p_norm + os.sep):
+                        return True
+                return False
+
+            def _get_stat():
+                nonlocal stat
+                if stat is None:
+                    if _is_cold_path(src_path):
+                        stat = False
+                        return None
+                    try:
+                        stat = os.stat(src_path)
+                    except OSError:
+                        stat = False
+                return stat if stat is not False else None
+
+            def _check_exists() -> bool:
+                # The root path itself cannot be moved into or out of its own watch.
+                # Avoid probing sleeping network roots or volume mounts.
+                if src_path == self.watch.path or src_path == self._absolute_watch_path:
+                    return False
+                if _is_cold_path(src_path):
+                    return False
+                st = _get_stat()
+                return bool(st and st.st_ino == event.inode)
 
             # FSevents may coalesce multiple events for the same item + path into a
             # single event. However, events are never coalesced for different items at
@@ -253,7 +290,7 @@ class FSEventsEmitter(EventEmitter):
                             self._queue_deleted_event(dst_event, dst_path, dst_dirname)
                             self._fs_view.discard(dst_event.inode)
 
-                    elif exists:
+                    elif _check_exists():
                         # This is the destination event, item was moved into the watched
                         # folder.
                         self._queue_created_event(event, src_path, src_dirname)

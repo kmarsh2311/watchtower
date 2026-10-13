@@ -46,9 +46,19 @@ from librarymanager_core import (
     pending_filesystem_events,
     annotate_pending_events_processing_state,
     reconcile_filesystem_events,
+    reconcile_missing_media_across_roots,
+    get_unindexed_external_media,
+    add_unindexed_media_file,
+    add_all_unindexed_media_files,
+    ignore_unindexed_media_file,
+    ignore_all_unindexed_media_files,
+    reset_ignored_unindexed_media_files,
+    dashboard_data,
     COMPANION_EXTENSIONS,
     SCHEMA,
 )
+from librarymanager_monitor import _parse_reconcile_interval
+
 
 
 def test_backlog_missing_items_can_be_rechecked_or_retired_without_deleting_summary(tmp_path: Path):
@@ -1229,3 +1239,361 @@ def test_expected_duplicate_delete_temp_rename_creates_no_warning(tmp_path: Path
     ))
 
     assert pending_filesystem_events(db_path) == []
+
+
+def test_reconcile_missing_media_across_roots_relocated_file(tmp_path: Path, monkeypatch):
+    db_path = create_test_db(tmp_path / "reconcile-test.db")
+    root_a = tmp_path / "DriveA"
+    root_b = tmp_path / "DriveB"
+    root_a.mkdir()
+    root_b.mkdir()
+
+    old_dir = root_a / "Studio"
+    old_dir.mkdir()
+    old_path = old_dir / "Scene 101.mp4"
+    old_companion = old_dir / "Scene 101.mp4.jpg"
+    old_companion.write_bytes(b"image data")
+
+    new_dir = root_b / "Organized"
+    new_dir.mkdir()
+    new_path = new_dir / "Scene 101.mp4"
+    new_path.write_bytes(b"content" * 100)
+    actual_size = new_path.stat().st_size
+
+    seed_scene(
+        db_path,
+        scene_id=101,
+        file_id=202,
+        file_path=old_path,
+        title="Scene 101",
+        size=actual_size,
+        oshash="testoshash123",
+        exists_on_disk=1,
+    )
+
+    monkeypatch.setattr(
+        librarymanager_core,
+        "opensubtitles_hash",
+        lambda p: "testoshash123",
+    )
+
+    mock_stash = MagicMock()
+    mock_stash.metadata_scan.return_value = "job-42"
+    mock_stash.wait_for_job.return_value = True
+
+    result = reconcile_missing_media_across_roots(
+        db_path,
+        mock_stash,
+        [str(root_a), str(root_b)],
+    )
+
+    assert result["status"] == "ok"
+    assert result["missing_checked"] == 1
+    assert result["reconciled_count"] == 1
+    assert len(result["reconciled"]) == 1
+    assert result["reconciled"][0]["new_path"] == str(new_path)
+    assert result["reconciled"][0]["moved_companions"] == ["Scene 101.mp4.jpg"]
+    assert not old_companion.exists()
+    assert (new_dir / "Scene 101.mp4.jpg").exists()
+    mock_stash.metadata_scan.assert_called_once_with(paths=[str(new_path)])
+
+    conn = connect(db_path)
+    try:
+        row = conn.execute("SELECT path, basename, exists_on_disk FROM files WHERE file_id = '202'").fetchone()
+        assert row["path"] == str(new_path)
+        assert row["basename"] == "Scene 101.mp4"
+        assert row["exists_on_disk"] == 1
+
+        activity = conn.execute(
+            "SELECT action, status, new_path FROM activity_log WHERE category = 'reconciliation' AND action = 'missing file reconnected'"
+        ).fetchone()
+        assert activity is not None
+        assert activity["status"] == "updated"
+        assert activity["new_path"] == str(new_path)
+    finally:
+        conn.close()
+
+
+def test_reconcile_missing_media_across_roots_unmatched_file(tmp_path: Path):
+    db_path = create_test_db(tmp_path / "reconcile-unmatched.db")
+    root_a = tmp_path / "DriveA"
+    root_a.mkdir()
+
+    missing_path = root_a / "Vanished Scene.mp4"
+
+    seed_scene(
+        db_path,
+        scene_id=102,
+        file_id=203,
+        file_path=missing_path,
+        title="Vanished Scene",
+        size=5000,
+        oshash="losthash",
+        exists_on_disk=1,
+    )
+
+    mock_stash = MagicMock()
+    result = reconcile_missing_media_across_roots(
+        db_path,
+        mock_stash,
+        [str(root_a)],
+    )
+
+    assert result["status"] == "ok"
+    assert result["missing_checked"] == 1
+    assert result["reconciled_count"] == 0
+    assert len(result["unmatched"]) == 1
+    assert result["unmatched"][0]["file_id"] == "203"
+    assert "not found" in result["unmatched"][0]["reason"].lower()
+    mock_stash.metadata_scan.assert_not_called()
+
+
+def test_unindexed_external_media_discovery_and_actions(tmp_path: Path):
+    db_path = create_test_db(tmp_path / "unindexed-media.db")
+    root = tmp_path / "Vault"
+    root.mkdir()
+
+    # Track an existing file
+    existing_file = root / "Existing Scene.mp4"
+    existing_file.write_bytes(b"existing content")
+    seed_scene(
+        db_path,
+        scene_id=501,
+        file_id=601,
+        file_path=existing_file,
+        title="Existing Scene",
+        size=len(b"existing content"),
+        oshash="existinghash",
+        exists_on_disk=1,
+    )
+
+    # Place an unindexed new video on disk (e.g. copied from phone)
+    unindexed_video = root / "New Phone Upload.mp4"
+    unindexed_video.write_bytes(b"brand new video from phone")
+
+    mock_stash = MagicMock()
+    mock_stash.metadata_scan.return_value = "job-scan-99"
+
+    # Reconcile across roots
+    result = reconcile_missing_media_across_roots(
+        db_path,
+        mock_stash,
+        [str(root)],
+    )
+
+    assert result["status"] == "ok"
+    assert result["unindexed_found_count"] == 1
+    assert "Found 1 unindexed new video(s)" in result["message"]
+
+    # Verify get_unindexed_external_media returns it
+    items = get_unindexed_external_media(db_path)
+    assert len(items) == 1
+    assert items[0]["path"] == str(unindexed_video)
+    assert items[0]["basename"] == "New Phone Upload.mp4"
+
+    # Verify dashboard_data includes it
+    ddata = dashboard_data(db_path, mock_stash, {})
+    assert len(ddata["unindexed_media"]) == 1
+    assert ddata["unindexed_media"][0]["path"] == str(unindexed_video)
+
+    # Test ignore
+    ignore_res = ignore_unindexed_media_file(db_path, str(unindexed_video))
+    assert ignore_res["status"] == "ok"
+    assert len(get_unindexed_external_media(db_path)) == 0
+
+    # Un-ignore by inserting or resetting ignored flag
+    conn = connect(db_path)
+    conn.execute("UPDATE unindexed_external_media SET ignored = 0")
+    conn.commit()
+    conn.close()
+    assert len(get_unindexed_external_media(db_path)) == 1
+
+    # Test add_unindexed_media_file
+    add_res = add_unindexed_media_file(db_path, mock_stash, str(unindexed_video))
+    assert add_res["status"] == "ok"
+    mock_stash.metadata_scan.assert_called_with(paths=[str(unindexed_video)], flags=librarymanager_core.INCOMING_SCAN_FLAGS)
+    assert len(get_unindexed_external_media(db_path)) == 0
+
+
+def test_parse_reconcile_interval():
+    assert _parse_reconcile_interval("manual") == 0
+    assert _parse_reconcile_interval("DISABLED") == 0
+    assert _parse_reconcile_interval(None) == 0
+    assert _parse_reconcile_interval("") == 0
+    assert _parse_reconcile_interval("1h") == 3600
+    assert _parse_reconcile_interval("6h") == 21600
+    assert _parse_reconcile_interval("12h") == 43200
+    assert _parse_reconcile_interval("24h") == 86400
+    assert _parse_reconcile_interval("7d") == 604800
+    assert _parse_reconcile_interval(3600) == 3600
+
+
+def test_reconcile_missing_media_target_roots_filtering(tmp_path: Path):
+    db_path = create_test_db(tmp_path / "target-roots.db")
+    root_a = tmp_path / "DriveA"
+    root_b = tmp_path / "DriveB"
+    root_a.mkdir()
+    root_b.mkdir()
+
+    file_a = root_a / "UnindexedA.mp4"
+    file_b = root_b / "UnindexedB.mp4"
+    file_a.write_bytes(b"video a")
+    file_b.write_bytes(b"video b")
+
+    mock_stash = MagicMock()
+    # Only target DriveB
+    result = reconcile_missing_media_across_roots(
+        db_path,
+        mock_stash,
+        [str(root_b)],
+    )
+
+    assert result["status"] == "ok"
+    assert result["unindexed_found_count"] == 1
+    unindexed = get_unindexed_external_media(db_path)
+    assert len(unindexed) == 1
+    assert unindexed[0]["path"] == str(file_b)
+
+
+def test_reconcile_missing_media_auto_ingest(tmp_path: Path):
+    db_path = create_test_db(tmp_path / "auto-ingest.db")
+    library_root = tmp_path / "Drive"
+    library_root.mkdir()
+
+    video_file = library_root / "DiscoveredMovie.mp4"
+    video_file.write_bytes(b"sample video bytes")
+
+    mock_stash = MagicMock()
+    mock_stash.metadata_scan.return_value = "job-scan-99"
+    mock_stash.wait_for_job.return_value = True
+
+    def mock_gql(query, variables=None):
+        if "FindSceneByPath" in query:
+            return {
+                "findScenes": {
+                    "scenes": [{
+                        "id": "777",
+                        "title": "Discovered Movie",
+                        "files": [{"id": "f777", "path": str(video_file), "basename": video_file.name, "size": 18, "duration": 60.0, "fingerprints": []}]
+                    }]
+                }
+            }
+        elif "metadataGenerate" in query:
+            return {"metadataGenerate": "job-gen-777"}
+        return {}
+
+    mock_stash.call_GQL.side_effect = mock_gql
+
+    result = reconcile_missing_media_across_roots(
+        db_path,
+        mock_stash,
+        [str(library_root)],
+        config={"autoIngestUnindexedMedia": True, "generateContactSheets": False, "macNotifications": False}
+    )
+
+    assert result["status"] == "ok"
+    assert result["unindexed_found_count"] == 1
+    assert result["auto_ingested_count"] == 1
+    mock_stash.metadata_scan.assert_called_with(paths=[str(video_file)], flags=librarymanager_core.INCOMING_SCAN_FLAGS)
+    # Ensure unindexed queue is cleared because the file was ingested into Stash
+    assert len(get_unindexed_external_media(db_path)) == 0
+
+
+def test_reset_ignored_unindexed_media_files(tmp_path: Path):
+    db_path = create_test_db(tmp_path / "test-ignored.db")
+    media_file1 = tmp_path / "clip1.mp4"
+    media_file2 = tmp_path / "clip2.mp4"
+    media_file1.write_bytes(b"data1")
+    media_file2.write_bytes(b"data2")
+
+    conn = connect(db_path)
+    conn.execute(
+        "INSERT INTO unindexed_external_media (path, basename, size, discovered_at, ignored) VALUES (?, ?, ?, ?, 0)",
+        (str(media_file1), "clip1.mp4", 5, "2026-10-13T12:00:00Z")
+    )
+    conn.execute(
+        "INSERT INTO unindexed_external_media (path, basename, size, discovered_at, ignored) VALUES (?, ?, ?, ?, 0)",
+        (str(media_file2), "clip2.mp4", 5, "2026-10-13T12:00:00Z")
+    )
+    conn.commit()
+    conn.close()
+
+    # Verify both are unindexed and ignored_count is 0
+    data = dashboard_data(db_path)
+    assert len(data["unindexed_media"]) == 2
+    assert data["ignored_unindexed_count"] == 0
+
+    # Ignore one file
+    res = ignore_unindexed_media_file(db_path, str(media_file1))
+    assert res["status"] == "ok"
+
+    data = dashboard_data(db_path)
+    assert len(data["unindexed_media"]) == 1
+    assert data["ignored_unindexed_count"] == 1
+
+    # Reset all ignored files
+    reset_res = reset_ignored_unindexed_media_files(db_path)
+    assert reset_res["status"] == "ok"
+    assert reset_res["count"] == 1
+
+    data = dashboard_data(db_path)
+    assert data["ignored_unindexed_count"] == 0
+    assert len(data["unindexed_media"]) == 2  # Immediately restored without needing another sync
+
+
+def test_reconcile_missing_media_does_not_probe_unticked_roots(tmp_path: Path, monkeypatch):
+    db_path = create_test_db(tmp_path / "test-unticked.db")
+    ticked_root = tmp_path / "TickedDrive"
+    ticked_root.mkdir()
+    unticked_root = "/Volumes/Vault2/Vault2"
+
+    # Set up monitor status having unticked root as unavailable
+    conn = connect(db_path)
+    conn.execute(
+        """UPDATE filesystem_monitor_status SET token='tok', state='running', roots_json=?, unavailable_roots_json=?
+           WHERE id=1""",
+        (json.dumps([str(ticked_root), unticked_root]), json.dumps([unticked_root]))
+    )
+    # Also add a file in files table on unticked root marked exists_on_disk = 0
+    conn.execute(
+        """INSERT INTO files (file_id, scene_id, path, basename, size, exists_on_disk, first_seen_at, last_seen_at)
+           VALUES ('f-vault2', 'sc-vault2', '/Volumes/Vault2/Vault2/Video.mp4', 'Video.mp4', 100, 0, '2026-10-13T12:00:00Z', '2026-10-13T12:00:00Z')"""
+    )
+    conn.commit()
+    conn.close()
+
+    probed_paths = []
+    orig_isdir = os.path.isdir
+    orig_isfile = os.path.isfile
+
+    def tracking_isdir(p):
+        probed_paths.append(str(p))
+        if unticked_root in str(p):
+            raise AssertionError(f"Unticked root {p} was probed via isdir!")
+        return orig_isdir(p)
+
+    def tracking_isfile(p):
+        probed_paths.append(str(p))
+        if unticked_root in str(p):
+            raise AssertionError(f"Unticked root {p} was probed via isfile!")
+        return orig_isfile(p)
+
+    monkeypatch.setattr(os.path, "isdir", tracking_isdir)
+    monkeypatch.setattr(os.path, "isfile", tracking_isfile)
+
+    mock_stash = MagicMock()
+    mock_stash.call_GQL.return_value = {"findScenes": {"scenes": []}}
+
+    # Run reconcile targeting ONLY the ticked root
+    res = reconcile_missing_media_across_roots(
+        db_path,
+        mock_stash,
+        roots=[str(ticked_root)],
+        config={}
+    )
+
+    assert res["status"] == "ok"
+    assert not any(unticked_root in p for p in probed_paths), f"Unticked root leaked into probes: {probed_paths}"
+
+
+

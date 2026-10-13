@@ -26,14 +26,16 @@ from librarymanager_core import (
     generate_video_contact_sheet, expect_filesystem_create, apply_manual_filename, apply_scene_filename, build_merge_preview, build_resolution_plan,
                                  claim_due_rename, connect, enqueue_rename, fail_queued_rename,
                                  finish_queued_rename, inventory, preview_safe_filenames,
-                                 preview_manual_filename, preview_scene_filename, reconcile_missing_files, refresh_scene_inventory,
+                                 preview_manual_filename, preview_scene_filename, reconcile_missing_files, reconcile_missing_media_across_roots,
+                                 add_unindexed_media_file, add_all_unindexed_media_files, ignore_unindexed_media_file, ignore_all_unindexed_media_files, reset_ignored_unindexed_media_files,
+                                 refresh_scene_inventory,
                                  release_worker_schedule, scene_naming_signature, filesystem_monitor_summary,
                                  reconcile_filesystem_events, pending_filesystem_events,
                                  pending_transcoder_candidates, promote_transcoder_candidate, utc_now,
                                  find_duplicate_scene_file, inspect_backlog_duplicate,
                                  get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
                                  cancel_expected_filesystem_delete, _is_pid_alive, _terminate_pid,
-                                 get_configured_incoming_folders, _is_subpath_of)
+                                 get_configured_incoming_folders, _is_subpath_of, parse_cold_storage_roots)
 from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing, prune_resolved_filing_baseline, invalidate_incoming_discovery_cache, enqueue_filing_transfer, claim_next_filing_transfer, finish_filing_transfer, fail_filing_transfer, set_filing_transfer_job_id, recover_abandoned_processing_queue, recover_stale_active_transfers, get_active_filing_transfers
 
 
@@ -542,19 +544,12 @@ def incoming_folder_status_item(folder_path_str, roots, enabled):
     if not folder_path_str:
         return {"enabled": enabled, "valid": False, "exists": False, "path": "", "reason": "Choose an incoming folder first"}
     try:
-        folder = Path(folder_path_str).expanduser().resolve()
+        folder = Path(folder_path_str).expanduser()
     except Exception as exc:
         return {"enabled": enabled, "valid": False, "exists": False, "path": folder_path_str, "reason": f"Invalid path: {exc}"}
     if not folder.is_dir():
         return {"enabled": enabled, "valid": False, "exists": False, "path": str(folder), "reason": "The incoming folder is not currently available on disk"}
-    inside_root = False
-    for root in roots:
-        try:
-            folder.relative_to(Path(root).expanduser().resolve())
-            inside_root = True
-            break
-        except (ValueError, OSError):
-            continue
+    inside_root = any(_is_subpath_of(str(folder), root) for root in roots)
     if not inside_root:
         return {"enabled": enabled, "valid": False, "exists": True, "path": str(folder),
                 "reason": "The incoming folder must be inside a folder configured in Stash"}
@@ -563,16 +558,18 @@ def incoming_folder_status_item(folder_path_str, roots, enabled):
 
 def incoming_folders_status(config, roots):
     enabled = (config or {}).get("automaticIncomingScan") is True
+    cold_roots = set(parse_cold_storage_roots((config or {}).get("coldStorageRoots")))
+    active_roots = [r for r in roots if r not in cold_roots]
     folders = get_configured_incoming_folders(config)
     if not folders:
         return {
             "enabled": enabled,
-            "folders": [incoming_folder_status_item("", roots, enabled)],
+            "folders": [incoming_folder_status_item("", active_roots, enabled)],
             "valid_count": 0,
             "total_count": 0,
             "all_valid": False,
         }
-    items = [incoming_folder_status_item(f, roots, enabled) for f in folders]
+    items = [incoming_folder_status_item(f, active_roots, enabled) for f in folders]
     valid_count = sum(1 for item in items if item["valid"])
     return {
         "enabled": enabled,
@@ -763,6 +760,7 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
     runtime_path.write_text(json.dumps({
         "server_connection": conn,
         "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
+        "periodic_reconcile_interval": str(config.get("periodicReconcileInterval") or "manual"),
         "transcoder_replacement_compatibility": config.get("transcoderReplacementCompatibility") is True,
         "mac_notifications": config.get("macNotifications") is True,
         "incoming_imports": incoming_multi["enabled"] and len(valid_incoming_paths) > 0,
@@ -776,15 +774,18 @@ def start_filesystem_monitor(stash, database_path, server_connection=None):
         "contact_sheet_adjust_vertical": config.get("contactSheetAdjustVertical") is not False,
         "contact_sheet_script": config.get("contactSheetScript") or "",
         "allow_custom_contact_sheet_script": config.get("allowCustomContactSheetScript") is True,
+        "cold_storage_roots": parse_cold_storage_roots(config.get("coldStorageRoots")),
         "library_roots": roots,
     }), encoding="utf-8")
     runtime_path.chmod(0o600)
+    cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
+    active_roots = [r for r in roots if r not in cold_storage_roots]
     log_handle = open(log_path, "ab", buffering=0)
     try:
         process = subprocess.Popen(
             [sys.executable, str(Path(__file__).with_name("librarymanager_monitor.py")),
              "--database", str(database_path), "--control", str(control_path),
-             "--token", token, "--roots-json", json.dumps(roots), "--runtime", str(runtime_path)],
+             "--token", token, "--roots-json", json.dumps(active_roots), "--runtime", str(runtime_path)],
             stdin=subprocess.DEVNULL, stdout=log_handle, stderr=log_handle,
             close_fds=True, **monitor_process_launch_options(),
         )
@@ -851,6 +852,8 @@ def reload_monitor_runtime(stash, database_path):
             "token": status["token"],
             "config": {
                 "automatic_move_reconciliation": config.get("automaticMoveReconciliation") is True,
+                "periodic_reconcile_interval": str(config.get("periodicReconcileInterval") or "manual"),
+                "cold_storage_roots": parse_cold_storage_roots(config.get("coldStorageRoots")),
                 "mac_notifications": config.get("macNotifications") is True,
                 "incoming_imports": incoming_multi["enabled"] and len(valid_incoming_paths) > 0,
                 "incoming_folder": valid_incoming_paths[0] if valid_incoming_paths else "",
@@ -1393,6 +1396,41 @@ def main():
             f"{summary['unmatched']} unmatched, {summary['skipped_folders']} unavailable folders. "
             f"Report: {report_path}"
         )
+    elif mode == "reconcile_missing_media":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        arguments = plugin_input.get("args") or {}
+        all_roots = fetch_library_roots(stash)
+        requested_roots = arguments.get("roots")
+        if isinstance(requested_roots, list) and len(requested_roots) > 0:
+            roots = [r for r in requested_roots if r in all_roots or os.path.exists(r)]
+        else:
+            roots = all_roots
+        result = reconcile_missing_media_across_roots(database_path, stash, roots, config=config)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "add_unindexed_media":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        arguments = plugin_input.get("args") or {}
+        target_path = str(arguments.get("path") or "").strip()
+        result = add_unindexed_media_file(database_path, stash, target_path, config=config)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "add_all_unindexed_media":
+        stash = StashInterface(plugin_input["server_connection"])
+        config = stash.find_plugin_config("librarymanager") or {}
+        result = add_all_unindexed_media_files(database_path, stash, config=config)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "ignore_unindexed_media":
+        arguments = plugin_input.get("args") or {}
+        target_path = str(arguments.get("path") or "").strip()
+        result = ignore_unindexed_media_file(database_path, target_path)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "ignore_all_unindexed_media":
+        result = ignore_all_unindexed_media_files(database_path)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "reset_ignored_unindexed_media":
+        result = reset_ignored_unindexed_media_files(database_path)
+        message = json.dumps(result, ensure_ascii=False)
     elif mode == "plan":
         plan = build_resolution_plan(database_path)
         plan_path = Path(__file__).with_name("resolution-plan.json")
@@ -1522,6 +1560,14 @@ def main():
                 audit(database_path, "config", "filing match source", "updated", detail=f"Automatic filing match source set to {val}")
             elif key == "autoFilingTrigger":
                 audit(database_path, "config", "filing trigger", "updated", detail=f"Automatic filing trigger set to {val}")
+            elif key == "coldStorageRoots":
+                roots = parse_cold_storage_roots(val)
+                if not roots:
+                    audit(database_path, "config", "cold storage drives", "updated",
+                          detail="Cold storage disabled: all library drives restored to Live Watched")
+                else:
+                    audit(database_path, "config", "cold storage drives", "updated",
+                          detail=f"Cold storage enabled for: {', '.join(roots)}")
 
             else:
                 audit(database_path, "config", str(key), "updated", detail=f"Setting '{key}' updated to {val}")
@@ -1551,6 +1597,14 @@ def main():
             result["rename_queue"] = {row["status"]: row["count"] for row in connection.execute(
                 "SELECT status,COUNT(*) AS count FROM rename_queue GROUP BY status"
             )}
+            unindexed_row = connection.execute(
+                "SELECT COUNT(*) AS c FROM unindexed_external_media WHERE ignored = 0"
+            ).fetchone()
+            result["unindexed_media_count"] = unindexed_row["c"] if unindexed_row else 0
+            missing_row = connection.execute(
+                "SELECT COUNT(*) AS c FROM files WHERE exists_on_disk = 0"
+            ).fetchone()
+            result["missing_files_count"] = missing_row["c"] if missing_row else 0
         finally:
             connection.close()
         message = json.dumps(result, ensure_ascii=False)
@@ -1864,7 +1918,7 @@ def main():
                         in_scope = True
                         if scope == "incoming":
                             inc_folders = get_configured_incoming_folders(config)
-                            in_scope = any(_is_subpath_of(Path(destination).resolve(), Path(f).resolve()) for f in inc_folders)
+                            in_scope = any(_is_subpath_of(destination, f) for f in inc_folders)
                         if in_scope:
                             sheet_p = f"{destination}.jpg"
                             expect_filesystem_create(database_path, sheet_p)
@@ -1967,9 +2021,14 @@ def main():
             config=config,
         )
         payload["monitor"].pop("token", None)
-        payload["library_roots"] = [{"path": root, "exists": os.path.exists(root)} for root in roots]
-        payload["incoming_folder"] = incoming_folder_status(config, roots)
-        payload["incoming_folders"] = incoming_folders_status(config, roots)
+        cold_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
+        payload["library_roots"] = [
+            {"path": root, "exists": True if root in cold_roots else os.path.exists(root)}
+            for root in roots
+        ]
+        active_roots = [r for r in roots if r not in cold_roots]
+        payload["incoming_folder"] = incoming_folder_status(config, active_roots)
+        payload["incoming_folders"] = incoming_folders_status(config, active_roots)
         payload["startup"] = macos_startup_status()
         payload["current_scene_count"] = current_scene_count(stash)
         message = json.dumps(payload, ensure_ascii=False)

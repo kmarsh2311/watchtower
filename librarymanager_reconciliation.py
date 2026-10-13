@@ -669,6 +669,7 @@ def detect_settled_operations(
     now: float | None = None,
     max_events: int = 1000,
     path_probe=None,
+    cold_storage_roots: list[str] | set[str] | None = None,
 ) -> list[dict]:
     """Create read-only grouped proposals from settled, unclaimed filesystem events.
 
@@ -678,10 +679,13 @@ def detect_settled_operations(
     now_value = time.time() if now is None else float(now)
     cutoff = now_value - max(0.0, float(settle_seconds))
     probe = path_probe or _default_path_probe
+    cold_roots = [str(r) for r in (cold_storage_roots or [])]
     connection = _connect(database_path)
     try:
-        unavailable = _unavailable_roots(connection)
+        unavailable = list(set(_unavailable_roots(connection)) | set(cold_roots))
         files = [dict(row) for row in connection.execute("SELECT * FROM files ORDER BY path")]
+        if cold_roots:
+            files = [row for row in files if not any(_is_beneath(row["path"], c) for c in cold_roots)]
     finally:
         connection.close()
 
@@ -910,6 +914,7 @@ class ReconciliationCoordinator:
         now: float | None = None,
         max_events: int = 1000,
         path_probe=None,
+        cold_storage_roots: list[str] | set[str] | None = None,
     ) -> list[dict]:
         return detect_settled_operations(
             self.database_path,
@@ -917,6 +922,7 @@ class ReconciliationCoordinator:
             now=now,
             max_events=max_events,
             path_probe=path_probe,
+            cold_storage_roots=cold_storage_roots,
         )
 
     def stop(self) -> int:

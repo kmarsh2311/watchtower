@@ -164,14 +164,16 @@ class BoundedFSOperation:
 default_fs_limiter = BoundedFSOperation(max_workers_per_root=2)
 
 
-def probe_roots_startup(roots, timeout=2.0, max_workers=4):
+def probe_roots_startup(roots, timeout=10.0, max_workers=4, cold_storage_roots=None):
     """Probes root availability at startup with a bounded worker pool and global deadline,
     avoiding nested thread-per-root explosion."""
-    if not roots:
+    cold = set(cold_storage_roots or [])
+    active_roots = [r for r in (roots or []) if r not in cold]
+    if not active_roots:
         return [], []
 
     results = {}
-    pending = list(roots)
+    pending = list(active_roots)
     deadline = time.monotonic() + float(timeout)
 
     def _worker(r):
@@ -200,8 +202,8 @@ def probe_roots_startup(roots, timeout=2.0, max_workers=4):
         time.sleep(0.02)
         active_threads = [t for t in active_threads if t.is_alive()]
 
-    available = [r for r in roots if results.get(r) is True]
-    unavailable = [r for r in roots if r not in available]
+    available = [r for r in active_roots if results.get(r) is True]
+    unavailable = [r for r in active_roots if r not in available]
     return available, unavailable
 
 
@@ -209,10 +211,13 @@ def probe_roots_startup(roots, timeout=2.0, max_workers=4):
 
 class RootAvailabilityTracker:
     """Tracks availability of monitored roots asynchronously without blocking the caller."""
-    def __init__(self, roots, probe_timeout=5.0, max_hung_probes=2):
-        self.roots = list(roots or [])
+    def __init__(self, roots, probe_timeout=30.0, max_hung_probes=2, available_interval=86400.0, unavailable_interval=15.0, cold_storage_roots=None):
+        self.cold_storage_roots = set(cold_storage_roots or [])
+        self.roots = [r for r in list(roots or []) if r not in self.cold_storage_roots]
         self.probe_timeout = float(probe_timeout)
         self.max_hung_probes = int(max_hung_probes)
+        self.available_interval = float(available_interval)
+        self.unavailable_interval = float(unavailable_interval)
         self.lock = threading.Lock()
         self._states = {}
         for r in self.roots:
@@ -228,9 +233,14 @@ class RootAvailabilityTracker:
         self._recovered_batch = []
         self._lost_batch = []
 
-    def update_roots(self, roots):
+    def update_roots(self, roots, cold_storage_roots=None):
         with self.lock:
-            self.roots = list(roots or [])
+            if cold_storage_roots is not None:
+                self.cold_storage_roots = set(cold_storage_roots)
+            self.roots = [r for r in list(roots or []) if r not in self.cold_storage_roots]
+            for r in list(self._states.keys()):
+                if r in self.cold_storage_roots:
+                    del self._states[r]
             for r in self.roots:
                 if r not in self._states:
                     self._states[r] = {
@@ -243,9 +253,13 @@ class RootAvailabilityTracker:
                         "exhausted_logged": False,
                     }
 
-    def get_unavailable_roots(self) -> list[str]:
+    def get_unavailable_roots(self) -> list:
         with self.lock:
             return [r for r, s in self._states.items() if s.get("status") != "available"]
+
+    def get_available_roots(self) -> list:
+        with self.lock:
+            return [r for r, s in self._states.items() if s.get("status") == "available"]
 
     def mark_root_unavailable(self, root):
         with self.lock:
@@ -295,7 +309,7 @@ class RootAvailabilityTracker:
                             state["exhausted_logged"] = True
                     else:
                         state["exhausted_logged"] = False
-                        interval = 15.0 if alive_count > 0 else 5.0
+                        interval = self.unavailable_interval if (state["status"] != "available" or alive_count > 0) else self.available_interval
                         if mono_now - state["last_probed_at"] >= interval or state["last_probed_at"] == 0.0:
                             self._launch_probe_unlocked(root, mono_now)
 
@@ -314,6 +328,10 @@ class RootAvailabilityTracker:
         return available, unavailable, all_recovered, all_lost
 
     def _launch_probe_unlocked(self, root, mono_now):
+        cold = getattr(self, "cold_storage_roots", set())
+        root_str = str(root)
+        if root in cold or any(root_str == c or root_str.startswith(c.rstrip(os.sep) + os.sep) for c in cold):
+            return
         state = self._states[root]
         state["in_flight"] = True
         state["started_at"] = mono_now
@@ -321,6 +339,9 @@ class RootAvailabilityTracker:
         current_probe_id = state["probe_id"]
 
         def probe_worker(p_id):
+            cold_check = getattr(self, "cold_storage_roots", set())
+            if root in cold_check or any(root_str == c or root_str.startswith(c.rstrip(os.sep) + os.sep) for c in cold_check):
+                return
             success = False
             try:
                 p = Path(root)
@@ -368,6 +389,7 @@ import queue
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+import traceback
 
 from librarymanager_bootstrap import ensure_dependencies
 
@@ -375,6 +397,10 @@ ensure_dependencies()
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+try:
+    from watchdog.observers.fsevents import FSEventsEmitter
+except ImportError:
+    FSEventsEmitter = None
 from stashapi.stashapp import StashInterface
 
 import re
@@ -392,7 +418,9 @@ from librarymanager_core import (
                                  _pid_matches_monitor, _terminate_pid,
     recover_stale_active_transfers,
     recover_abandoned_processing_queue,
+    reconcile_missing_media_across_roots,
     _move_file,
+    parse_cold_storage_roots,
 )
 from librarymanager_reconciliation import ReconciliationCoordinator
 
@@ -426,11 +454,34 @@ def persist_monitor_runtime(runtime_path, runtime, worker, incoming_worker):
         "contact_sheet_adjust_vertical": bool(incoming_worker.contact_sheet_adjust_vertical),
         "contact_sheet_script": incoming_worker.contact_sheet_script,
         "allow_custom_contact_sheet_script": bool(incoming_worker.allow_custom_contact_sheet_script),
+        "periodic_reconcile_interval": runtime.get("periodic_reconcile_interval", "manual"),
+        "cold_storage_roots": list(runtime.get("cold_storage_roots") or []),
     })
     temporary = runtime_path.with_name(f"{runtime_path.name}.{os.getpid()}.tmp")
     temporary.write_text(json.dumps(snapshot), encoding="utf-8")
     temporary.chmod(0o600)
     os.replace(temporary, runtime_path)
+
+
+def _parse_reconcile_interval(val) -> int:
+    if not val:
+        return 0
+    s = str(val).strip().lower()
+    if s in ("manual", "disabled", "none", "off", "0"):
+        return 0
+    mapping = {
+        "1h": 3600,
+        "6h": 21600,
+        "12h": 43200,
+        "24h": 86400,
+        "7d": 604800,
+    }
+    if s in mapping:
+        return mapping[s]
+    try:
+        return int(s)
+    except ValueError:
+        return 0
 
 
 def reload_monitor_if_code_changed(loaded_signature, runtime_path, runtime, worker,
@@ -519,30 +570,41 @@ def find_eligible_videos_in_folder(folder: Path, database_path: Path = None, can
 
     # 2. In candidates (in-memory)
     if candidates:
+        f_str = str(f_resolved).rstrip(os.sep)
+        folder_str = str(folder).rstrip(os.sep)
         for c_p, c_cand in candidates.items():
             if not c_cand.get("is_companion") and not c_cand.get("is_temporary"):
                 p = Path(c_p)
                 if p.suffix.lower() in VIDEO_EXTENSIONS:
-                    try:
-                        if p.parent.resolve() == f_resolved:
-                            eligible.add(p.resolve())
-                    except OSError:
-                        pass
+                    p_parent_str = str(p.parent).rstrip(os.sep)
+                    if p_parent_str == f_str or p_parent_str == folder_str:
+                        try:
+                            if p.parent.resolve() == f_resolved:
+                                eligible.add(p.resolve())
+                        except OSError:
+                            pass
 
     # 3. In database files table (existing scenes)
     if database_path:
         try:
             con = connect(database_path)
             try:
-                rows = con.execute("SELECT path FROM files WHERE exists_on_disk=1").fetchall()
+                f_str = str(f_resolved).rstrip(os.sep)
+                folder_str = str(folder).rstrip(os.sep)
+                prefix_pattern = f"{f_str}{os.sep}%"
+                rows = con.execute(
+                    "SELECT path FROM files WHERE exists_on_disk=1 AND (path LIKE ? OR path LIKE ?)",
+                    (prefix_pattern, f"{folder_str}{os.sep}%")
+                ).fetchall()
                 for r in rows:
                     p = Path(r["path"])
                     if p.suffix.lower() in VIDEO_EXTENSIONS:
-                        try:
-                            if p.parent.resolve() == f_resolved:
+                        p_parent_str = str(p.parent).rstrip(os.sep)
+                        if p_parent_str == f_str or p_parent_str == folder_str:
+                            try:
                                 eligible.add(p.resolve())
-                        except OSError:
-                            pass
+                            except OSError:
+                                pass
             finally:
                 con.close()
         except Exception:
@@ -810,11 +872,20 @@ def likely_transcoder_replacement(source, destination):
     """Return True only for a conservative same-directory transcode-style replacement."""
     src = Path(source)
     dst = Path(destination)
-    try:
-        if src.parent.resolve() != dst.parent.resolve():
+    # Quick string comparison first before touching disk with .resolve()
+    src_parent_norm = os.path.normcase(os.path.normpath(str(src.parent)))
+    dst_parent_norm = os.path.normcase(os.path.normpath(str(dst.parent)))
+    if src_parent_norm != dst_parent_norm:
+        # If paths are under different volume prefixes, they cannot be same-directory replacements
+        src_parts = src_parent_norm.split(os.sep)
+        dst_parts = dst_parent_norm.split(os.sep)
+        if len(src_parts) > 2 and len(dst_parts) > 2 and src_parts[:3] != dst_parts[:3]:
             return False
-    except (OSError, ValueError):
-        return False
+        try:
+            if src.parent.resolve() != dst.parent.resolve():
+                return False
+        except (OSError, ValueError):
+            return False
     if src.suffix.lower() not in VIDEO_EXTENSIONS or dst.suffix.lower() not in VIDEO_EXTENSIONS:
         return False
     src_stem = src.stem.strip().casefold()
@@ -850,22 +921,44 @@ def destination_inventory_conflict(database_path, destination, source_row, conne
             connection.close()
 
 
-def register_transcoder_candidate(database_path, candidate):
+def register_transcoder_candidate(database_path, candidate, cold_storage_roots=None):
     """Persist a neutral candidate only when it maps to one existing inventoried source."""
     candidate_path = Path(candidate)
+    cand_suffix = candidate_path.suffix.lower()
+    if cand_suffix not in VIDEO_EXTENSIONS:
+        return None
+    cand_str = str(candidate_path)
+    if cold_storage_roots:
+        if any(cand_str == c or cand_str.startswith(c.rstrip(os.sep) + os.sep) for c in cold_storage_roots):
+            return None
     connection = connect(database_path)
     try:
         prior = connection.execute(
-            "SELECT status FROM transcoder_candidates WHERE candidate_path=?", (str(candidate_path),)
+            "SELECT status FROM transcoder_candidates WHERE candidate_path=?", (cand_str,)
         ).fetchone()
         if prior and prior["status"] == "independent":
             return None
-        rows = [dict(row) for row in connection.execute("SELECT file_id,scene_id,path FROM files")]
+        # Fast targeted query: only files in the same directory could ever be same-folder transcoder replacements
+        cand_parent_str = str(candidate_path.parent).rstrip(os.sep)
+        prefix_pattern = f"{cand_parent_str}{os.sep}%"
+        rows = [
+            dict(row) for row in connection.execute(
+                "SELECT file_id,scene_id,path FROM files WHERE path LIKE ?", (prefix_pattern,)
+            ).fetchall()
+        ]
+        if not rows:
+            return None
     finally:
         connection.close()
-    sources = [row for row in rows if Path(row["path"]).is_file()
-               and likely_transcoder_replacement(row["path"], candidate_path)
-               and not destination_inventory_conflict(database_path, candidate_path, row)]
+
+    # CRITICAL: evaluate likely_transcoder_replacement (in-memory string check) BEFORE Path.is_file()
+    # to avoid waking up sleeping/cold storage drives with filesystem stat calls across thousands of files.
+    sources = [
+        row for row in rows
+        if likely_transcoder_replacement(row["path"], candidate_path)
+        and Path(row["path"]).is_file()
+        and not destination_inventory_conflict(database_path, candidate_path, row)
+    ]
     if len(sources) != 1:
         return None
     source = sources[0]["path"]
@@ -3069,7 +3162,8 @@ class LibraryEventHandler(FileSystemEventHandler):
             candidate_source = None
             if (getattr(self.worker, "transcoder_compatibility", False) is True
                     and Path(event.src_path).suffix.lower() in VIDEO_EXTENSIONS):
-                candidate_source = register_transcoder_candidate(self.database_path, event.src_path)
+                cold_roots = getattr(self.availability_tracker, "cold_storage_roots", None) if self.availability_tracker else None
+                candidate_source = register_transcoder_candidate(self.database_path, event.src_path, cold_storage_roots=cold_roots)
             record_filesystem_event(
                 self.database_path, "created", event.src_path, is_directory=event.is_directory,
                 initial_status="waiting" if candidate_source else "pending"
@@ -3381,7 +3475,8 @@ class LibraryEventHandler(FileSystemEventHandler):
             if (getattr(self.worker, "transcoder_compatibility", False) is True
                     and dest_is_video):
                 remove_transcoder_candidate(self.database_path, event.src_path)
-                candidate_source = register_transcoder_candidate(self.database_path, event.dest_path)
+                cold_roots = getattr(self.availability_tracker, "cold_storage_roots", None) if self.availability_tracker else None
+                candidate_source = register_transcoder_candidate(self.database_path, event.dest_path, cold_storage_roots=cold_roots)
             if candidate_source:
                 record_filesystem_event(
                     self.database_path, "created", event.dest_path,
@@ -3438,6 +3533,47 @@ def update_status(database_path, token, pid, state, roots, unavailable, active_m
     except (sqlite3.OperationalError, sqlite3.DatabaseError) as err:
         logger.debug("update_status deferred (DB busy): %s", err)
         return True
+
+
+class HeartbeatWorker(threading.Thread):
+    """Background daemon thread maintaining periodic database heartbeat.
+    Ensures monitor ownership remains fresh even during long-running root scans."""
+    def __init__(self, database_path, token, pid, get_status_fn, interval=2.0):
+        super().__init__(name="monitor_heartbeat", daemon=True)
+        self.database_path = database_path
+        self.token = token
+        self.pid = pid
+        self.get_status_fn = get_status_fn
+        self.interval = float(interval)
+        self._stop_event = threading.Event()
+        self._superseded = False
+
+    def run(self):
+        while not self._stop_event.is_set():
+            try:
+                state, roots, unavailable, active_moves = self.get_status_fn()
+                ok = update_status(
+                    self.database_path,
+                    self.token,
+                    self.pid,
+                    state,
+                    roots,
+                    unavailable,
+                    active_moves=active_moves,
+                )
+                if ok is False:
+                    self._superseded = True
+                    break
+            except Exception as exc:
+                logger.debug("Heartbeat worker exception: %s", exc)
+            self._stop_event.wait(self.interval)
+
+    def stop(self):
+        self._stop_event.set()
+
+    @property
+    def superseded(self) -> bool:
+        return self._superseded
 
 
 def claim_monitor_ownership(database_path, token, pid, roots, unavailable):
@@ -3544,10 +3680,12 @@ class GroupedReconciliationWorker(threading.Thread):
     """Correlate settled events without blocking watchdog or reading file bodies."""
 
     def __init__(self, coordinator, roots, poll_seconds: float = 5.0,
-                 settle_seconds: float = 15.0, max_events: int = 250):
+                 settle_seconds: float = 15.0, max_events: int = 250,
+                 cold_storage_roots=None):
         super().__init__(daemon=False, name="WatchtowerGroupedReconciliationWorker")
         self.coordinator = coordinator
-        self.roots = [str(root) for root in (roots or [])]
+        self.cold_storage_roots = set(cold_storage_roots or [])
+        self.roots = [str(root) for root in (roots or []) if str(root) not in self.cold_storage_roots]
         self.poll_seconds = max(0.1, float(poll_seconds))
         self.settle_seconds = max(0.0, float(settle_seconds))
         self.max_events = max(1, int(max_events))
@@ -3569,6 +3707,9 @@ class GroupedReconciliationWorker(threading.Thread):
         return max(matches, key=len) if matches else str(Path(path).parent)
 
     def _probe(self, path: str) -> dict:
+        p_str = str(path)
+        if any(p_str == c or p_str.startswith(c.rstrip(os.sep) + os.sep) for c in self.cold_storage_roots):
+            return {"status": "unavailable", "exists": None, "error": "cold_storage"}
         root = self._root_for_path(path)
 
         def _stat_once():
@@ -3599,6 +3740,7 @@ class GroupedReconciliationWorker(threading.Thread):
             settle_seconds=self.settle_seconds,
             max_events=self.max_events,
             path_probe=self._probe,
+            cold_storage_roots=self.cold_storage_roots,
         )
 
     def run(self):
@@ -3620,11 +3762,43 @@ def main():
     args = parser.parse_args()
     database_path = Path(args.database)
     control_path = Path(args.control)
-    roots = json.loads(args.roots_json)
-    available, unavailable = probe_roots_startup(roots, timeout=2.0, max_workers=4)
+    runtime_path = Path(args.runtime)
+    loaded_code_signature = monitor_code_signature()
+    runtime = {}
+    if runtime_path.is_file():
+        try:
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+            runtime_path.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.debug("Failed to read runtime config from %s: %s", runtime_path, exc)
+
+    cold_storage_roots = set(parse_cold_storage_roots(runtime.get("cold_storage_roots")))
+    if FSEventsEmitter is not None:
+        FSEventsEmitter.cold_roots = cold_storage_roots
+
+    raw_roots = json.loads(args.roots_json)
+    roots = [r for r in raw_roots if r not in cold_storage_roots]
+    available, unavailable = probe_roots_startup(roots, timeout=10.0, max_workers=4, cold_storage_roots=cold_storage_roots)
     if not claim_monitor_ownership(database_path, args.token, os.getpid(), available, unavailable):
         logger.warning("Another Watchtower monitor already owns this database; exiting duplicate startup")
         return
+
+    tracker = None
+    worker = None
+    monitor_state = {"state": "running"}
+
+    def _get_heartbeat_status():
+        curr_state = monitor_state["state"]
+        curr_avail = tracker.get_available_roots() if tracker is not None else available
+        curr_unavail = tracker.get_unavailable_roots() if tracker is not None else unavailable
+        curr_moves = worker.active_moves_summary() if worker is not None and hasattr(worker, "active_moves_summary") else []
+        return curr_state, curr_avail, curr_unavail, curr_moves
+
+    heartbeat_worker = HeartbeatWorker(
+        database_path, args.token, os.getpid(), _get_heartbeat_status, interval=2.0
+    )
+    heartbeat_worker.start()
+
     reconciliation_coordinator = None
     try:
         reconciliation_coordinator = ReconciliationCoordinator(database_path, args.token)
@@ -3639,15 +3813,6 @@ def main():
             "Grouped reconciliation state could not be restored; existing monitoring will continue: %s",
             reconciliation_error,
         )
-    runtime_path = Path(args.runtime)
-    loaded_code_signature = monitor_code_signature()
-    runtime = {}
-    if runtime_path.is_file():
-        try:
-            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
-            runtime_path.unlink(missing_ok=True)
-        except Exception as exc:
-            logger.debug("Failed to read runtime config from %s: %s", runtime_path, exc)
     try:
         stash = StashInterface(runtime.get("server_connection") or {}, force_api_key=True)
     except TypeError:
@@ -3672,13 +3837,86 @@ def main():
     observer = Observer()
     handler = LibraryEventHandler(database_path, worker, runtime.get("mac_notifications") is True, incoming_worker)
     watched_roots = {}
-    for root in available:
-        try:
-            watch = observer.schedule(handler, root, recursive=True)
-            watched_roots[root] = watch
-        except Exception as exc:
-            logger.warning("Failed scheduling observer on %s: %s", root, exc)
-    update_status(database_path, args.token, os.getpid(), "running", available, unavailable, active_moves=[])
+    watched_roots_lock = threading.Lock()
+
+    cold_storage_roots = set(parse_cold_storage_roots(runtime.get("cold_storage_roots")))
+    if cold_storage_roots:
+        logger.info("Cold storage root(s) excluded from live monitoring: %s", list(cold_storage_roots))
+
+    def _schedule_roots_async(target_roots, is_startup=False):
+        target_roots = [r for r in target_roots if r not in cold_storage_roots]
+        total = len(target_roots)
+        if is_startup and total > 0:
+            logger.info("Scanning and attaching filesystem watchers across %d library root(s) in background...", total)
+            try:
+                record_activity(
+                    database_path, "monitor", "scanning library roots", "starting",
+                    severity="info",
+                    detail=f"Scanning and attaching filesystem watchers across {total} library root(s) in background..."
+                )
+            except Exception as act_err:
+                logger.debug("Failed recording startup scan activity: %s", act_err)
+
+        for idx, r in enumerate(target_roots, 1):
+            with watched_roots_lock:
+                already = r in watched_roots
+            if already:
+                continue
+            try:
+                watch = observer.schedule(handler, r, recursive=True)
+                with watched_roots_lock:
+                    watched_roots[r] = watch
+                logger.info("Watcher attached [%d/%d]: %s", idx, total, r)
+                try:
+                    record_activity(
+                        database_path, "monitor", "library root watched", "running",
+                        severity="info",
+                        new_path=r,
+                        detail=f"Watcher active [{idx}/{total}]: {Path(r).name} ({r})"
+                    )
+                except Exception as act_err:
+                    logger.debug("Failed recording root watched activity: %s", act_err)
+            except OSError as exc:
+                if getattr(exc, "errno", None) == 28:
+                    logger.error(
+                        "Linux inotify watch limit exceeded while watching %s: %s. "
+                        "Increase sysctl fs.inotify.max_user_watches (e.g. echo 524288 > /proc/sys/fs/inotify/max_user_watches)",
+                        r, exc
+                    )
+                    try:
+                        record_activity(
+                            database_path, "monitor", "inotify limit exceeded", "warning",
+                            severity="warning",
+                            old_path=r,
+                            detail="Linux inotify watch limit exceeded. Run 'sudo sysctl fs.inotify.max_user_watches=524288' to allow watching large libraries."
+                        )
+                    except Exception:
+                        pass
+                else:
+                    logger.warning("Failed scheduling observer on %s: %s", r, exc)
+                    try:
+                        record_activity(
+                            database_path, "monitor", "library root watch failed", "warning",
+                            severity="warning",
+                            old_path=r,
+                            detail=f"Failed to attach watcher to {Path(r).name}: {exc}"
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning("Failed scheduling observer on %s: %s", r, exc)
+
+        if is_startup and total > 0:
+            logger.info("All %d library root(s) are active and monitored.", total)
+            try:
+                record_activity(
+                    database_path, "monitor", "library roots ready", "running",
+                    severity="info",
+                    detail=f"All {total} library root(s) are active and monitored."
+                )
+            except Exception as act_err:
+                logger.debug("Failed recording roots ready activity: %s", act_err)
+
     record_monitor_lifecycle(
         database_path, "MONITOR STARTED", "running",
         detail=f"MONITOR STARTED — watching {len(available)} library root(s) (PID {os.getpid()})",
@@ -3708,7 +3946,7 @@ def main():
         logger.info("Startup: recovered %d stale filing transfer(s)", len(_stale_transfer_recovered))
     checksum_worker = ChecksumWorker(database_path)
     reconciliation_worker = (
-        GroupedReconciliationWorker(reconciliation_coordinator, roots)
+        GroupedReconciliationWorker(reconciliation_coordinator, roots, cold_storage_roots=cold_storage_roots)
         if reconciliation_coordinator is not None else None
     )
     worker.start()
@@ -3717,10 +3955,25 @@ def main():
     if reconciliation_worker is not None:
         reconciliation_worker.start()
     observer.start()
+
+    # Dispatch root scheduling in background thread so observer is already running
+    # and directory tree traversal across network shares never blocks the main loop
+    scheduling_thread = threading.Thread(
+        target=_schedule_roots_async,
+        args=(list(available), True),
+        name="schedule_roots_startup",
+        daemon=True,
+    )
+    scheduling_thread.start()
+
     if worker.transcoder_compatibility:
         handler.restore_transcoder_candidates()
-    tracker = RootAvailabilityTracker(roots, probe_timeout=5.0)
+    tracker = RootAvailabilityTracker(roots, probe_timeout=30.0, cold_storage_roots=cold_storage_roots)
     _last_stale_transfer_check = 0.0  # epoch seconds; check every 5 minutes
+    _periodic_reconcile_interval = _parse_reconcile_interval(runtime.get("periodic_reconcile_interval"))
+    _last_periodic_reconcile_check = time.monotonic()
+    _periodic_reconcile_running = False
+    _periodic_reconcile_lock = threading.Lock()
     handler.availability_tracker = tracker
     if incoming_worker:
         incoming_worker.availability_tracker = tracker
@@ -3729,6 +3982,10 @@ def main():
             tracker._states[r]["status"] = "unavailable"
     try:
         while True:
+            if heartbeat_worker.superseded:
+                logger.info("Monitor ownership superseded; exiting daemon loop")
+                break
+
             available, unavailable, recovered, lost = tracker.poll()
 
             for root in lost:
@@ -3737,7 +3994,8 @@ def main():
                                 severity="warning", old_path=root,
                                 detail="Network share disconnected or became unresponsive")
                 notify(runtime.get("mac_notifications") is True, f"Library root unavailable: {Path(root).name}")
-                watch = watched_roots.pop(root, None)
+                with watched_roots_lock:
+                    watch = watched_roots.pop(root, None)
                 if watch:
                     def _unschedule_async(w):
                         try:
@@ -3752,12 +4010,15 @@ def main():
                                 severity="info", new_path=root,
                                 detail="Network share reconnected; monitoring resumed")
                 notify(runtime.get("mac_notifications") is True, f"Library root reconnected: {Path(root).name}")
-                if root not in watched_roots:
-                    try:
-                        watch = observer.schedule(handler, root, recursive=True)
-                        watched_roots[root] = watch
-                    except Exception as exc:
-                        logger.warning("Failed scheduling observer on reconnected root %s: %s", root, exc)
+                with watched_roots_lock:
+                    already_watched = root in watched_roots
+                if not already_watched:
+                    threading.Thread(
+                        target=_schedule_roots_async,
+                        args=([root], False),
+                        name=f"schedule_roots_recovered_{Path(root).name}",
+                        daemon=True,
+                    ).start()
                 if incoming_worker:
                     incoming_worker.trigger_recovery_scan(root, max_wait=0)
                 if worker:
@@ -3789,6 +4050,37 @@ def main():
                                     handler.notifications = new_notif
                             else:
                                 worker.notifications = bool(new_cfg.get("mac_notifications", worker.notifications))
+                            if "periodic_reconcile_interval" in new_cfg:
+                                _periodic_reconcile_interval = _parse_reconcile_interval(new_cfg.get("periodic_reconcile_interval"))
+                            if "cold_storage_roots" in new_cfg:
+                                new_cold = set(parse_cold_storage_roots(new_cfg.get("cold_storage_roots")))
+                                if new_cold != cold_storage_roots:
+                                    with watched_roots_lock:
+                                        for r in list(watched_roots.keys()):
+                                            if r in new_cold:
+                                                w = watched_roots.pop(r, None)
+                                                if w:
+                                                    try:
+                                                        observer.unschedule(w)
+                                                    except Exception:
+                                                        pass
+                                                    logger.info("Unscheduled live watcher for cold storage root: %s", r)
+                                    to_watch = [r for r in available if r not in new_cold and r not in watched_roots]
+                                    if to_watch:
+                                        threading.Thread(
+                                            target=_schedule_roots_async,
+                                            args=(to_watch, False),
+                                            name="schedule_roots_un_cold",
+                                            daemon=True,
+                                        ).start()
+                                    cold_storage_roots = new_cold
+                                    if FSEventsEmitter is not None:
+                                        FSEventsEmitter.cold_roots = cold_storage_roots
+                                    runtime["cold_storage_roots"] = list(cold_storage_roots)
+                                    tracker.update_roots([r for r in raw_roots if r not in cold_storage_roots], cold_storage_roots=cold_storage_roots)
+                                    if reconciliation_worker is not None:
+                                        reconciliation_worker.cold_storage_roots = cold_storage_roots
+                                        reconciliation_worker.roots = [str(r) for r in raw_roots if str(r) not in cold_storage_roots]
                             _new_folders = new_cfg.get("incoming_folders")
                             _new_folder_str = new_cfg.get("incoming_folder")
                             if _new_folders is not None:
@@ -3831,6 +4123,30 @@ def main():
                         logger.info("Periodic check: recovered %d stale filing transfer(s)", len(_stale))
                 except Exception as _exc:
                     logger.debug("Stale transfer check error: %s", _exc)
+            if _periodic_reconcile_interval > 0:
+                _now_reconcile = time.monotonic()
+                if _now_reconcile - _last_periodic_reconcile_check >= _periodic_reconcile_interval:
+                    _last_periodic_reconcile_check = _now_reconcile
+                    with _periodic_reconcile_lock:
+                        if not _periodic_reconcile_running:
+                            _periodic_reconcile_running = True
+                            def _run_periodic_sweep():
+                                nonlocal _periodic_reconcile_running
+                                try:
+                                    logger.info("Starting scheduled periodic library reconciliation sweep...")
+                                    cfg = None
+                                    if stash:
+                                        try:
+                                            cfg = stash.find_plugin_config("librarymanager") or {}
+                                        except Exception:
+                                            cfg = {}
+                                    reconcile_missing_media_across_roots(database_path, stash, roots, config=cfg)
+                                except Exception as _reconcile_err:
+                                    logger.warning("Scheduled periodic reconciliation failed: %s", _reconcile_err)
+                                finally:
+                                    with _periodic_reconcile_lock:
+                                        _periodic_reconcile_running = False
+                            threading.Thread(target=_run_periodic_sweep, name="periodic_reconcile_sweep", daemon=True).start()
             time.sleep(2)
     except KeyboardInterrupt:
         pass
@@ -3844,6 +4160,9 @@ def main():
             pass
         raise
     finally:
+        monitor_state["state"] = "stopped"
+        heartbeat_worker.stop()
+        heartbeat_worker.join(timeout=3)
         if reconciliation_worker is not None:
             reconciliation_worker.stop()
             reconciliation_worker.join(timeout=10)
@@ -3860,7 +4179,9 @@ def main():
         incoming_worker.join(timeout=10)
         checksum_worker.stop()
         checksum_worker.join(timeout=10)
-        update_status(database_path, args.token, os.getpid(), "stopped", available, unavailable, active_moves=[])
+        curr_avail = tracker.get_available_roots() if tracker is not None else available
+        curr_unavail = tracker.get_unavailable_roots() if tracker is not None else unavailable
+        update_status(database_path, args.token, os.getpid(), "stopped", curr_avail, curr_unavail, active_moves=[])
         if "fatal_error" not in locals():
             try:
                 record_monitor_lifecycle(

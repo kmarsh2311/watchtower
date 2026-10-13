@@ -1177,7 +1177,9 @@
     const groupedReconciliation = (payload.grouped_reconciliation || []).length;
     const filingRecovery = (payload.filing_proposals || []).filter(item => item.status === "needs_recovery").length;
     const failedRenames = (payload.failed_renames || []).length;
-    const alertCount = failedIncoming + filingAttentionIncoming + unavailableRoots + attentionEvents + groupedReconciliation + filingRecovery + failedRenames + (stale ? 1 : 0);
+    const missingFilesCount = Number(payload.missing_files_count || 0);
+    const unindexedMediaCount = (payload.unindexed_media || []).length;
+    const alertCount = failedIncoming + filingAttentionIncoming + unavailableRoots + attentionEvents + groupedReconciliation + filingRecovery + failedRenames + missingFilesCount + unindexedMediaCount + (stale ? 1 : 0);
     return {
       watcher: {
         active: watcherRunning,
@@ -1765,6 +1767,9 @@
           autoStartMonitor: true,
           startAtLogin: false,
           automaticMoveReconciliation: false,
+          periodicReconcileInterval: "manual",
+          autoIngestUnindexedMedia: false,
+          coldStorageRoots: [],
           transcoderReplacementCompatibility: false,
           automaticIncomingScan: false,
           incomingFolder: "",
@@ -1873,6 +1878,10 @@
           await loadReports();
           setTab("advanced");
           setNotice("The diagnostic report is ready below. No files were changed.");
+          window.setTimeout(() => {
+            const el = document.querySelector(".lm-report-list") || document.querySelector(".lm-report");
+            if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+          }, 200);
           return;
         }
         if (afterTab) {
@@ -2516,6 +2525,74 @@
       }
     }
 
+    async function handleAddUnindexedMedia(path) {
+      setBusy(`add_unindexed:${path}`); setError("");
+      try {
+        const raw = await operation("add_unindexed_media", { path });
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res?.message) setNotice(res.message);
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleAddAllUnindexedMedia() {
+      setBusy("add_all_unindexed"); setError("");
+      try {
+        const raw = await operation("add_all_unindexed_media");
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res?.message) setNotice(res.message);
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleIgnoreUnindexedMedia(path) {
+      setBusy(`ignore_unindexed:${path}`); setError("");
+      try {
+        await operation("ignore_unindexed_media", { path });
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleIgnoreAllUnindexedMedia(count) {
+      if (!window.confirm(`Ignore all ${count} unindexed video alerts? They will not prompt you again.`)) return;
+      setBusy("ignore_all_unindexed"); setError("");
+      try {
+        await operation("ignore_all_unindexed_media");
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    async function handleResetIgnoredUnindexedMedia() {
+      if (!window.confirm("Reset all ignored external media? This clears the ignore list so they can be discovered and reviewed again on your next sync.")) return;
+      setBusy("reset_ignored_unindexed"); setError("");
+      try {
+        const raw = await operation("reset_ignored_unindexed_media");
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res?.message) setNotice(res.message);
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
 
 
     async function handleApproveFiling(proposalId, updateMetadata = false, targetDest = null, targetEntityType = null, targetEntityId = null) {
@@ -2666,7 +2743,51 @@
       }
     }
 
-        function RetroStatus() {
+    const [showDriveSyncModal, setShowDriveSyncModal] = React.useState(false);
+    const [selectedSyncRoots, setSelectedSyncRoots] = React.useState({});
+
+    function getCleanRootsList() {
+      return (data?.library_roots || []).map(r => typeof r === "string" ? r : (r?.path || "")).filter(Boolean);
+    }
+
+    function handleInitiateManualSync() {
+      const rootsList = getCleanRootsList();
+      if (rootsList.length <= 1) {
+        handleExecuteManualSync(rootsList);
+        return;
+      }
+      const initial = {};
+      rootsList.forEach(r => { initial[r] = true; });
+      setSelectedSyncRoots(initial);
+      setShowDriveSyncModal(true);
+    }
+
+    async function handleExecuteManualSync(chosenRoots) {
+      setShowDriveSyncModal(false);
+      setBusy("reconcile_missing_media"); setError("");
+      setNotice("⏳ Scanning selected library drives to locate moves and unindexed media…");
+      try {
+        const payload = (chosenRoots && chosenRoots.length > 0) ? { roots: chosenRoots } : {};
+        const raw = await operation("reconcile_missing_media", payload);
+        const res = typeof raw === "string" ? JSON.parse(raw) : raw;
+        if (res && res.reconciled_count > 0) {
+          setNotice(`✓ Reconnected ${res.reconciled_count} of ${res.missing_checked} missing file(s) across selected drives!`);
+        } else if (res && res.missing_checked === 0) {
+          setNotice("All tracked scene files on selected drives are verified present on disk.");
+        } else {
+          setNotice(res.message || `Sync complete: checked ${res?.missing_checked || 0} missing files, ${res?.reconciled_count || 0} reconnected.`);
+        }
+        await refresh(true);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setBusy("");
+      }
+    }
+
+    const handleReconcileMissingMedia = handleInitiateManualSync;
+
+    function RetroStatus() {
       const activeIncoming = allActive.filter(item => {
         if (item.status === "downloading" || item.status === "scanning" || item.status === "generating_sheet" || item.status === "renaming" || item.status === "pending_rename") {
           return true;
@@ -2743,7 +2864,8 @@
         filteredStream = stream.filter(r => r.category === "rename" && r.status === "renamed");
       }
 
-      return React.createElement("section", { className: "lm-terminal", "aria-label": `${PRODUCT_NAME} live activity` },
+      return React.createElement(React.Fragment, null,
+        React.createElement("section", { className: "lm-terminal", "aria-label": `${PRODUCT_NAME} live activity` },
         React.createElement("header", null,
           React.createElement("strong", { className: "lm-terminal-brand" },
             React.createElement("img", { src: "/plugin/librarymanager/assets/watchtower-icon.png", alt: "" }),
@@ -2759,7 +2881,20 @@
               React.createElement(RestartIcon, { size: 14, className: "lm-refresh-icon", spinning: busy === "refresh" }),
               busy === "refresh" ? " REFRESHING…" : " REFRESH"
             ),
-            totalProblems > 0 && React.createElement("span", { className: "lm-terminal-header-alert" }, `⚠️ ${totalProblems} PROBLEM${totalProblems === 1 ? "" : "S"}`),
+            React.createElement("button", {
+              type: "button",
+              className: "lm-terminal-refresh-btn",
+              style: data?.missing_files_count > 0
+                ? { borderColor: "rgba(245, 158, 11, 0.5)", color: "#f59e0b" }
+                : { borderColor: "rgba(56, 189, 248, 0.35)", color: "#38bdf8" },
+              disabled: !!busy,
+              title: "Check library drives for external moves, reunited companions, and unindexed new media",
+              onClick: handleReconcileMissingMedia
+            }, busy === "reconcile_missing_media" ? "⚡️ SYNCING…" : (data?.missing_files_count > 0 ? `⚡️ MANUAL SYNC (${data.missing_files_count})` : "⚡️ MANUAL SYNC")),
+            totalProblems > 0 && (() => {
+              const hasHardErrors = (data?.rename_queue?.failed || 0) > 0 || (data?.failed_renames || []).length > 0 || (incoming?.active || []).some(i => i.status === "failed") || (monitor?.unavailable_roots || []).length > 0;
+              return React.createElement("span", { className: "lm-terminal-header-alert" }, `⚠️ ${totalProblems} ${hasHardErrors ? (totalProblems === 1 ? "PROBLEM" : "PROBLEMS") : (totalProblems === 1 ? "TO REVIEW" : "TO REVIEW")}`);
+            })(),
             React.createElement("span", { className: watcherWorking ? "online" : "offline" }, watcherWorking ? "● LISTENING" : (isMonitorStale ? "● STALE" : "● STOPPED")))),
 
         (totalProblems > 0 || terminalFilter === "attention") && React.createElement("div", {
@@ -2773,6 +2908,24 @@
                 ? `${totalProblems} item${totalProblems === 1 ? " requires" : "s require"} your action`
                 : "No active alerts")),
             React.createElement("div", { className: "lm-terminal-batch-btns" },
+              (data?.missing_files_count > 0) && React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn retry",
+                disabled: !!busy,
+                onClick: handleReconcileMissingMedia
+              }, busy === "reconcile_missing_media" ? "⚡️ SYNCING…" : `⚡️ SYNC MISSING (${data.missing_files_count})`),
+              (data?.unindexed_media?.length > 1) && React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn retry",
+                disabled: !!busy,
+                onClick: handleAddAllUnindexedMedia
+              }, busy === "add_all_unindexed" ? "⚡ ADDING ALL…" : `⚡ ADD ALL TO STASH (${data.unindexed_media.length})`),
+              (data?.unindexed_media?.length > 1) && React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn dismiss",
+                disabled: !!busy,
+                onClick: () => handleIgnoreAllUnindexedMedia(data.unindexed_media.length)
+              }, busy === "ignore_all_unindexed" ? "✕ IGNORING ALL…" : `✕ IGNORE ALL (${data.unindexed_media.length})`),
               isMonitorStale && React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn retry",
@@ -2826,6 +2979,104 @@
 
           totalProblems === 0 && React.createElement("p", { className: "lm-terminal-empty" },
             "No items currently need attention. Watchtower is listening."),
+
+          (data?.missing_files_count > 0) && React.createElement("div", {
+            className: "lm-terminal-attention-item warn",
+            key: "missing-media-alert"
+          },
+            React.createElement("div", { className: "lm-terminal-attention-title" },
+              React.createElement("strong", null, `! ${data.missing_files_count} MISSING SCENE FILE${data.missing_files_count === 1 ? "" : "S"}`),
+              React.createElement("span", { className: "lm-terminal-badge warn" }, "MEDIA RELOCATED")),
+            React.createElement("p", { className: "lm-terminal-attention-detail" },
+              React.createElement("b", null, "Reason: "),
+              `${data.missing_files_count} scene file${data.missing_files_count === 1 ? " is" : "s are"} missing from disk at their recorded path. This typically occurs when files are moved on a phone, tablet, or external file manager where filesystem monitor events are bypassed.`),
+            React.createElement("p", { className: "lm-terminal-attention-fix" },
+              "→ Fix: If you moved these files (e.g. from your phone or external share), click MANUAL SYNC to search drives and reconnect them. If you intentionally deleted these files, click CLEAN DELETED FROM STASH to prune dead scene records from Stash."),
+            React.createElement("div", { className: "lm-terminal-actions" },
+              React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn retry",
+                disabled: !!busy,
+                onClick: handleReconcileMissingMedia
+              }, busy === "reconcile_missing_media" ? "⚡️ SYNCING…" : `⚡️ MANUAL SYNC (${data.missing_files_count})`),
+              React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn dismiss",
+                disabled: !!busy,
+                title: "Run Stash Clean to prune scene records for files that were permanently deleted",
+                onClick: handleCleanStash
+              }, busy === "clean" ? "🧹 CLEANING STASH…" : "🧹 CLEAN DELETED FROM STASH"))),
+
+          ((data?.unindexed_media || []).length > 0) && React.createElement("div", {
+            className: "lm-terminal-attention-item unindexed",
+            key: "unindexed-media-alert"
+          },
+            React.createElement("div", { className: "lm-terminal-attention-title" },
+              React.createElement("strong", null, `! ${data.unindexed_media.length} UNINDEXED VIDEO${data.unindexed_media.length === 1 ? "" : "S"} FOUND ON DISK`),
+              React.createElement("span", { className: "lm-terminal-badge ok" }, "NEW MEDIA DISCOVERED")),
+            React.createElement("p", { className: "lm-terminal-attention-detail" },
+              React.createElement("b", null, "Discovered: "),
+              `${data.unindexed_media.length} video file${data.unindexed_media.length === 1 ? " was" : "s were"} found inside your library folders that ${data.unindexed_media.length === 1 ? "is" : "are"} not yet indexed in Stash. This happens when media is added via mobile file manager, SMB, or download client directly to your library.`),
+            React.createElement("div", { className: "lm-unindexed-file-list", style: { marginTop: "8px", display: "flex", flexDirection: "column", gap: "6px" } },
+              data.unindexed_media.map(item => {
+                const itemPath = item.path;
+                const fileName = item.basename || itemPath.split("/").pop();
+                const isAdding = busy === `add_unindexed:${itemPath}`;
+                const isIgnoring = busy === `ignore_unindexed:${itemPath}`;
+                return React.createElement("div", {
+                  key: itemPath,
+                  style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 8px", background: "rgba(255,255,255,0.03)", borderRadius: "4px", border: "1px solid rgba(255,255,255,0.06)" }
+                },
+                  React.createElement("div", { style: { display: "flex", flexDirection: "column", overflow: "hidden", textOverflow: "ellipsis", marginRight: "10px" } },
+                    React.createElement("span", { style: { fontWeight: "bold", fontSize: "0.85rem", color: "#f8fafc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, fileName),
+                    React.createElement("span", { style: { fontSize: "0.75rem", color: "rgba(255,255,255,0.45)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, itemPath)
+                  ),
+                  React.createElement("div", { style: { display: "flex", gap: "6px", flexShrink: 0 } },
+                    React.createElement("button", {
+                      type: "button",
+                      className: "lm-terminal-btn retry",
+                      disabled: !!busy,
+                      title: "Run a targeted Stash metadata scan to add this video to your Stash library",
+                      onClick: () => handleAddUnindexedMedia(itemPath)
+                    }, isAdding ? "⚡ ADDING…" : "⚡ ADD TO STASH"),
+                    React.createElement("button", {
+                      type: "button",
+                      className: "lm-terminal-btn dismiss",
+                      disabled: !!busy,
+                      title: "Ignore this video so Watchtower stops prompting to add it. You can reset ignored files anytime in Settings.",
+                      onClick: () => handleIgnoreUnindexedMedia(itemPath)
+                    }, isIgnoring ? "✕ IGNORING…" : "✕ IGNORE")
+                  )
+                );
+              })
+            ),
+            data.unindexed_media.length > 1 && React.createElement("div", { className: "lm-terminal-actions", style: { marginTop: "10px" } },
+              React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn retry",
+                disabled: !!busy,
+                onClick: handleAddAllUnindexedMedia
+              }, busy === "add_all_unindexed" ? "⚡ ADDING ALL…" : `⚡ ADD ALL TO STASH (${data.unindexed_media.length})`),
+              React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn dismiss",
+                disabled: !!busy,
+                title: "Ignore all listed videos. You can reset ignored files anytime in Settings.",
+                onClick: () => handleIgnoreAllUnindexedMedia(data.unindexed_media.length)
+              }, busy === "ignore_all_unindexed" ? "✕ IGNORING ALL…" : `✕ IGNORE ALL (${data.unindexed_media.length})`)),
+            (data?.ignored_unindexed_count > 0) && React.createElement("div", {
+              style: { marginTop: "10px", fontSize: "0.78rem", color: "rgba(255,255,255,0.45)", display: "flex", alignItems: "center", gap: "6px" }
+            },
+              React.createElement("span", null, `${data.ignored_unindexed_count} other video${data.ignored_unindexed_count === 1 ? " is" : "s are"} currently ignored`),
+              "•",
+              React.createElement("button", {
+                type: "button",
+                style: { background: "none", border: "none", padding: "0", color: "#38bdf8", cursor: "pointer", textDecoration: "underline", fontSize: "0.78rem" },
+                disabled: !!busy,
+                onClick: handleResetIgnoredUnindexedMedia
+              }, "Reset Ignored Media")
+            )
+          ),
 
           isMonitorStale && React.createElement("div", { className: "lm-terminal-attention-item warn", key: "stale-monitor" },
             React.createElement("div", { className: "lm-terminal-attention-title" },
@@ -3285,6 +3536,13 @@
               event.destination_path && React.createElement("p", { className: "lm-terminal-attention-sub" },
                 React.createElement("b", null, "To: "), event.destination_path),
               React.createElement("div", { className: "lm-terminal-actions" },
+                deletion && isVideo && event.scene_id && React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn retry",
+                  disabled: !!busy,
+                  title: "Search library drives to locate this video and reconnect it in Stash",
+                  onClick: handleReconcileMissingMedia
+                }, busy === "reconcile_missing_media" ? "⚡ RECONNECTING…" : "⚡ RECONNECT MOVED FILE"),
                 deletion && isVideo && event.scene_id && React.createElement("button", {
                   type: "button", className: "lm-terminal-btn danger", disabled: !!busy,
                   onClick: () => resolvePendingEvent(event, "remove_stash_scene")
@@ -4013,7 +4271,98 @@
 
         React.createElement("footer", null,
           React.createElement("span", null, "Watchtower Live Terminal • Deep History Active • Full exports in Activity tab"),
-          React.createElement("span", { className: "lm-terminal-event-count" }, `${filteredStream.length} event${filteredStream.length === 1 ? "" : "s"} shown`)));
+          React.createElement("span", { className: "lm-terminal-event-count" }, `${filteredStream.length} event${filteredStream.length === 1 ? "" : "s"} shown`))
+        ),
+        showDriveSyncModal && (() => {
+          const allDrives = getCleanRootsList();
+          const checkedCount = Object.keys(selectedSyncRoots).filter(k => selectedSyncRoots[k]).length;
+          return React.createElement(Modal, {
+            show: true,
+            size: "lg",
+            onHide: () => setShowDriveSyncModal(false),
+            centered: true,
+            dialogClassName: "lm-drive-sync-modal"
+          },
+            React.createElement(Modal.Header, { closeButton: true, style: { background: "#0b120c", borderBottom: "1px solid rgba(56, 189, 248, .2)" } },
+              React.createElement(Modal.Title, { style: { color: "#38bdf8", fontWeight: "700", fontSize: "1.1rem" } },
+                "⚡️ MANUAL DRIVE SYNC"
+              )
+            ),
+            React.createElement(Modal.Body, { style: { background: "#060a07", color: "#d1fae5", fontSize: ".88rem", lineHeight: "1.5" } },
+              React.createElement("p", { style: { color: "#94a3b8", marginBottom: "12px" } },
+                "Select which library drives to sweep for moved files, reunited companion files, and unindexed media. Unchecked drives will remain asleep."
+              ),
+              React.createElement("div", { style: { display: "flex", gap: "8px", marginBottom: "14px" } },
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn retry",
+                  onClick: () => {
+                    const all = {};
+                    allDrives.forEach(d => { all[d] = true; });
+                    setSelectedSyncRoots(all);
+                  }
+                }, "SELECT ALL"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn dismiss",
+                  onClick: () => setSelectedSyncRoots({})
+                }, "DESELECT ALL")
+              ),
+              React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: "8px", maxHeight: "50vh", overflowY: "auto" } },
+                allDrives.map(drivePath => {
+                  const isChecked = selectedSyncRoots[drivePath] === true;
+                  const isUnavailable = (monitor.unavailable_roots || []).includes(drivePath);
+                  return React.createElement("div", {
+                    key: drivePath,
+                    onClick: () => setSelectedSyncRoots(prev => ({ ...prev, [drivePath]: !isChecked })),
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "8px 12px",
+                      background: isChecked ? "rgba(56, 189, 248, 0.12)" : "rgba(255, 255, 255, 0.03)",
+                      border: isChecked ? "1px solid rgba(56, 189, 248, 0.4)" : "1px solid rgba(255, 255, 255, 0.08)",
+                      borderRadius: "6px",
+                      cursor: "pointer",
+                      userSelect: "none"
+                    }
+                  },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "10px", minWidth: 0, overflow: "hidden" } },
+                      React.createElement("input", {
+                        type: "checkbox",
+                        checked: isChecked,
+                        onChange: () => {},
+                        style: { cursor: "pointer" }
+                      }),
+                      React.createElement("code", { style: { color: isChecked ? "#38bdf8" : "#94a3b8", fontSize: "0.86rem", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, drivePath)
+                    ),
+                    React.createElement("span", {
+                      className: `lm-badge ${isUnavailable ? "warn" : "ok"}`,
+                      style: { flexShrink: 0, marginLeft: "8px" }
+                    }, isUnavailable ? "UNAVAILABLE" : "READY")
+                  );
+                })
+              )
+            ),
+            React.createElement(Modal.Footer, { style: { background: "#0b120c", borderTop: "1px solid rgba(56, 189, 248, .2)", display: "flex", justifyContent: "space-between" } },
+              React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn dismiss",
+                onClick: () => setShowDriveSyncModal(false)
+              }, "CANCEL"),
+              React.createElement("button", {
+                type: "button",
+                className: "lm-terminal-btn retry",
+                disabled: checkedCount === 0 || !!busy,
+                onClick: () => {
+                  const chosen = Object.keys(selectedSyncRoots).filter(k => selectedSyncRoots[k]);
+                  handleExecuteManualSync(chosen);
+                }
+              }, busy === "reconcile_missing_media" ? "⚡️ SYNCING…" : `⚡️ START SYNC (${checkedCount} DRIVE${checkedCount === 1 ? "" : "S"})`)
+            )
+          );
+        })()
+      );
     }
 
 
@@ -4080,8 +4429,8 @@
             tone: !inventory ? "" : inventory.missing_count ? "warn" : "ok"
           }),
           React.createElement(StatusCard, {
-            title: "Problems",
-            value: `${data?.rename_queue?.failed || 0}`,
+            title: "Rename queue",
+            value: data?.rename_queue?.failed ? `${data.rename_queue.failed} failed` : (data?.rename_queue?.pending ? `${data.rename_queue.pending} waiting` : "Idle"),
             detail: `${data?.rename_queue?.pending || 0} filename changes waiting`,
             tone: data?.rename_queue?.failed ? "warn" : "ok"
           })),
@@ -4331,12 +4680,11 @@
               }
             },
               React.createElement(StartIcon, { size: 15 }),
-              "Start Watcher"),
-            React.createElement(TaskButton, { name: readOnlyTasks.events, label: "Reconcile Events (Read Only)", showResults: "reports" })))),
-      panel("Watcher Automation & Behavior", "Configure external move reconciliation and system startup options.",
+              "Start Watcher")))),
+      panel("Watcher Automation & Behavior", "Configure real-time move tracking, drive sync sweeps, and system startup options.",
         React.createElement(React.Fragment, null,
-          React.createElement(Switch, { setting: "automaticMoveReconciliation", label: "Reconcile Verified External Moves",
-            help: "When a file is moved outside of Stash and verified by size/hash, ask Stash to scan the new path and reconnect it." }),
+          React.createElement(Switch, { setting: "automaticMoveReconciliation", label: "Real-Time Local Move Reconnection",
+            help: "When an existing scene file is moved or renamed locally on this machine (via Finder or terminal), automatically verify its size/hash and update Stash in real-time." }),
           React.createElement(Switch, { setting: "transcoderReplacementCompatibility", label: "Transcoder Replacement Compatibility",
             help: "Optional compatibility for FileFlows, HandBrake, Tdarr and similar tools. Allows Watchtower to reconnect a newly encoded replacement, such as movie.mp4 → movie encoded.mp4, to the existing Stash scene. Only strong same-folder matches are accepted; ambiguous matches are left for review." }),
           data?.startup?.supported && React.createElement(Switch, {
@@ -4345,21 +4693,144 @@
             help: data.startup.enabled
               ? `The watcher starts with ${data.startup.platform_label || "your OS"} and waits for Stash if necessary.`
               : `Start the background watcher at login and retry once a minute until Stash is available.`
-          }))),
-      panel("Monitored Library Roots", "All configured Stash scene library folders tracked by the background filesystem monitor.",
-        React.createElement("div", { className: "lm-info-list" },
-          (data?.library_roots || []).length ? (data.library_roots || []).map(root => {
-            const rootPath = typeof root === "string" ? root : (root?.path || "");
-            const isUnavailable = (monitor.unavailable_roots || []).includes(rootPath);
-            return React.createElement("div", {
-              key: rootPath,
-              style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 4px", borderBottom: "1px solid rgba(255,255,255,0.06)" }
+          }),
+          React.createElement("div", {
+            style: {
+              marginTop: "20px",
+              paddingTop: "16px",
+              borderTop: "1px solid rgba(255,255,255,0.08)"
+            }
+          },
+            React.createElement("div", { style: { fontWeight: "600", fontSize: "0.92rem", color: "#38bdf8", marginBottom: "4px" } }, "Library Drive Sweeps & Media Discovery (Mobile / SMB / Network)"),
+            React.createElement("div", { style: { fontSize: "0.8rem", color: "rgba(255,255,255,0.6)", marginBottom: "14px" } },
+              "For files moved or added from external devices (phones, tablets, network shares) where local filesystem events were not received."
+            ),
+            React.createElement(ChoiceField, {
+              label: "Periodic Drive Sync Interval",
+              help: "If you only manage files directly on this machine, Watchtower's real-time watcher already catches changes instantly, so 'Manual Only' is all you need. A periodic schedule (e.g. Daily) is only necessary if files are moved, renamed, or added remotely over network shares (SMB/NFS) or mobile devices where local filesystem events cannot be detected.",
+              value: config.periodicReconcileInterval || "manual",
+              choices: [
+                ["manual", "Manual Only (On demand via ⚡️ MANUAL SYNC)"],
+                ["1h", "Every 1 Hour"],
+                ["6h", "Every 6 Hours"],
+                ["12h", "Every 12 Hours"],
+                ["24h", "Every 24 Hours (Daily)"],
+                ["7d", "Every 7 Days (Weekly)"]
+              ],
+              onChange: value => updateSetting("periodicReconcileInterval", value)
+            }),
+            React.createElement(Switch, { setting: "autoIngestUnindexedMedia", label: "Automatically Ingest Discovered Media",
+              help: "When a drive sync finds new unindexed video files in your library folders, automatically run complete ingestion into Stash with previews, thumbnails, and contact sheets instead of waiting for manual review." }),
+            React.createElement("div", {
+              style: {
+                marginTop: "14px",
+                padding: "10px 14px",
+                background: "rgba(255,255,255,0.02)",
+                borderRadius: "6px",
+                border: "1px solid rgba(255,255,255,0.06)",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center"
+              }
             },
-              React.createElement("code", { style: { color: isUnavailable ? "#ffb52e" : "#20e64a", fontSize: "0.88rem" } }, rootPath),
-              React.createElement("span", { className: `lm-badge ${isUnavailable ? "warn" : "ok"}` }, isUnavailable ? "UNAVAILABLE" : "AVAILABLE")
-            );
-          })
-            : React.createElement("p", { className: "lm-empty" }, "No library roots discovered in Stash configuration."))))
+              React.createElement("div", null,
+                React.createElement("div", { style: { fontWeight: "500", fontSize: "0.88rem", color: "#f8fafc" } }, "Ignored External Media"),
+                React.createElement("div", { style: { fontSize: "0.8rem", color: "rgba(255,255,255,0.5)", marginTop: "2px" } },
+                  (data?.ignored_unindexed_count > 0)
+                    ? `${data.ignored_unindexed_count} video file${data.ignored_unindexed_count === 1 ? " is" : "s are"} currently hidden from sync discovery.`
+                    : "No video files are currently ignored."
+                )
+              ),
+              React.createElement(Button, {
+                variant: "secondary",
+                disabled: !(data?.ignored_unindexed_count > 0) || !!busy,
+                title: "Clear the ignore list so previously ignored videos can be discovered and reviewed again on your next sync.",
+                onClick: handleResetIgnoredUnindexedMedia
+              }, busy === "reset_ignored_unindexed" ? "Resetting…" : "Reset Ignored Media")
+            )
+          ))),
+      panel("Library Drives & Real-Time Monitoring", "Configure live real-time watching vs. cold storage for each Stash library drive.",
+        (() => {
+          const rawColdRoots = Array.isArray(config.coldStorageRoots)
+            ? config.coldStorageRoots
+            : (typeof config.coldStorageRoots === "string"
+              ? (config.coldStorageRoots.startsWith("[")
+                ? (() => { try { return JSON.parse(config.coldStorageRoots); } catch(e) { return []; } })()
+                : config.coldStorageRoots.split(",").map(s => s.trim()).filter(Boolean))
+              : []);
+          const hasAnyColdRoot = rawColdRoots.length > 0;
+
+          const handleToggleColdRoot = (path, makeCold) => {
+            let next;
+            if (makeCold) {
+              next = Array.from(new Set([...rawColdRoots, path]));
+            } else {
+              next = rawColdRoots.filter(p => p !== path);
+            }
+            setConfig({ ...config, coldStorageRoots: next });
+            updateSettings({ coldStorageRoots: next }, makeCold ? `Drive ${path} set to Cold Storage.` : `Drive ${path} restored to Live Monitoring.`);
+          };
+
+          return React.createElement(React.Fragment, null,
+            React.createElement("div", { style: { fontSize: "0.82rem", color: "rgba(255,255,255,0.65)", marginBottom: "12px" } },
+              "Designate drives as Cold Storage to keep physical USB or network disks asleep. Cold storage drives are excluded from live background watchers and synchronized on demand via ⚡️ MANUAL SYNC or scheduled sweeps."
+            ),
+            React.createElement("div", { className: "lm-info-list" },
+              (data?.library_roots || []).length ? (data.library_roots || []).map(root => {
+                const rootPath = typeof root === "string" ? root : (root?.path || "");
+                const isUnavailable = (monitor.unavailable_roots || []).includes(rootPath);
+                const isCold = rawColdRoots.includes(rootPath);
+                return React.createElement("div", {
+                  key: rootPath,
+                  style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 4px", borderBottom: "1px solid rgba(255,255,255,0.06)", flexWrap: "wrap", gap: "8px" }
+                },
+                  React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px" } },
+                    React.createElement("code", { style: { color: isUnavailable ? "#ffb52e" : (isCold ? "#38bdf8" : "#20e64a"), fontSize: "0.88rem" } }, rootPath),
+                    isUnavailable
+                      ? React.createElement("span", { className: "lm-badge warn" }, "UNAVAILABLE")
+                      : (isCold
+                        ? React.createElement("span", { className: "lm-badge", style: { backgroundColor: "rgba(56, 189, 248, 0.15)", color: "#38bdf8", border: "1px solid rgba(56, 189, 248, 0.4)" } }, "❄️ COLD STORAGE")
+                        : React.createElement("span", { className: "lm-badge ok" }, "● LIVE WATCHED"))
+                  ),
+                  React.createElement("label", { style: { display: "flex", alignItems: "center", gap: "6px", cursor: "pointer", fontSize: "0.82rem", color: isCold ? "#38bdf8" : "rgba(255,255,255,0.7)" } },
+                    React.createElement("input", {
+                      type: "checkbox",
+                      checked: isCold,
+                      onChange: event => handleToggleColdRoot(rootPath, event.target.checked)
+                    }),
+                    "Cold Storage (Sync on Demand)"
+                  )
+                );
+              })
+                : React.createElement("p", { className: "lm-empty" }, "No library roots discovered in Stash configuration.")
+            ),
+            hasAnyColdRoot && React.createElement("div", {
+              style: {
+                marginTop: "16px",
+                padding: "12px 16px",
+                background: "rgba(245, 158, 11, 0.08)",
+                border: "1px solid rgba(245, 158, 11, 0.35)",
+                borderRadius: "6px",
+                color: "#fbbf24"
+              }
+            },
+              React.createElement("div", { style: { fontWeight: "600", fontSize: "0.88rem", marginBottom: "6px", display: "flex", alignItems: "center", gap: "6px" } },
+                "⚠️ Cold Storage / On-Demand Sync Notice"
+              ),
+              React.createElement("div", { style: { fontSize: "0.8rem", lineHeight: "1.5", color: "rgba(255, 255, 255, 0.85)" } },
+                React.createElement("p", { style: { margin: "0 0 8px 0" } },
+                  "Drives set to ", React.createElement("strong", { style: { color: "#38bdf8" } }, "Cold Storage"), " are ", React.createElement("strong", { style: { color: "#22c55e" } }, "100% accessible"), " in Stash. You can browse, stream, and play your videos normally anytime. Only Watchtower's background real-time watcher is turned off so idle disks can spin down and rest without waking up when other drives are used."
+                ),
+                React.createElement("ul", { style: { margin: "0", paddingLeft: "18px" } },
+                  React.createElement("li", null, React.createElement("strong", null, "Normal Stash Playback: "), "Playing videos and viewing scenes works as normal. The disk automatically spins up on-demand when you read a file."),
+                  React.createElement("li", null, React.createElement("strong", null, "Real-Time Move Tracking Off: "), "Moving or adding files on this drive in Finder will not update Stash in real time."),
+                  React.createElement("li", null, React.createElement("strong", null, "Reconnecting Changes: "), "To sync moved or newly added files, click ", React.createElement("strong", { style: { color: "#38bdf8" } }, "⚡️ MANUAL SYNC"), " on the main dashboard (or configure a periodic drive sweep schedule). All moves are verified and reconnected safely by fingerprint."),
+                  React.createElement("li", null, React.createElement("strong", null, "Live Watched Drives: "), "Your other drives (like your main drive) remain live-monitored in real time.")
+                )
+              )
+            )
+          );
+        })()))
     else if (tab === "incoming") {
       const rawFolders = Array.isArray(config.incomingFolders)
         ? config.incomingFolders
@@ -5182,7 +5653,8 @@
               React.createElement("li", null, React.createElement("strong", null, "Start / Stop / Reload Buttons: "), "Manually control the daemon process or reload configuration changes."),
               React.createElement("li", null, React.createElement("strong", null, "Auto Start Monitor (autoStartMonitor): "), "Automatically launches the monitor process whenever the Stash web interface loads."),
               React.createElement("li", null, React.createElement("strong", null, "Start Monitoring at Login (startAtLogin): "), "Configures the appropriate login startup entry on macOS, Windows, or Linux."),
-              React.createElement("li", null, React.createElement("strong", null, "Library Roots: "), "Displays all discovered Stash library roots and verifies whether each mount/drive is currently available or offline.")
+              React.createElement("li", null, React.createElement("strong", null, "Library Roots: "), "Displays all discovered Stash library roots with badges indicating \"Live Watched\" or \"Cold Storage (On-Demand)\"."),
+              React.createElement("li", null, React.createElement("strong", null, "Cold Storage Roots (coldStorageRoots): "), "Excludes secondary or archive drives from the live background watcher to allow disks to sleep undisturbed. See Section 11 for details.")
             ),
             React.createElement("h3", { key: "h3_2" }, "Reconcile Verified External Moves (automaticMoveReconciliation)"),
             React.createElement("p", { key: "p2" }, "When enabled, Watchtower protects your library against lost scenes when reorganizing files outside of Stash:"),
@@ -5348,6 +5820,33 @@
             ),
             React.createElement("div", { key: "tip1", className: "lm-help-tip" },
               React.createElement("strong", null, "Safe Operation: "), "Stash Clean and Safe Auto-Resolve only prune phantom database entries; they never delete or alter video files on your hard drive.")
+          ]
+        },
+        {
+          id: "cold-storage-manual-sync",
+          icon: "❄️",
+          title: "11. Cold Storage Drives & Manual Sync",
+          content: [
+            React.createElement("h2", { key: "h2" }, "❄️ 11. Cold Storage Drives & Manual Sync"),
+            React.createElement("p", { key: "p1" }, "Cold Storage allows you to designate auxiliary, external USB, or network storage drives to remain completely asleep with zero background disk activity, while remaining 100% accessible in Stash for video playback."),
+            React.createElement("h3", { key: "h3_1" }, "Why Cold Storage? (Zero-I/O Sleep Protection)"),
+            React.createElement("ul", { key: "ul1" },
+              React.createElement("li", null, React.createElement("strong", null, "No Drive Spin-Ups or Head Chatter: "), "Standard background filesystem watchers (such as macOS FSEvents or Windows ReadDirectoryChangesW) and periodic health probes keep external mechanical hard drives awake and spinning. Cold Storage completely excludes chosen drives from real-time watchers and periodic disk polling."),
+              React.createElement("li", null, React.createElement("strong", null, "Zero Side-Effects from Other Drives: "), "Organizing or moving files on your main drive (e.g. Vault 1) sends zero I/O or wake requests to your cold storage drive (e.g. Vault 2). The cold disk stays in deep sleep."),
+              React.createElement("li", null, React.createElement("strong", null, "100% Playback Access: "), "Stash maintains full streaming access. When you play a video from a cold storage drive in Stash, your operating system simply spins the drive up on demand to stream the video.")
+            ),
+            React.createElement("h3", { key: "h3_2" }, "⚡️ MANUAL SYNC & Scheduled Sweeps"),
+            React.createElement("ul", { key: "ul2" },
+              React.createElement("li", null, React.createElement("strong", null, "⚡️ MANUAL SYNC Button: "), "Located on the dashboard header. Whenever you finish copying or organizing files on your cold storage drives, click Manual Sync to sweep drives and synchronize changes into Stash on demand in seconds."),
+              React.createElement("li", null, React.createElement("strong", null, "Periodic Drive Sync Interval (periodicReconcileInterval): "), "Options: manual (default), 1h, 6h, 12h, 24h, 7d. If you organize files locally, real-time watching already handles changes instantly. A periodic schedule is only needed if files are modified remotely via network shares (SMB) or mobile devices while your computer is idle.")
+            ),
+            React.createElement("h3", { key: "h3_3" }, "Unindexed External Media & Missing Files"),
+            React.createElement("ul", { key: "ul3" },
+              React.createElement("li", null, React.createElement("strong", null, "Unindexed Media Discovery: "), "During drive syncs, Watchtower detects video files located on external drives that have not yet been imported into Stash and flags them under Needs Attention."),
+              React.createElement("li", null, React.createElement("strong", null, "Approval Actions: "), "Use \"Add to Stash\" (or \"Add All\") to import newly discovered files with full scrub sprites, preview videos, and contact sheets. Use \"Ignore\" or \"Ignore All\" to permanently dismiss files you don't wish to track."),
+              React.createElement("li", null, React.createElement("strong", null, "Automatically Ingest Discovered Media (autoIngestUnindexedMedia): "), "Optional setting that automatically adds newly discovered videos into Stash with full previews during sweeps, bypassing the Needs Attention approval card."),
+              React.createElement("li", null, React.createElement("strong", null, "Cross-Drive Missing File Reconnection: "), "When files are relocated across drives or while Stash was offline, Watchtower matches the missing Stash scene record by file size and cryptographic hash (oshash), moving companion sidecars and updating the file path without losing metadata, performers, or markers.")
+            )
           ]
         }
       ];
@@ -5994,31 +6493,39 @@
         const incomingFailed = status.incoming?.failed || 0;
         const incomingWaiting = status.incoming?.waiting || 0;
         const renameFailed = status.rename_queue?.failed || 0;
+        const unindexedCount = status.unindexed_media_count || 0;
+        const missingFiles = status.missing_files_count || 0;
         let tone = "healthy";
-        let title = `Library Manager: watching ${status.roots?.length || 0} library folders`;
+        let title = `Watchtower: watching ${status.roots?.length || 0} library folders`;
         if (status.state !== "running" || heartbeatAge > 15000) {
           tone = "error";
-          title = status.state !== "running" ? "Library Manager warning: file watcher is stopped" : "Library Manager warning: watcher heartbeat is stale";
+          title = status.state !== "running" ? "Watchtower warning: file watcher is stopped" : "Watchtower warning: watcher heartbeat is stale";
         } else if (unavailable || incomingFailed) {
           tone = "error";
           title = unavailable
-            ? `Library Manager warning: ${unavailable} library folder${unavailable === 1 ? " is" : "s are"} unavailable`
-            : `Library Manager warning: ${incomingFailed} completed video${incomingFailed === 1 ? " could" : "s could"} not be added`;
-        } else if (attentionCount || renameFailed) {
+            ? `Watchtower warning: ${unavailable} library folder${unavailable === 1 ? " is" : "s are"} unavailable`
+            : `Watchtower warning: ${incomingFailed} completed video${incomingFailed === 1 ? " could" : "s could"} not be added`;
+        } else if (attentionCount || renameFailed || unindexedCount || missingFiles) {
           tone = "warning";
-          title = attentionCount
-            ? `Library Manager: listening; ${attentionCount} detected change${attentionCount === 1 ? " needs" : "s need"} review`
-            : `Library Manager: ${renameFailed} automatic filename rename${renameFailed === 1 ? " requires" : "s require"} attention`;
+          if (unindexedCount) {
+            title = `Watchtower: ${unindexedCount} new video file${unindexedCount === 1 ? " was" : "s were"} discovered`;
+          } else if (missingFiles) {
+            title = `Watchtower: ${missingFiles} moved or missing file${missingFiles === 1 ? " needs" : "s need"} reconnection`;
+          } else if (attentionCount) {
+            title = `Watchtower: listening; ${attentionCount} detected change${attentionCount === 1 ? " needs" : "s need"} review`;
+          } else {
+            title = `Watchtower: ${renameFailed} automatic filename rename${renameFailed === 1 ? " requires" : "s require"} attention`;
+          }
         } else if (activeMovesCount) {
           tone = "healthy";
-          title = `Library Manager: watching; reconnecting moved file`;
+          title = `Watchtower: watching; reconnecting moved file`;
         } else if (incomingWaiting) {
           tone = "healthy";
-          title = `Library Manager: watching; ${incomingWaiting} video${incomingWaiting === 1 ? " is" : "s are"} finishing`;
+          title = `Watchtower: watching; ${incomingWaiting} video${incomingWaiting === 1 ? " is" : "s are"} finishing`;
         }
         setHealth({ tone, title, status });
       } catch (error) {
-        setHealth({ tone: "error", title: `Library Manager status unavailable: ${error.message}`, status: null });
+        setHealth({ tone: "error", title: `Watchtower status unavailable: ${error.message}`, status: null });
       }
     }, []);
 
@@ -6063,6 +6570,8 @@
             health.tone === "healthy" ? "● Running" : health.tone === "warning" ? "● Action Needed" : "● Attention")),
         React.createElement("div", { className: "lm-navbar-hud-grid" },
           React.createElement("div", null, React.createElement("span", null, "Watched Folders:"), React.createElement("strong", null, `${health.status?.roots?.length || 0}`)),
+          (health.status?.unindexed_media_count > 0) && React.createElement("div", null, React.createElement("span", null, "New Media Discovered:"), React.createElement("strong", { style: { color: "#38bdf8" } }, `${health.status.unindexed_media_count}`)),
+          (health.status?.missing_files_count > 0) && React.createElement("div", null, React.createElement("span", null, "Moved / Missing Files:"), React.createElement("strong", { style: { color: "#f59e0b" } }, `${health.status.missing_files_count}`)),
           React.createElement("div", null, React.createElement("span", null, "Unreviewed Changes:"), React.createElement("strong", null, `${health.status?.attention_events != null ? health.status.attention_events : Math.max(0, (health.status?.pending_events || 0) - (health.status?.active_moves?.length || 0))}`)),
           React.createElement("div", null, React.createElement("span", null, "Failed Downloads:"), React.createElement("strong", null, `${health.status?.incoming?.failed || 0}`)),
           React.createElement("div", null, React.createElement("span", null, "Failed Renames:"), React.createElement("strong", null, `${health.status?.rename_queue?.failed || 0}`)),

@@ -136,6 +136,47 @@ class MonitorOwnershipTests(unittest.TestCase):
             self.assertEqual(result["state"], "stopped")
             mock_term.assert_called_once_with(1212)
 
+    def test_heartbeat_worker_updates_database_and_detects_superseded(self):
+        from librarymanager_monitor import HeartbeatWorker
+        import time
+        conn = connect(self.db_path)
+        conn.execute(
+            """UPDATE filesystem_monitor_status
+               SET token='tok-1', pid=101, state='running', heartbeat_at=?
+               WHERE id=1""",
+            (utc_now(),),
+        )
+        conn.commit()
+        conn.close()
+
+        def status_fn():
+            return "running", ["/root1"], [], []
+
+        worker = HeartbeatWorker(self.db_path, "tok-1", 101, status_fn, interval=0.05)
+        worker.start()
+        try:
+            time.sleep(0.15)
+            self.assertFalse(worker.superseded)
+
+            # Simulate another monitor superseding this token in DB
+            conn = connect(self.db_path)
+            conn.execute("UPDATE filesystem_monitor_status SET token='tok-2' WHERE id=1")
+            conn.commit()
+            conn.close()
+
+            time.sleep(0.15)
+            self.assertTrue(worker.superseded)
+        finally:
+            worker.stop()
+            worker.join(timeout=1.0)
+
+    def test_root_availability_tracker_get_available_roots(self):
+        from librarymanager_monitor import RootAvailabilityTracker
+        tracker = RootAvailabilityTracker(["/root1", "/root2", "/root3"], probe_timeout=30.0)
+        tracker._states["/root2"]["status"] = "unavailable"
+        self.assertEqual(sorted(tracker.get_available_roots()), ["/root1", "/root3"])
+        self.assertEqual(tracker.get_unavailable_roots(), ["/root2"])
+
 
 class DuplicateStartupRaceTests(unittest.TestCase):
     """Two startups (Stash startup hook + a UI/operation call) can race. The loser's monitor
