@@ -2172,31 +2172,17 @@ def reconcile_filesystem_events(database_path: Path) -> tuple[dict, list[dict]]:
 
 
 def fingerprint_value(fingerprints_json: str, fingerprint_type: str):
-    try:
-        for fingerprint in json.loads(fingerprints_json or "[]"):
-            if str(fingerprint.get("type", "")).lower() == fingerprint_type.lower():
-                return str(fingerprint.get("value", "")).lower() or None
-    except (TypeError, ValueError):
-        return None
-    return None
+    """Extract a specific fingerprint value from fingerprints JSON string."""
+    from librarymanager.scanning.reconciliation import fingerprint_value as _impl
+    return _impl(fingerprints_json, fingerprint_type)
 
 
 def opensubtitles_hash(path: Path):
     """Calculate the OpenSubtitles hash without reading the complete video."""
-    chunk_size = 65536
-    size = path.stat().st_size
-    if size < chunk_size * 2:
-        return None
-    checksum = size
-    with path.open("rb") as video:
-        first = video.read(chunk_size)
-        video.seek(-chunk_size, os.SEEK_END)
-        last = video.read(chunk_size)
-    for chunk in (first, last):
-        usable = len(chunk) - (len(chunk) % 8)
-        if usable:
-            checksum += sum(struct.unpack(f"<{usable // 8}Q", chunk[:usable]))
-    return f"{checksum & 0xFFFFFFFFFFFFFFFF:016x}"
+    from librarymanager.scanning.reconciliation import opensubtitles_hash as _impl
+    return _impl(path)
+
+opensubtitles_hash._is_watchtower_wrapper = True
 
 
 

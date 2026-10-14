@@ -152,6 +152,27 @@ def opensubtitles_hash(path: Path) -> Optional[str]:
         return None
 
 
+_ORIGINAL_OPENSUBTITLES_HASH = opensubtitles_hash
+
+
+def get_opensubtitles_hash_fn():
+    """Return the active opensubtitles_hash function, prioritizing any monkeypatch
+    applied to either librarymanager.scanning.reconciliation or librarymanager_core.
+    """
+    canon = sys.modules.get(__name__, None)
+    canon_fn = getattr(canon, "opensubtitles_hash", None) if canon else opensubtitles_hash
+    if canon_fn is not None and canon_fn is not _ORIGINAL_OPENSUBTITLES_HASH:
+        return canon_fn
+
+    core_mod = sys.modules.get("librarymanager_core")
+    if core_mod is not None:
+        core_hash = getattr(core_mod, "opensubtitles_hash", None)
+        if core_hash is not None and not getattr(core_hash, "_is_watchtower_wrapper", False):
+            return core_hash
+
+    return canon_fn or _ORIGINAL_OPENSUBTITLES_HASH
+
+
 def _prune_cached_reports(target_fids_set: Set[str], root_dir: Optional[Path] = None) -> None:
     """Safely remove entries matching target_fids_set from reconciliation-report.json and resolution-plan.json.
     Preserves all unrelated records, reports, and summary metrics."""
@@ -324,23 +345,40 @@ def clean_deleted_scenes_from_stash(database_path: Path, stash: Any = None, root
 def reconcile_missing_files(database_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """Find rename candidates in the missing file's original directory; never mutate files."""
     now = utc_now()
-    connection = connect(database_path)
+
+    # Step 1: Open an initial short write transaction to record the run and read missing records
+    conn_init = connect(database_path)
     try:
-        run_id = connection.execute(
-            "INSERT INTO reconciliation_runs(started_at) VALUES (?)", (now,)
+        conn_init.execute("BEGIN IMMEDIATE")
+        run_id = conn_init.execute(
+            "INSERT INTO reconciliation_runs(started_at, status) VALUES (?, 'running')", (now,)
         ).lastrowid
-        missing = connection.execute(
+        missing = conn_init.execute(
             "SELECT file_id,scene_id,path,size,fingerprints_json FROM files WHERE exists_on_disk=0 ORDER BY path"
         ).fetchall()
+        missing = [dict(r) for r in missing]
         known_paths = {
-            os.path.normcase(os.path.abspath(row["path"])): row
-            for row in connection.execute(
+            os.path.normcase(os.path.abspath(row["path"])): dict(row)
+            for row in conn_init.execute(
                 "SELECT file_id,scene_id,path FROM files WHERE exists_on_disk=1"
             )
         }
-        summary = {"missing": len(missing), "matched": 0, "ambiguous": 0, "unmatched": 0, "skipped_folders": 0}
-        report = []
+        conn_init.commit()
+    except Exception:
+        try:
+            conn_init.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn_init.close()
 
+    summary = {"missing": len(missing), "matched": 0, "ambiguous": 0, "unmatched": 0, "skipped_folders": 0}
+    report = []
+    candidates_to_insert = []
+
+    # Step 2: Perform directory iteration and hash calculations purely in memory without an open DB transaction
+    try:
         for record in missing:
             expected = Path(record["path"])
             folder = expected.parent
@@ -376,7 +414,7 @@ def reconcile_missing_files(database_path: Path) -> Tuple[Dict[str, Any], List[D
                         size_matches.append(candidate)
                     except OSError:
                         continue
-                _hash_fn = getattr(sys.modules.get("librarymanager_core"), "opensubtitles_hash", opensubtitles_hash)
+                _hash_fn = get_opensubtitles_hash_fn()
                 expected_hash = fingerprint_value(record["fingerprints_json"], "oshash")
                 hash_matches = []
                 if expected_hash:
@@ -413,32 +451,70 @@ def reconcile_missing_files(database_path: Path) -> Tuple[Dict[str, Any], List[D
                 else:
                     summary["unmatched"] += 1
 
-            connection.execute(
+            candidates_to_insert.append((
+                run_id, result["file_id"], result["scene_id"], result["expected_path"],
+                result["candidate_path"], result["confidence"], result["reason"],
+                result["expected_size"], result["candidate_size"], result["oshash_match"], now
+            ))
+            report.append(result)
+    except Exception:
+        # Mark reconciliation run as failed
+        try:
+            conn_fail = connect(database_path)
+            try:
+                conn_fail.execute("BEGIN IMMEDIATE")
+                conn_fail.execute(
+                    "UPDATE reconciliation_runs SET completed_at=?, status='failed' WHERE id=?",
+                    (utc_now(), run_id),
+                )
+                conn_fail.commit()
+            finally:
+                conn_fail.close()
+        except Exception:
+            pass
+        raise
+
+    # Step 3: Persist all candidates and mark the run complete in a short atomic transaction
+    conn_finish = connect(database_path)
+    try:
+        conn_finish.execute("BEGIN IMMEDIATE")
+        if candidates_to_insert:
+            conn_finish.executemany(
                 """INSERT INTO reconciliation_candidates(run_id,file_id,scene_id,expected_path,candidate_path,
                        confidence,reason,expected_size,candidate_size,oshash_match,recorded_at)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                (run_id, result["file_id"], result["scene_id"], result["expected_path"], result["candidate_path"],
-                 result["confidence"], result["reason"], result["expected_size"], result["candidate_size"],
-                 result["oshash_match"], now),
+                candidates_to_insert,
             )
-            report.append(result)
-        connection.execute(
+        conn_finish.execute(
             """UPDATE reconciliation_runs SET completed_at=?,missing_count=?,matched_count=?,ambiguous_count=?,
                    unmatched_count=?,skipped_folder_count=?,status='complete' WHERE id=?""",
             (now, summary["missing"], summary["matched"], summary["ambiguous"], summary["unmatched"],
              summary["skipped_folders"], run_id),
         )
-        connection.commit()
+        conn_finish.commit()
         summary["run_id"] = run_id
         return summary, report
     except Exception:
         try:
-            connection.rollback()
+            conn_finish.rollback()
+        except Exception:
+            pass
+        try:
+            conn_fail = connect(database_path)
+            try:
+                conn_fail.execute("BEGIN IMMEDIATE")
+                conn_fail.execute(
+                    "UPDATE reconciliation_runs SET completed_at=?, status='failed' WHERE id=?",
+                    (utc_now(), run_id),
+                )
+                conn_fail.commit()
+            finally:
+                conn_fail.close()
         except Exception:
             pass
         raise
     finally:
-        connection.close()
+        conn_finish.close()
 
 
 def reconcile_missing_media_across_roots(
@@ -653,7 +729,7 @@ def reconcile_missing_media_across_roots(
                         if expected_size is not None and cand_size != expected_size:
                             continue
 
-                        _hash_fn = getattr(sys.modules.get("librarymanager_core"), "opensubtitles_hash", opensubtitles_hash)
+                        _hash_fn = get_opensubtitles_hash_fn()
                         expected_oshash = fingerprint_value(item.get("fingerprints_json"), "oshash")
                         oshash_verified = False
                         if expected_oshash:
@@ -863,6 +939,7 @@ __all__ = [
     "clean_deleted_scenes_from_stash",
     "connect",
     "fingerprint_value",
+    "get_opensubtitles_hash_fn",
     "is_temporary_download",
     "opensubtitles_hash",
     "parse_cold_storage_roots",

@@ -187,3 +187,159 @@ def test_reconcile_missing_media_across_roots_reconnection(tmp_path):
     # Verify companion was relocated alongside the moved video
     expected_companion = folder_b / "Video1.srt"
     assert expected_companion.is_file(), "Companion file was not moved alongside video"
+
+
+def test_reconcile_missing_files_concurrency(tmp_path, monkeypatch):
+    """Demonstrate that reconcile_missing_files does not hold a SQLite write transaction
+    across filesystem scanning and hashing, allowing concurrent writers to complete."""
+    db_path = tmp_path / "test_reconcile_concurrency.sqlite3"
+    conn = core_mod.connect(db_path)
+    now = core_mod.utc_now()
+
+    lib_dir = tmp_path / "lib_concurrent"
+    lib_dir.mkdir(parents=True)
+
+    cand = lib_dir / "Candidate.mp4"
+    cand.write_bytes(b"V" * 150000)
+    cand_size = cand.stat().st_size
+
+    missing_path = lib_dir / "Original.mp4"
+    conn.execute(
+        """INSERT INTO files (file_id, scene_id, path, basename, size, fingerprints_json, exists_on_disk, first_seen_at, last_seen_at)
+           VALUES ('f_conc', 's_conc', ?, 'Original.mp4', ?, '[{"type":"oshash","value":"conc_hash_123"}]', 0, ?, ?)""",
+        (str(missing_path), cand_size, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    stop_event = threading.Event()
+    worker_errors = []
+    writer_completed = threading.Event()
+
+    def bg_writer():
+        count = 0
+        while not stop_event.is_set():
+            try:
+                core_mod.record_filesystem_event(
+                    db_path,
+                    event_type="created",
+                    source_path=f"/lib/file_{count}.mp4",
+                )
+                count += 1
+                if count >= 3:
+                    writer_completed.set()
+                time.sleep(0.01)
+            except Exception as e:
+                worker_errors.append(str(e))
+
+    # Slow down opensubtitles_hash to simulate disk reading while background writes occur
+    def slow_hash(path):
+        time.sleep(0.1)
+        return "conc_hash_123"
+
+    monkeypatch.setattr(recon_mod, "opensubtitles_hash", slow_hash)
+
+    bg_t = threading.Thread(target=bg_writer, daemon=True)
+    bg_t.start()
+
+    try:
+        summary, report = recon_mod.reconcile_missing_files(db_path)
+        assert summary["missing"] == 1
+        assert summary["matched"] == 1
+        assert report[0]["confidence"] == "verified"
+    finally:
+        stop_event.set()
+        bg_t.join(timeout=3)
+
+    assert writer_completed.is_set(), "Background writer should have completed writes during file scanning"
+    assert worker_errors == [], f"Lock contention detected in background writer: {worker_errors}"
+
+
+def test_reconcile_missing_files_failure_lifecycle(tmp_path, monkeypatch):
+    """Verify rollback, connection closure, and failed run status when candidate discovery fails."""
+    db_path = tmp_path / "test_reconcile_fail.sqlite3"
+    conn = core_mod.connect(db_path)
+    now = core_mod.utc_now()
+
+    lib_dir = tmp_path / "lib_fail"
+    lib_dir.mkdir(parents=True)
+
+    cand = lib_dir / "CandidateFail.mp4"
+    cand.write_bytes(b"F" * 150000)
+
+    missing_path = lib_dir / "OriginalFail.mp4"
+    conn.execute(
+        """INSERT INTO files (file_id, scene_id, path, basename, size, fingerprints_json, exists_on_disk, first_seen_at, last_seen_at)
+           VALUES ('f_fail', 's_fail', ?, 'OriginalFail.mp4', 150000, '[{"type":"oshash","value":"hash_to_trigger_calc"}]', 0, ?, ?)""",
+        (str(missing_path), now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    def exploding_hash(path):
+        raise RuntimeError("Simulated catastrophic disk read failure")
+
+    monkeypatch.setattr(recon_mod, "opensubtitles_hash", exploding_hash)
+
+    with pytest.raises(RuntimeError, match="Simulated catastrophic disk read failure"):
+        recon_mod.reconcile_missing_files(db_path)
+
+    # Verify reconciliation_runs has status='failed' and no partial candidates were persisted
+    conn_verify = core_mod.connect(db_path)
+    try:
+        run_row = conn_verify.execute("SELECT status, completed_at FROM reconciliation_runs ORDER BY id DESC LIMIT 1").fetchone()
+        assert run_row is not None
+        assert run_row["status"] == "failed"
+        assert run_row["completed_at"] is not None
+
+        candidates = conn_verify.execute("SELECT COUNT(*) as c FROM reconciliation_candidates").fetchone()
+        assert candidates["c"] == 0
+    finally:
+        conn_verify.close()
+
+
+def test_monkeypatching_canonical_and_core_opensubtitles_hash(tmp_path, monkeypatch):
+    """Verify that monkeypatching opensubtitles_hash on either librarymanager.scanning.reconciliation
+    or librarymanager_core is correctly respected without asymmetry."""
+    db_path = tmp_path / "test_hash_patching.sqlite3"
+    conn = core_mod.connect(db_path)
+    now = core_mod.utc_now()
+
+    lib_dir = tmp_path / "lib_patch"
+    lib_dir.mkdir(parents=True)
+
+    cand = lib_dir / "PatchVideo.mp4"
+    cand.write_bytes(b"P" * 150000)
+    cand_size = cand.stat().st_size
+
+    missing_path = lib_dir / "MissingPatch.mp4"
+    conn.execute(
+        """INSERT INTO files (file_id, scene_id, path, basename, size, fingerprints_json, exists_on_disk, first_seen_at, last_seen_at)
+           VALUES ('f_patch', 's_patch', ?, 'MissingPatch.mp4', ?, '[{"type":"oshash","value":"target_hash_canonical"}]', 0, ?, ?)""",
+        (str(missing_path), cand_size, now, now),
+    )
+    conn.commit()
+    conn.close()
+
+    # 1. Test patching canonical module directly
+    monkeypatch.setattr("librarymanager.scanning.reconciliation.opensubtitles_hash", lambda p: "target_hash_canonical")
+    summary, report = recon_mod.reconcile_missing_files(db_path)
+    assert summary["matched"] == 1
+    assert report[0]["confidence"] == "verified"
+    assert report[0]["oshash_match"] == 1
+
+    # 2. Test patching legacy librarymanager_core module
+    conn = core_mod.connect(db_path)
+    conn.execute(
+        """UPDATE files SET fingerprints_json = '[{"type":"oshash","value":"target_hash_legacy_core"}]' WHERE file_id = 'f_patch'"""
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.undo()
+    monkeypatch.setattr("librarymanager_core.opensubtitles_hash", lambda p: "target_hash_legacy_core")
+    summary2, report2 = core_mod.reconcile_missing_files(db_path)
+    assert summary2["matched"] == 1
+    assert report2[0]["confidence"] == "verified"
+    assert report2[0]["oshash_match"] == 1
+
