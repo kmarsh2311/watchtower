@@ -101,6 +101,7 @@ REQUIRED_FILES=(
     "librarymanager_startup.py"
     "librarymanager/database/connection.py"
     "librarymanager/scanning/__init__.py"
+    "librarymanager/scanning/filesystem.py"
     "librarymanager/scanning/naming_rules.py"
     "librarymanager/scanning/reconciliation.py"
 )
@@ -126,6 +127,7 @@ if '.' not in sys.path:
 import librarymanager_bootstrap
 import librarymanager_startup
 import librarymanager
+import librarymanager.scanning.filesystem
 import librarymanager.scanning.naming_rules
 import librarymanager.scanning.reconciliation
 

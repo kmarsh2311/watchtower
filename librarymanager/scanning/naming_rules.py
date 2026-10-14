@@ -39,15 +39,24 @@ def connect(database_path: Union[Path, str]) -> sqlite3.Connection:
 
 
 def _get_associated_file_target_fn() -> Optional[Callable]:
-    """Dynamically resolve associated_file_target from core without hard circular import."""
+    """Dynamically resolve associated_file_target without hard circular import."""
+    mod = sys.modules.get("librarymanager.scanning.filesystem")
+    if mod and hasattr(mod, "associated_file_target"):
+        return getattr(mod, "associated_file_target")
     mod = sys.modules.get("librarymanager_core")
     if mod and hasattr(mod, "associated_file_target"):
         return getattr(mod, "associated_file_target")
+    try:
+        from librarymanager.scanning import filesystem
+        return getattr(filesystem, "associated_file_target", None)
+    except ImportError:
+        pass
     try:
         import librarymanager_core as core
         return getattr(core, "associated_file_target", None)
     except ImportError:
         return None
+
 
 
 def _normalized_filename_text(value: str) -> str:

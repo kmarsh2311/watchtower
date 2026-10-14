@@ -39,6 +39,7 @@ def test_zip_contains_all_critical_modules():
         "librarymanager_monitor.py",
         "librarymanager_reconciliation.py",
         "librarymanager_startup.py",
+        "librarymanager/scanning/filesystem.py",
         "librarymanager/scanning/naming_rules.py",
         "librarymanager/scanning/reconciliation.py",
         "requirements.txt",
@@ -64,6 +65,9 @@ if '.' not in sys.path:
 import librarymanager_bootstrap
 import librarymanager_startup
 import librarymanager
+import librarymanager.scanning.filesystem
+import librarymanager.scanning.naming_rules
+import librarymanager.scanning.reconciliation
 
 print('SUCCESS')
 """
