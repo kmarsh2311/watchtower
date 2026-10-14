@@ -8,6 +8,11 @@ from librarymanager.services.contact_sheets import (
     generate_ffmpeg_contact_sheet_fallback,
     generate_video_contact_sheet,
 )
+from librarymanager.services.inventory import (
+    flatten_scene_files,
+    inventory,
+    refresh_scene_inventory,
+)
 from librarymanager.services.manual_sync import (
     INCOMING_SCAN_FLAGS,
     _ensure_stash_supports_extension,
@@ -46,14 +51,17 @@ __all__ = [
     "ffmpeg_supports_drawtext",
     "find_csm_font",
     "finish_queued_rename",
+    "flatten_scene_files",
     "format_csm_duration",
     "generate_ffmpeg_contact_sheet_fallback",
     "generate_video_contact_sheet",
     "get_unindexed_external_media",
     "ignore_all_unindexed_media_files",
     "ignore_unindexed_media_file",
+    "inventory",
     "make_pending_rename_due",
     "notify_desktop",
+    "refresh_scene_inventory",
     "release_worker_schedule",
     "rename_lock",
     "reset_ignored_unindexed_media_files",
