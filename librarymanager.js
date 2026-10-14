@@ -160,7 +160,8 @@
     while (Date.now() < deadline) {
       const data = await gql(`query Job($id: ID!) { findJob(input: {id: $id}) { status description } }`, { id: String(id) });
       const status = data.findJob?.status;
-      if (status === "FINISHED") return;
+      if (status === "FINISHED" || status === "SUCCESS") return;
+      if (status === "FAILED") throw new Error("The Stash job failed.");
       if (status === "CANCELLED") throw new Error("The Stash job was cancelled.");
       await new Promise(resolve => window.setTimeout(resolve, 1000));
     }
@@ -1819,14 +1820,19 @@
         if (data?.metadataClean) {
           await waitForJob(data.metadataClean);
         }
-        setNotice("Updating Watchtower reports...");
-        const invJob = await runTask(readOnlyTasks.inventory);
-        if (invJob) await waitForJob(invJob);
-        const findJob = await runTask(readOnlyTasks.find);
-        if (findJob) await waitForJob(findJob);
-        await loadReports();
-        await refresh();
-        setNotice("Resolution complete! Verified files were re-linked and dead records were cleanly pruned.");
+        setNotice("Pruning deleted records from Watchtower...");
+        let cleanMsg = "";
+        try {
+          const cleanRes = await operation("clean_deleted_from_stash");
+          const cleanData = typeof cleanRes === "string" ? JSON.parse(cleanRes) : cleanRes;
+          if (cleanData && typeof cleanData.cleaned_count === "number") {
+            cleanMsg = ` Stash database cleaned and ${cleanData.cleaned_count} deleted scene record(s) pruned from Watchtower.`;
+          }
+        } catch (cleanErr) {
+          console.warn("clean_deleted_from_stash failed:", cleanErr);
+        }
+        await refresh(true);
+        setNotice(`Resolution complete!${cleanMsg || " Verified files were re-linked and dead records were cleanly pruned."}`);
       } catch (err) {
         setError(`Safe clean failed: ${err.message || err}`);
       } finally {
@@ -2772,10 +2778,12 @@
         const res = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (res && res.reconciled_count > 0) {
           setNotice(`✓ Reconnected ${res.reconciled_count} of ${res.missing_checked} missing file(s) across selected drives!`);
+        } else if (res?.message) {
+          setNotice(res.message);
         } else if (res && res.missing_checked === 0) {
           setNotice("All tracked scene files on selected drives are verified present on disk.");
         } else {
-          setNotice(res.message || `Sync complete: checked ${res?.missing_checked || 0} missing files, ${res?.reconciled_count || 0} reconnected.`);
+          setNotice(`Sync complete: checked ${res?.missing_checked || 0} missing files, ${res?.reconciled_count || 0} reconnected.`);
         }
         await refresh(true);
       } catch (err) {

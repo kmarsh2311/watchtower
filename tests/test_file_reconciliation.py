@@ -1596,4 +1596,115 @@ def test_reconcile_missing_media_does_not_probe_unticked_roots(tmp_path: Path, m
     assert not any(unticked_root in p for p in probed_paths), f"Unticked root leaked into probes: {probed_paths}"
 
 
+def test_clean_deleted_scenes_from_stash(tmp_path):
+    from librarymanager_core import clean_deleted_scenes_from_stash, connect
+
+    db_path = tmp_path / "test.sqlite3"
+    conn = connect(db_path)
+    # File 1: missing from disk and deleted from Stash
+    conn.execute(
+        """INSERT INTO files (file_id, scene_id, path, basename, size, exists_on_disk, first_seen_at, last_seen_at)
+           VALUES ('f1', 's1', '/media/deleted1.mp4', 'deleted1.mp4', 1000, 0, '2026-10-14', '2026-10-14')"""
+    )
+    # File 2: missing from disk but still exists in Stash
+    conn.execute(
+        """INSERT INTO files (file_id, scene_id, path, basename, size, exists_on_disk, first_seen_at, last_seen_at)
+           VALUES ('f2', 's2', '/media/missing2.mp4', 'missing2.mp4', 2000, 0, '2026-10-14', '2026-10-14')"""
+    )
+    # File 3: present on disk
+    file3 = tmp_path / "present3.mp4"
+    file3.write_bytes(b"data")
+    conn.execute(
+        """INSERT INTO files (file_id, scene_id, path, basename, size, exists_on_disk, first_seen_at, last_seen_at)
+           VALUES ('f3', 's3', ?, 'present3.mp4', 4, 0, '2026-10-14', '2026-10-14')""",
+        (str(file3),)
+    )
+    conn.commit()
+    conn.close()
+
+    mock_stash = MagicMock()
+    # Stash returns s2 as existing, but s1 is gone
+    mock_stash.call_GQL.return_value = {
+        "findScenes": {
+            "scenes": [
+                {"id": "s2", "files": [{"id": "f2", "path": "/media/missing2.mp4"}]}
+            ]
+        }
+    }
+
+    res = clean_deleted_scenes_from_stash(db_path, stash=mock_stash)
+    assert res["cleaned_count"] == 1
+    assert res["restored_count"] == 1
+    assert res["remaining_missing"] == 1
+
+    conn = connect(db_path)
+    rows = {r["file_id"]: dict(r) for r in conn.execute("SELECT file_id, exists_on_disk FROM files").fetchall()}
+    conn.close()
+
+    assert "f1" not in rows  # Cleaned / pruned
+    assert "f2" in rows and rows["f2"]["exists_on_disk"] == 0  # Still missing
+    assert "f3" in rows and rows["f3"]["exists_on_disk"] == 1  # Restored
+
+
+def test_reconcile_missing_media_ignores_stash_find_files_as_unindexed(tmp_path):
+    from librarymanager_core import reconcile_missing_media_across_roots, connect
+
+    db_path = tmp_path / "test.sqlite3"
+    # Empty Watchtower DB initially
+    conn = connect(db_path)
+    conn.close()
+
+    library_root = tmp_path / "library"
+    library_root.mkdir()
+    existing_video = library_root / "Existing Stash Video.mp4"
+    existing_video.write_bytes(b"content")
+
+    # Stash knows about this video in findFiles
+    mock_stash = MagicMock()
+    mock_stash.call_GQL.side_effect = lambda query, *args, **kwargs: {
+        "findFiles": {"files": [{"path": str(existing_video)}]},
+        "findScenes": {"scenes": []},
+        "configuration": {"general": {"stashes": [{"path": str(library_root)}]}}
+    }
+
+    res = reconcile_missing_media_across_roots(
+        db_path,
+        stash=mock_stash,
+        roots=[str(library_root)],
+        config={}
+    )
+
+    assert res["status"] == "ok"
+    assert res["unindexed_found_count"] == 0
+
+    # Verify nothing was added to unindexed_external_media
+    conn = connect(db_path)
+    unindexed = conn.execute("SELECT * FROM unindexed_external_media").fetchall()
+    conn.close()
+    assert len(unindexed) == 0
+
+
+def test_concurrent_connect_no_database_locked(tmp_path):
+    import concurrent.futures
+    from librarymanager_core import connect
+
+    db_path = tmp_path / "concurrent.sqlite3"
+    conn = connect(db_path)
+    conn.close()
+
+    def worker(worker_id):
+        for _ in range(20):
+            c = connect(db_path)
+            c.execute("SELECT count(*) FROM files")
+            c.close()
+        return worker_id
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(worker, i) for i in range(8)]
+        results = [f.result() for f in futures]
+
+    assert len(results) == 8
+
+
+
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.24 — 2026-10-14
+
+- **Cross-Process SQLite Lock Contention Resolution**: Eliminated `sqlite3.OperationalError: database is locked` errors caused by routine status polling (`filesystem_monitor_summary`, `live_status`) executing multi-statement DDL scripts (`executescript(SCHEMA)`) concurrently with the background filesystem monitor. `_ensure_schema` now checks `sqlite_master` first and skips DDL table creation when tables already exist, and enforces `PRAGMA busy_timeout=30000;` and `PRAGMA journal_mode=WAL;`.
+- **Dedicated "Clean Deleted from Stash" Lifecycle & UI Pruning**: Added the `clean_deleted_from_stash` operation. When dead records are cleaned from Stash via `metadataClean`, Watchtower immediately prunes the orphaned scene records from `files`, `filename_state`, and `filename_previews`, marks pending `filesystem_events` for those paths as `reviewed`, clears `unindexed_external_media`, and drops `missing_files_count` to 0 so alert messages clear immediately.
+- **On-Demand Manual Sync for Cold Storage Drives**: Fixed Manual Sync root handling so cold storage drives are included by default when manual synchronization is triggered on demand. Added clear feedback when selected drives are unmounted or offline (`Selected library drive(s) are currently offline or unavailable.`).
+- **Eliminated False Positive Unindexed Media Discovery**: Cross-referenced native Stash `findFiles` index via GraphQL in `reconcile_missing_media_across_roots()` so existing Stash scenes on disk are never falsely flagged as unindexed media on fresh Watchtower database initializations. Corrected table primary key indexing in `get_unindexed_external_media()`.
+- **Clean Sync Severity Indicator**: Fixed activity log severity logic so a clean manual or scheduled drive sync with 0 missing files logs as `[INFO]` (green) instead of `[WARN]` (orange).
+
 ## 1.0.23 — 2026-10-13
 
 - **Cold Storage Library Drives (Zero-I/O Sleep Protection)**: Designate secondary or archive library drives as Cold Storage (`coldStorageRoots`). Drives remain 100% accessible in Stash for video playback, but are completely excluded from background filesystem watchers (`watchdog` / `FSEvents`), startup disk probing, periodic heartbeat polling, incoming folder checks, and transcoder candidate queries. External mechanical USB and NAS drives remain asleep with zero disk spin-ups or head chatter when modifying files on other drives.

@@ -724,6 +724,7 @@ def utc_now() -> str:
 # even when connect() is called many times by a long-running monitor.
 _schema_applied: set[str] = set()
 _schema_lock = threading.Lock()
+CURRENT_SCHEMA_VERSION = 3
 
 
 def _safe_alter(connection: "sqlite3.Connection", table: str, column: str, ddl: str) -> None:
@@ -741,7 +742,7 @@ def _safe_alter(connection: "sqlite3.Connection", table: str, column: str, ddl: 
 
 
 def _ensure_schema(connection: "sqlite3.Connection", database_path: Path | str) -> None:
-    """Run CREATE TABLE / ALTER TABLE migrations exactly once per process per database."""
+    """Run CREATE TABLE / ALTER TABLE migrations once per database, coordinated safely across processes."""
     db_p = Path(database_path)
     key = str(db_p.resolve())
     if key in _schema_applied:
@@ -749,68 +750,104 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path | str) 
     with _schema_lock:
         if key in _schema_applied:
             return  # Another thread beat us here
-        connection.executescript(SCHEMA)
-        _safe_alter(connection, "files", "scene_metadata_json",
-                    "ALTER TABLE files ADD COLUMN scene_metadata_json TEXT NOT NULL DEFAULT '{}'")
-        _safe_alter(connection, "filename_state", "manual_studio",
-                    "ALTER TABLE filename_state ADD COLUMN manual_studio TEXT")
-        _safe_alter(connection, "filename_state", "manual_performers_json",
-                    "ALTER TABLE filename_state ADD COLUMN manual_performers_json TEXT NOT NULL DEFAULT '[]'")
-        _safe_alter(connection, "filename_state", "managed_date",
-                    "ALTER TABLE filename_state ADD COLUMN managed_date TEXT")
-        _safe_alter(connection, "filename_state", "managed_quality",
-                    "ALTER TABLE filename_state ADD COLUMN managed_quality TEXT")
-        _safe_alter(connection, "files", "height",
-                    "ALTER TABLE files ADD COLUMN height INTEGER")
-        _safe_alter(connection, "incoming_files", "attempts",
-                    "ALTER TABLE incoming_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
-        _safe_alter(connection, "incoming_files", "settle_seconds",
-                    "ALTER TABLE incoming_files ADD COLUMN settle_seconds INTEGER NOT NULL DEFAULT 300")
-        _safe_alter(connection, "inventory_runs", "stash_scene_count",
-                    "ALTER TABLE inventory_runs ADD COLUMN stash_scene_count INTEGER NOT NULL DEFAULT 0")
-        _safe_alter(connection, "filing_transfer_queue", "stash_job_id",
-                    "ALTER TABLE filing_transfer_queue ADD COLUMN stash_job_id TEXT")
-        _safe_alter(connection, "rename_queue", "processing_started_at",
-                    "ALTER TABLE rename_queue ADD COLUMN processing_started_at REAL")
-        _safe_alter(connection, "filesystem_monitor_status", "auto_restart_attempted_at",
-                    "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_attempted_at REAL")
-        _safe_alter(connection, "filesystem_monitor_status", "active_moves_json",
-                    "ALTER TABLE filesystem_monitor_status ADD COLUMN active_moves_json TEXT NOT NULL DEFAULT '[]'")
-        _safe_alter(connection, "filesystem_monitor_status", "auto_restart_failures",
-                    "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_failures INTEGER NOT NULL DEFAULT 0")
-        _safe_alter(connection, "filing_proposals", "candidate_destinations_json",
-                    "ALTER TABLE filing_proposals ADD COLUMN candidate_destinations_json TEXT NOT NULL DEFAULT '[]'")
-        _safe_alter(connection, "filing_proposals", "is_custom_mapped",
-                    "ALTER TABLE filing_proposals ADD COLUMN is_custom_mapped INTEGER NOT NULL DEFAULT 0")
-        _safe_alter(connection, "filing_proposals", "in_nested_folder",
-                    "ALTER TABLE filing_proposals ADD COLUMN in_nested_folder INTEGER NOT NULL DEFAULT 0")
-        _safe_alter(connection, "filename_state", "rename_protected",
-                    "ALTER TABLE filename_state ADD COLUMN rename_protected INTEGER NOT NULL DEFAULT 0")
-        connection.execute("UPDATE filename_state SET rename_protected=0 WHERE rename_protected!=0")
-        _safe_alter(connection, "incoming_files", "filing_diagnostic",
-                    "ALTER TABLE incoming_files ADD COLUMN filing_diagnostic TEXT")
-        _safe_alter(connection, "file_checksum_cache", "file_id",
-                    "ALTER TABLE file_checksum_cache ADD COLUMN file_id TEXT")
-        _safe_alter(connection, "file_checksum_cache", "mtime_ns",
-                    "ALTER TABLE file_checksum_cache ADD COLUMN mtime_ns INTEGER")
-        _safe_alter(connection, "file_checksum_cache", "device",
-                    "ALTER TABLE file_checksum_cache ADD COLUMN device INTEGER")
-        _safe_alter(connection, "file_checksum_cache", "inode",
-                    "ALTER TABLE file_checksum_cache ADD COLUMN inode INTEGER")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_checksum_cache_file_id ON file_checksum_cache(file_id)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_filesystem_events_status ON filesystem_events(status)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_status ON filesystem_reconciliation_runs(status)")
-        connection.execute(
-            """UPDATE inventory_runs SET stash_scene_count=(SELECT COUNT(DISTINCT scene_id) FROM files)
-               WHERE status='complete' AND stash_scene_count=0"""
-        )
-        connection.commit()
-        _schema_applied.add(key)
+
+        try:
+            existing_tables = {
+                row[0] for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+
+            if "files" not in existing_tables or "grouped_reconciliation_batches" not in existing_tables:
+                connection.executescript(SCHEMA)
+
+            _safe_alter(connection, "files", "scene_metadata_json",
+                        "ALTER TABLE files ADD COLUMN scene_metadata_json TEXT NOT NULL DEFAULT '{}'")
+            _safe_alter(connection, "filename_state", "manual_studio",
+                        "ALTER TABLE filename_state ADD COLUMN manual_studio TEXT")
+            _safe_alter(connection, "filename_state", "manual_performers_json",
+                        "ALTER TABLE filename_state ADD COLUMN manual_performers_json TEXT NOT NULL DEFAULT '[]'")
+            _safe_alter(connection, "filename_state", "managed_date",
+                        "ALTER TABLE filename_state ADD COLUMN managed_date TEXT")
+            _safe_alter(connection, "filename_state", "managed_quality",
+                        "ALTER TABLE filename_state ADD COLUMN managed_quality TEXT")
+            _safe_alter(connection, "files", "height",
+                        "ALTER TABLE files ADD COLUMN height INTEGER")
+            _safe_alter(connection, "incoming_files", "attempts",
+                        "ALTER TABLE incoming_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0")
+            _safe_alter(connection, "incoming_files", "settle_seconds",
+                        "ALTER TABLE incoming_files ADD COLUMN settle_seconds INTEGER NOT NULL DEFAULT 300")
+            _safe_alter(connection, "inventory_runs", "stash_scene_count",
+                        "ALTER TABLE inventory_runs ADD COLUMN stash_scene_count INTEGER NOT NULL DEFAULT 0")
+            _safe_alter(connection, "filing_transfer_queue", "stash_job_id",
+                        "ALTER TABLE filing_transfer_queue ADD COLUMN stash_job_id TEXT")
+            _safe_alter(connection, "rename_queue", "processing_started_at",
+                        "ALTER TABLE rename_queue ADD COLUMN processing_started_at REAL")
+            _safe_alter(connection, "filesystem_monitor_status", "auto_restart_attempted_at",
+                        "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_attempted_at REAL")
+            _safe_alter(connection, "filesystem_monitor_status", "active_moves_json",
+                        "ALTER TABLE filesystem_monitor_status ADD COLUMN active_moves_json TEXT NOT NULL DEFAULT '[]'")
+            _safe_alter(connection, "filesystem_monitor_status", "auto_restart_failures",
+                        "ALTER TABLE filesystem_monitor_status ADD COLUMN auto_restart_failures INTEGER NOT NULL DEFAULT 0")
+            _safe_alter(connection, "filing_proposals", "candidate_destinations_json",
+                        "ALTER TABLE filing_proposals ADD COLUMN candidate_destinations_json TEXT NOT NULL DEFAULT '[]'")
+            _safe_alter(connection, "filing_proposals", "is_custom_mapped",
+                        "ALTER TABLE filing_proposals ADD COLUMN is_custom_mapped INTEGER NOT NULL DEFAULT 0")
+            _safe_alter(connection, "filing_proposals", "in_nested_folder",
+                        "ALTER TABLE filing_proposals ADD COLUMN in_nested_folder INTEGER NOT NULL DEFAULT 0")
+            _safe_alter(connection, "filename_state", "rename_protected",
+                        "ALTER TABLE filename_state ADD COLUMN rename_protected INTEGER NOT NULL DEFAULT 0")
+            try:
+                has_protected = connection.execute(
+                    "SELECT 1 FROM filename_state WHERE rename_protected!=0 LIMIT 1"
+                ).fetchone()
+                if has_protected:
+                    connection.execute("UPDATE filename_state SET rename_protected=0 WHERE rename_protected!=0")
+                    connection.commit()
+            except Exception:
+                pass
+            _safe_alter(connection, "incoming_files", "filing_diagnostic",
+                        "ALTER TABLE incoming_files ADD COLUMN filing_diagnostic TEXT")
+            _safe_alter(connection, "file_checksum_cache", "file_id",
+                        "ALTER TABLE file_checksum_cache ADD COLUMN file_id TEXT")
+            _safe_alter(connection, "file_checksum_cache", "mtime_ns",
+                        "ALTER TABLE file_checksum_cache ADD COLUMN mtime_ns INTEGER")
+            _safe_alter(connection, "file_checksum_cache", "device",
+                        "ALTER TABLE file_checksum_cache ADD COLUMN device INTEGER")
+            _safe_alter(connection, "file_checksum_cache", "inode",
+                        "ALTER TABLE file_checksum_cache ADD COLUMN inode INTEGER")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_checksum_cache_file_id ON file_checksum_cache(file_id)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_filesystem_events_status ON filesystem_events(status)")
+            connection.execute("CREATE INDEX IF NOT EXISTS idx_reconciliation_runs_status ON filesystem_reconciliation_runs(status)")
+            connection.execute(
+                """UPDATE inventory_runs SET stash_scene_count=(SELECT COUNT(DISTINCT scene_id) FROM files)
+                   WHERE status='complete' AND stash_scene_count=0"""
+            )
+            connection.commit()
+            _schema_applied.add(key)
+        except sqlite3.OperationalError as exc:
+            err_msg = str(exc).lower()
+            if "locked" in err_msg or "busy" in err_msg:
+                try:
+                    if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'").fetchone():
+                        _schema_applied.add(key)
+                        return
+                except Exception:
+                    pass
+            raise
 
 
 def connect(database_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(database_path, timeout=30)
+    connection = sqlite3.connect(database_path, timeout=60.0)
     connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+    try:
+        connection.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     # SQLite does not persist this per-connection setting.
     connection.execute("PRAGMA foreign_keys=ON")
     _ensure_schema(connection, database_path)
@@ -2193,8 +2230,17 @@ def scene_naming_signature(database_path: Path, scene_id: str, include_date: boo
 
 def _connect_short(database_path: Path) -> sqlite3.Connection:
     """Open a connection with a short write-lock timeout for hook-critical paths."""
-    connection = sqlite3.connect(database_path, timeout=5)
+    connection = sqlite3.connect(database_path, timeout=5.0)
     connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+    except Exception:
+        pass
+    try:
+        connection.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass
+    connection.execute("PRAGMA foreign_keys=ON")
     _ensure_schema(connection, database_path)
     return connection
 
@@ -3562,6 +3608,117 @@ def reconcile_missing_files(database_path: Path) -> tuple[dict, list[dict]]:
         connection.close()
 
 
+def clean_deleted_scenes_from_stash(database_path: Path, stash: Any = None) -> dict:
+    """Safely prune dead records from Watchtower's files table after Stash clean or file deletion.
+    - Removes files where exists_on_disk = 0 and the scene/file no longer exists in Stash or disk.
+    - Also verifies files on disk; if a missing file was restored/reconnected, updates exists_on_disk = 1.
+    - Records an activity audit event in the live feed.
+    """
+    connection = connect(database_path)
+    pruned_count = 0
+    restored_count = 0
+    try:
+        rows = connection.execute(
+            "SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk = 0"
+        ).fetchall()
+        if not rows:
+            return {
+                "cleaned_count": 0,
+                "restored_count": 0,
+                "remaining_missing": 0,
+                "message": "No missing files found to clean."
+            }
+
+        active_missing = []
+        for r in rows:
+            p = r["path"]
+            exists = False
+            try:
+                exists = os.path.isfile(p)
+            except OSError:
+                exists = False
+            if exists:
+                connection.execute("UPDATE files SET exists_on_disk = 1, missing_since = NULL WHERE file_id = ?", (r["file_id"],))
+                restored_count += 1
+            else:
+                active_missing.append(r)
+
+        active_stash_scenes = set()
+        active_stash_files = set()
+        checked_stash = False
+        if stash and active_missing:
+            scene_ids = list({str(r["scene_id"]) for r in active_missing if r["scene_id"]})
+            for i in range(0, len(scene_ids), 100):
+                chunk = scene_ids[i:i+100]
+                try:
+                    res = stash.call_GQL(
+                        """query CheckScenes($ids: [ID!]) {
+                             findScenes(scene_filter: { ids: { value: $ids, modifier: INCLUDES } }, filter: { per_page: -1 }) {
+                               scenes { id files { id path } }
+                             }
+                           }""",
+                        {"ids": chunk}
+                    )
+                    if isinstance(res, dict) and "findScenes" in res:
+                        checked_stash = True
+                        for sc in ((res.get("findScenes") or {}).get("scenes") or []):
+                            active_stash_scenes.add(str(sc["id"]))
+                            for f in sc.get("files") or []:
+                                active_stash_files.add(str(f.get("id")))
+                except Exception as check_err:
+                    logger.warning("Error checking scenes in Stash: %s", check_err)
+
+        dead_files = []
+        for r in active_missing:
+            fid = str(r["file_id"])
+            sid = str(r["scene_id"])
+            if checked_stash:
+                if sid not in active_stash_scenes or (fid and fid not in active_stash_files):
+                    dead_files.append(fid)
+            elif stash is None:
+                dead_files.append(fid)
+
+        if dead_files:
+            dead_paths = [r["path"] for r in active_missing if str(r["file_id"]) in dead_files and r["path"]]
+            for fid in dead_files:
+                connection.execute("DELETE FROM filename_state WHERE file_id = ?", (fid,))
+                connection.execute("DELETE FROM filename_previews WHERE file_id = ?", (fid,))
+                connection.execute("DELETE FROM files WHERE file_id = ?", (fid,))
+            for dp in dead_paths:
+                connection.execute(
+                    "UPDATE filesystem_events SET status='reviewed' WHERE (source_path=? OR destination_path=?) AND status='pending'",
+                    (dp, dp),
+                )
+            if dead_paths:
+                connection.executemany(
+                    "DELETE FROM unindexed_external_media WHERE path = ?",
+                    [(dp,) for dp in dead_paths],
+                )
+            pruned_count = len(dead_files)
+
+        connection.commit()
+
+        remaining_missing = connection.execute(
+            "SELECT COUNT(*) AS c FROM files WHERE exists_on_disk = 0"
+        ).fetchone()["c"]
+
+        if pruned_count > 0:
+            record_activity(
+                database_path, "clean", "clean deleted from stash", "complete",
+                severity="info",
+                detail=f"Cleaned Stash database: pruned {pruned_count} deleted scene record(s) from Watchtower."
+            )
+
+        return {
+            "cleaned_count": pruned_count,
+            "restored_count": restored_count,
+            "remaining_missing": remaining_missing,
+            "message": f"Pruned {pruned_count} dead record(s). {remaining_missing} missing file(s) remain."
+        }
+    finally:
+        connection.close()
+
+
 def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list, config: dict = None) -> dict:
     """Find and reconnect moved scene media across monitored library roots without full Stash scans.
     Designed for files moved via phones, tablets, or external file managers where filesystem
@@ -3577,6 +3734,17 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
 
     if roots is not None:
         accessible_roots = [str(r) for r in roots if os.path.isdir(str(r))]
+        if roots and not accessible_roots:
+            return {
+                "status": "warning",
+                "missing_checked": 0,
+                "reconciled_count": 0,
+                "reconciled": [],
+                "unmatched": [],
+                "unindexed_found_count": 0,
+                "auto_ingested_count": 0,
+                "message": "Selected library drive(s) are currently offline or unavailable.",
+            }
     else:
         cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
         unavailable = set(get_authoritative_unavailable_roots(database_path)) | cold_storage_roots
@@ -3617,6 +3785,23 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
         connection.commit()
     finally:
         connection.close()
+
+    if missing_candidates and stash:
+        try:
+            clean_res = clean_deleted_scenes_from_stash(database_path, stash)
+            if clean_res.get("cleaned_count", 0) > 0:
+                conn_refresh = connect(database_path)
+                try:
+                    remaining_ids = {
+                        str(r["file_id"]) for r in conn_refresh.execute(
+                            "SELECT file_id FROM files WHERE exists_on_disk = 0"
+                        ).fetchall()
+                    }
+                    missing_candidates = [c for c in missing_candidates if str(c.get("file_id")) in remaining_ids]
+                finally:
+                    conn_refresh.close()
+        except Exception as clean_err:
+            logger.debug("Failed checking deleted scenes during reconciliation: %s", clean_err)
 
     if not missing_candidates and stash:
         try:
@@ -3665,6 +3850,17 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
             ignored_paths.add(os.path.normcase(os.path.abspath(r["path"])))
     finally:
         conn_kp.close()
+
+    if stash:
+        try:
+            res = stash.call_GQL("query { findFiles(filter: {per_page: -1}) { files { path } } }")
+            if isinstance(res, dict):
+                for f in ((res.get("findFiles") or {}).get("files") or []):
+                    p = f.get("path")
+                    if p:
+                        known_paths.add(os.path.normcase(os.path.abspath(p)))
+        except Exception as gql_err:
+            logger.debug("Failed querying findFiles from Stash: %s", gql_err)
 
     record_activity(
         database_path, "reconciliation", "reconcile missing media", "starting",
@@ -3766,6 +3962,14 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
         conn_clean.execute(
             "DELETE FROM unindexed_external_media WHERE path IN (SELECT path FROM files)"
         )
+        if known_paths:
+            all_unindexed = conn_clean.execute("SELECT path FROM unindexed_external_media").fetchall()
+            to_remove = [
+                u["path"] for u in all_unindexed
+                if os.path.normcase(os.path.abspath(u["path"])) in known_paths
+            ]
+            if to_remove:
+                conn_clean.executemany("DELETE FROM unindexed_external_media WHERE path = ?", [(tp,) for tp in to_remove])
         conn_clean.commit()
     finally:
         conn_clean.close()
@@ -3871,7 +4075,7 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
     status_str = "complete" if (reconciled or auto_ingested_count) else ("warning" if unmatched else "info")
     record_activity(
         database_path, "reconciliation", "reconcile missing media", status_str,
-        severity="info" if (reconciled or auto_ingested_count) else "warning",
+        severity="warning" if unmatched else "info",
         detail=f"Reconciliation complete: {len(reconciled)} reconnected, {len(unmatched)} unresolved, {auto_ingested_count if auto_ingested_count else len(unindexed_found)} {'automatically ingested into Stash' if auto_ingested_count else 'unindexed media discovered'}"
     )
 
@@ -3903,8 +4107,12 @@ def get_unindexed_external_media(database_path: Path) -> list[dict]:
     """Return all non-ignored unindexed video files found on disk."""
     connection = connect(database_path)
     try:
+        connection.execute(
+            "DELETE FROM unindexed_external_media WHERE path IN (SELECT path FROM files)"
+        )
+        connection.commit()
         rows = connection.execute(
-            "SELECT path, basename, size, discovered_at FROM unindexed_external_media WHERE ignored = 0 ORDER BY discovered_at DESC"
+            "SELECT path, basename, size, discovered_at FROM unindexed_external_media WHERE ignored = 0 AND path NOT IN (SELECT path FROM files) ORDER BY discovered_at DESC"
         ).fetchall()
         result = []
         to_clean = []

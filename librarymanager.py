@@ -35,7 +35,8 @@ from librarymanager_core import (
                                  find_duplicate_scene_file, inspect_backlog_duplicate,
                                  get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
                                  cancel_expected_filesystem_delete, _is_pid_alive, _terminate_pid,
-                                 get_configured_incoming_folders, _is_subpath_of, parse_cold_storage_roots)
+                                 get_configured_incoming_folders, _is_subpath_of, parse_cold_storage_roots,
+                                 clean_deleted_scenes_from_stash)
 from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing, prune_resolved_filing_baseline, invalidate_incoming_discovery_cache, enqueue_filing_transfer, claim_next_filing_transfer, finish_filing_transfer, fail_filing_transfer, set_filing_transfer_job_id, recover_abandoned_processing_queue, recover_stale_active_transfers, get_active_filing_transfers
 
 
@@ -1407,9 +1408,12 @@ def main():
         elif isinstance(requested_roots, list) and len(requested_roots) == 0:
             roots = []
         else:
-            cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
-            roots = [r for r in all_roots if r not in cold_storage_roots]
+            roots = list(all_roots)
         result = reconcile_missing_media_across_roots(database_path, stash, roots, config=config)
+        message = json.dumps(result, ensure_ascii=False)
+    elif mode == "clean_deleted_from_stash":
+        stash = StashInterface(plugin_input["server_connection"])
+        result = clean_deleted_scenes_from_stash(database_path, stash)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "add_unindexed_media":
         stash = StashInterface(plugin_input["server_connection"])
