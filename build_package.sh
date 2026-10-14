@@ -106,6 +106,8 @@ REQUIRED_FILES=(
     "librarymanager/scanning/reconciliation.py"
     "librarymanager/services/__init__.py"
     "librarymanager/services/contact_sheets.py"
+    "librarymanager/services/filing.py"
+    "librarymanager/services/filing_rules.py"
     "librarymanager/services/inventory.py"
     "librarymanager/services/manual_sync.py"
     "librarymanager/services/renaming.py"
@@ -136,6 +138,8 @@ import librarymanager.scanning.filesystem
 import librarymanager.scanning.naming_rules
 import librarymanager.scanning.reconciliation
 import librarymanager.services.contact_sheets
+import librarymanager.services.filing
+import librarymanager.services.filing_rules
 import librarymanager.services.inventory
 import librarymanager.services.manual_sync
 import librarymanager.services.renaming
