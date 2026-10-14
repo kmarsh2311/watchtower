@@ -105,6 +105,7 @@ REQUIRED_FILES=(
     "librarymanager/scanning/naming_rules.py"
     "librarymanager/scanning/reconciliation.py"
     "librarymanager/services/__init__.py"
+    "librarymanager/services/contact_sheets.py"
     "librarymanager/services/manual_sync.py"
 )
 
@@ -132,6 +133,7 @@ import librarymanager
 import librarymanager.scanning.filesystem
 import librarymanager.scanning.naming_rules
 import librarymanager.scanning.reconciliation
+import librarymanager.services.contact_sheets
 import librarymanager.services.manual_sync
 
 print('✅ Python module import sanity check passed!')
