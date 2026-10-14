@@ -104,6 +104,8 @@ REQUIRED_FILES=(
     "librarymanager/scanning/filesystem.py"
     "librarymanager/scanning/naming_rules.py"
     "librarymanager/scanning/reconciliation.py"
+    "librarymanager/services/__init__.py"
+    "librarymanager/services/manual_sync.py"
 )
 
 for req in "${REQUIRED_FILES[@]}"; do
@@ -130,6 +132,7 @@ import librarymanager
 import librarymanager.scanning.filesystem
 import librarymanager.scanning.naming_rules
 import librarymanager.scanning.reconciliation
+import librarymanager.services.manual_sync
 
 print('✅ Python module import sanity check passed!')
 "

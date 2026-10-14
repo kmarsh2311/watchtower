@@ -42,6 +42,8 @@ def test_zip_contains_all_critical_modules():
         "librarymanager/scanning/filesystem.py",
         "librarymanager/scanning/naming_rules.py",
         "librarymanager/scanning/reconciliation.py",
+        "librarymanager/services/__init__.py",
+        "librarymanager/services/manual_sync.py",
         "requirements.txt",
     ]
 
@@ -68,6 +70,7 @@ import librarymanager
 import librarymanager.scanning.filesystem
 import librarymanager.scanning.naming_rules
 import librarymanager.scanning.reconciliation
+import librarymanager.services.manual_sync
 
 print('SUCCESS')
 """
