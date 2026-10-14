@@ -133,23 +133,36 @@ def test_clean_deleted_scenes_prunes_cached_reports(tmp_path):
     core_dir = Path(__file__).parent.parent
     recon_path = core_dir / "reconciliation-report.json"
     plan_path = core_dir / "resolution-plan.json"
+    unrelated_report_path = core_dir / "filesystem-reconciliation-report.json"
 
     orig_recon = recon_path.read_text(encoding="utf-8") if recon_path.is_file() else None
     orig_plan = plan_path.read_text(encoding="utf-8") if plan_path.is_file() else None
+    orig_unrelated = unrelated_report_path.read_text(encoding="utf-8") if unrelated_report_path.is_file() else None
 
     try:
         recon_path.write_text(
             json.dumps({
-                "summary": {"missing": 1, "matched": 0},
-                "matches": [{"file_id": "f_rep_1", "scene_id": "sc_rep_1", "path": "/missing/rep1.mp4"}],
+                "summary": {"missing": 2, "matched": 0},
+                "matches": [
+                    {"file_id": "f_rep_1", "scene_id": "sc_rep_1", "path": "/missing/rep1.mp4"},
+                    {"file_id": "f_keep_unrelated", "scene_id": "sc_keep", "path": "/valid/keep.mp4"},
+                ],
             }),
             encoding="utf-8",
         )
         plan_path.write_text(
             json.dumps({
-                "summary": {"missing": 1},
-                "items": [{"file_id": "f_rep_1", "scene_id": "sc_rep_1"}],
+                "safe_redundant": 1,
+                "merge_required": 1,
+                "items": [
+                    {"stale_file_id": "f_rep_1", "stale_scene_id": "sc_rep_1", "recommendation": "stale_record_redundant"},
+                    {"stale_file_id": "f_keep_unrelated", "stale_scene_id": "sc_keep", "recommendation": "merge_metadata_first"},
+                ],
             }),
+            encoding="utf-8",
+        )
+        unrelated_report_path.write_text(
+            json.dumps({"proposals": [{"id": 123, "status": "pending"}]}),
             encoding="utf-8",
         )
 
@@ -162,10 +175,20 @@ def test_clean_deleted_scenes_prunes_cached_reports(tmp_path):
         # Check reports on disk
         updated_recon = json.loads(recon_path.read_text(encoding="utf-8"))
         updated_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        updated_unrelated = json.loads(unrelated_report_path.read_text(encoding="utf-8"))
 
-        assert len(updated_recon["matches"]) == 0
-        assert updated_recon["summary"]["missing"] == 0
-        assert len(updated_plan["items"]) == 0
+        # Pruned item is removed; unrelated item is preserved
+        assert len(updated_recon["matches"]) == 1
+        assert updated_recon["matches"][0]["file_id"] == "f_keep_unrelated"
+        assert updated_recon["summary"]["missing"] == 1
+
+        assert len(updated_plan["items"]) == 1
+        assert updated_plan["items"][0]["stale_file_id"] == "f_keep_unrelated"
+        assert updated_plan["safe_redundant"] == 0
+        assert updated_plan["merge_required"] == 1
+
+        # Unrelated report untouched
+        assert len(updated_unrelated["proposals"]) == 1
     finally:
         # Restore original report files or clean up test files
         if orig_recon is not None:
@@ -176,6 +199,10 @@ def test_clean_deleted_scenes_prunes_cached_reports(tmp_path):
             plan_path.write_text(orig_plan, encoding="utf-8")
         else:
             plan_path.unlink(missing_ok=True)
+        if orig_unrelated is not None:
+            unrelated_report_path.write_text(orig_unrelated, encoding="utf-8")
+        else:
+            unrelated_report_path.unlink(missing_ok=True)
 
 
 def test_manual_sync_empty_roots_reports_warning(tmp_path):

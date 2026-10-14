@@ -100,6 +100,8 @@ REQUIRED_FILES=(
     "librarymanager_monitor.py"
     "librarymanager_startup.py"
     "librarymanager/database/connection.py"
+    "librarymanager/scanning/__init__.py"
+    "librarymanager/scanning/reconciliation.py"
 )
 
 for req in "${REQUIRED_FILES[@]}"; do
@@ -123,6 +125,7 @@ if '.' not in sys.path:
 import librarymanager_bootstrap
 import librarymanager_startup
 import librarymanager
+import librarymanager.scanning.reconciliation
 
 print('✅ Python module import sanity check passed!')
 "
