@@ -107,6 +107,7 @@ REQUIRED_FILES=(
     "librarymanager/services/__init__.py"
     "librarymanager/services/contact_sheets.py"
     "librarymanager/services/manual_sync.py"
+    "librarymanager/services/renaming.py"
 )
 
 for req in "${REQUIRED_FILES[@]}"; do
@@ -135,6 +136,7 @@ import librarymanager.scanning.naming_rules
 import librarymanager.scanning.reconciliation
 import librarymanager.services.contact_sheets
 import librarymanager.services.manual_sync
+import librarymanager.services.renaming
 
 print('✅ Python module import sanity check passed!')
 "

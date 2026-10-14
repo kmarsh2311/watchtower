@@ -45,6 +45,7 @@ def test_zip_contains_all_critical_modules():
         "librarymanager/services/__init__.py",
         "librarymanager/services/contact_sheets.py",
         "librarymanager/services/manual_sync.py",
+        "librarymanager/services/renaming.py",
         "requirements.txt",
     ]
 
@@ -73,6 +74,7 @@ import librarymanager.scanning.naming_rules
 import librarymanager.scanning.reconciliation
 import librarymanager.services.contact_sheets
 import librarymanager.services.manual_sync
+import librarymanager.services.renaming
 
 print('SUCCESS')
 """

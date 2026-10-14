@@ -91,34 +91,11 @@ associated_file_target._is_watchtower_wrapper = True
 @contextmanager
 def rename_lock(database_path: Path):
     """Serialize file operations from overlapping Stash hooks."""
-    lock_file = open(database_path.with_suffix(".rename.lock"), "a+b")
-    try:
-        if os.name == "nt":
-            import msvcrt
-            if os.fstat(lock_file.fileno()).st_size == 0:
-                lock_file.write(b"0")
-                lock_file.flush()
-            lock_file.seek(0)
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    from librarymanager.services.renaming import rename_lock as _impl
+    with _impl(database_path):
         yield
-    finally:
-        try:
-            if os.name == "nt":
-                try:
-                    lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
-            else:
-                try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                except OSError:
-                    pass
-        finally:
-            lock_file.close()
+
+rename_lock._is_watchtower_wrapper = True
 
 
 def utc_now() -> str:
@@ -1365,143 +1342,66 @@ def scene_naming_signature(database_path: Path, scene_id: str, include_date: boo
 
 def _connect_short(database_path: Path) -> sqlite3.Connection:
     """Open a connection with a short write-lock timeout for hook-critical paths."""
-    from librarymanager.database.connection import create_connection
-    connection = create_connection(database_path, busy_timeout_ms=5000)
-    _ensure_schema(connection, database_path)
-    return connection
+    from librarymanager.services.renaming import _connect_short as _impl
+    return _impl(database_path)
+
+_connect_short._is_watchtower_wrapper = True
 
 
 def enqueue_rename(database_path: Path, scene_id: str, now_timestamp: float, debounce_seconds: float = 1.0) -> bool:
-    """Coalesce a scene's hooks and return True only when a worker must be scheduled.
+    """Coalesce a scene's hooks and return True only when a worker must be scheduled."""
+    from librarymanager.services.renaming import enqueue_rename as _impl
+    return _impl(database_path, scene_id, now_timestamp, debounce_seconds=debounce_seconds)
 
-    Uses a 5-second write-lock timeout (instead of the default 30 s) so that a
-    batch of simultaneous Stash hooks never stalls the UI for half a minute.
-    """
-    connection = _connect_short(database_path)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            """INSERT INTO rename_queue(scene_id,enqueued_at,available_at,status,attempts,processing_started_at,last_error)
-               VALUES (?,?,?,'pending',0,NULL,NULL)
-               ON CONFLICT(scene_id) DO UPDATE SET enqueued_at=excluded.enqueued_at,
-               available_at=excluded.available_at,status='pending',processing_started_at=NULL,last_error=NULL""",
-            (str(scene_id), now_timestamp, now_timestamp + debounce_seconds),
-        )
-        scheduled = connection.execute("SELECT scheduled FROM rename_worker_state WHERE id=1").fetchone()[0]
-        should_schedule = not bool(scheduled)
-        if should_schedule:
-            connection.execute("UPDATE rename_worker_state SET scheduled=1 WHERE id=1")
-        connection.commit()
-        return should_schedule
-    finally:
-        connection.close()
+enqueue_rename._is_watchtower_wrapper = True
 
 
 def cancel_pending_rename(database_path: Path, scene_id: str) -> bool:
-    connection = connect(database_path)
-    try:
-        connection.execute("DELETE FROM rename_queue WHERE scene_id=?", (str(scene_id),))
-        changes = connection.execute("SELECT changes()").fetchone()[0]
-        connection.commit()
-    finally:
-        connection.close()
-    if changes > 0:
-        record_activity(
-            database_path, "rename", "automatic rename", "cancelled",
-            scene_id=str(scene_id), detail="Pending rename cancelled by user; original filename preserved on disk"
-        )
-    return bool(changes)
+    """Cancel a pending rename for a scene and remove it from the rename queue."""
+    from librarymanager.services.renaming import cancel_pending_rename as _impl
+    return _impl(database_path, scene_id)
+
+cancel_pending_rename._is_watchtower_wrapper = True
 
 
 def make_pending_rename_due(database_path: Path, scene_id: str) -> bool:
-    connection = connect(database_path)
-    try:
-        connection.execute(
-            """UPDATE rename_queue
-               SET status='pending', available_at=?, last_error=NULL, processing_started_at=NULL
-               WHERE scene_id=?""",
-            (time.time() - 1.0, str(scene_id))
-        )
-        changes = connection.execute("SELECT changes()").fetchone()[0]
-        connection.commit()
-        return bool(changes)
-    finally:
-        connection.close()
+    """Mark a queued or failed rename as pending and immediately due for execution."""
+    from librarymanager.services.renaming import make_pending_rename_due as _impl
+    return _impl(database_path, scene_id)
+
+make_pending_rename_due._is_watchtower_wrapper = True
 
 
 def release_worker_schedule(database_path: Path):
-    connection = connect(database_path)
-    try:
-        connection.execute("UPDATE rename_worker_state SET scheduled=0 WHERE id=1")
-        connection.commit()
-    finally:
-        connection.close()
+    """Reset the rename worker scheduled flag so future jobs can be scheduled."""
+    from librarymanager.services.renaming import release_worker_schedule as _impl
+    return _impl(database_path)
 
-
-# Renames left in 'processing' longer than this are considered orphaned
-# (e.g. monitor was force-quit mid-rename) and are reset to 'pending'.
-_STALE_PROCESSING_SECONDS = 90
+release_worker_schedule._is_watchtower_wrapper = True
 
 
 def claim_due_rename(database_path: Path, now_timestamp: float):
-    connection = connect(database_path)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        # Recover any renames stranded in 'processing' by a previously crashed worker.
-        stale_cutoff = now_timestamp - _STALE_PROCESSING_SECONDS
-        connection.execute(
-            """UPDATE rename_queue SET status='pending',processing_started_at=NULL
-               WHERE status='processing' AND COALESCE(processing_started_at,enqueued_at) <= ?""",
-            (stale_cutoff,),
-        )
-        row = connection.execute(
-            "SELECT scene_id FROM rename_queue WHERE status='pending' AND available_at<=? ORDER BY available_at LIMIT 1",
-            (now_timestamp,),
-        ).fetchone()
-        if not row:
-            next_row = connection.execute(
-                "SELECT MIN(available_at) AS next_at,COUNT(*) AS pending FROM rename_queue WHERE status='pending'"
-            ).fetchone()
-            connection.commit()
-            return None, next_row["next_at"], next_row["pending"]
-        scene_id = row["scene_id"]
-        connection.execute(
-            "UPDATE rename_queue SET status='processing',processing_started_at=?,attempts=attempts+1 WHERE scene_id=?",
-            (now_timestamp, scene_id)
-        )
-        connection.commit()
-        return scene_id, None, None
-    finally:
-        connection.close()
+    """Claim the oldest pending rename ready for execution, recovering orphaned renames."""
+    from librarymanager.services.renaming import claim_due_rename as _impl
+    return _impl(database_path, now_timestamp)
+
+claim_due_rename._is_watchtower_wrapper = True
 
 
 def finish_queued_rename(database_path: Path, scene_id: str, outcome: str, detail: str):
-    connection = connect(database_path)
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute("DELETE FROM rename_queue WHERE scene_id=?", (str(scene_id),))
-        connection.execute(
-            "INSERT INTO rename_audit(scene_id,outcome,detail,recorded_at) VALUES (?,?,?,?)",
-            (str(scene_id), outcome, detail, utc_now()),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    """Mark a queued rename as completed, remove it from the queue, and record audit."""
+    from librarymanager.services.renaming import finish_queued_rename as _impl
+    return _impl(database_path, scene_id, outcome, detail)
+
+finish_queued_rename._is_watchtower_wrapper = True
 
 
 def fail_queued_rename(database_path: Path, scene_id: str, error: str):
-    connection = connect(database_path)
-    try:
-        connection.execute(
-            "UPDATE rename_queue SET status='failed',last_error=? WHERE scene_id=?", (str(error), str(scene_id))
-        )
-        connection.execute(
-            "INSERT INTO rename_audit(scene_id,outcome,detail,recorded_at) VALUES (?,?,?,?)",
-            (str(scene_id), "failed", str(error), utc_now()),
-        )
-        connection.commit()
-    finally:
-        connection.close()
+    """Record a failure for a queued rename and log it in the audit table."""
+    from librarymanager.services.renaming import fail_queued_rename as _impl
+    return _impl(database_path, scene_id, error)
+
+fail_queued_rename._is_watchtower_wrapper = True
 
 
 def record_filesystem_event(database_path: Path, event_type: str, source_path: str,
@@ -2655,91 +2555,23 @@ def preview_safe_filenames(database_path: Path, filename_options: dict | None = 
     from librarymanager.scanning.naming_rules import preview_safe_filenames as _impl
     return _impl(database_path, filename_options)
 
+preview_safe_filenames._is_watchtower_wrapper = True
+
 
 def preview_scene_filename(database_path: Path, scene_id: str, filename_options: dict | None = None) -> dict:
     """Return the latest calculated filename proposal for one scene."""
     from librarymanager.scanning.naming_rules import preview_scene_filename as _impl
     return _impl(database_path, scene_id, filename_options, associated_file_target_fn=associated_file_target)
 
+preview_scene_filename._is_watchtower_wrapper = True
+
 
 def apply_scene_filename(database_path: Path, scene_id: str, move_file, filename_options: dict | None = None) -> dict:
     """Apply one preflighted rename through a supplied Stash move callback."""
-    with rename_lock(database_path):
-        preview = preview_scene_filename(database_path, scene_id, filename_options)
-        if preview.get("status") != "ready":
-            return preview
-        moved_sidecars = []
-        video_renamed = False
-        try:
-            for item in preview["associated_files"]:
-                source, target = Path(item["source"]), Path(item["target"])
-                expect_filesystem_move(database_path, str(source), str(target))
-                source.rename(target)
-                moved_sidecars.append((source, target))
-            current = Path(preview["current_path"])
-            proposed = Path(preview["proposed_path"])
-            expect_filesystem_move(database_path, str(current), str(proposed))
-            result = move_file(preview["file_id"], str(current.parent), proposed.name)
-            if result is False or result is None:
-                raise RuntimeError("Stash did not confirm the file rename")
-            video_renamed = True
-            connection = None
-            try:
-                connection = connect(database_path)
-                connection.execute(
-                    "UPDATE filename_state SET last_generated_stem=?,managed_date=?,managed_quality=?,updated_at=? WHERE file_id=?",
-                    (proposed.stem, preview.get("scene_date") or None, preview.get("video_quality") or None, utc_now(), preview["file_id"]),
-                )
-                connection.execute(
-                    "UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=? WHERE file_id=?",
-                    (str(proposed), proposed.name, utc_now(), preview["file_id"]),
-                )
-                for source, target in moved_sidecars:
-                    connection.execute(
-                        "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
-                        (str(target), utc_now(), str(source))
-                    )
-                connection.commit()
-            except Exception as database_error:
-                if connection is not None:
-                    connection.rollback()
-                return {**preview, "status": "renamed_with_warning",
-                        "reason": f"Stash renamed the video, but Watchtower must refresh its local record: {database_error}",
-                        "renamed_sidecars": [{"source": str(source), "target": str(target)} for source, target in moved_sidecars],
-                        "action_performed": True, "local_cache_updated": False}
-            finally:
-                if connection is not None:
-                    connection.close()
-            # Sidecars are part of the same successful rename transaction, but make
-            # them visible in Recent Activity as separate informational entries.
-            # Logging is deliberately best-effort so a log write can never turn a
-            # completed file rename into a failed/rollback operation.
-            for source, target in moved_sidecars:
-                try:
-                    record_activity(
-                        database_path,
-                        "filename",
-                        "sidecar_renamed",
-                        "complete",
-                        scene_id=str(scene_id),
-                        file_id=preview.get("file_id"),
-                        old_path=str(source),
-                        new_path=str(target),
-                        detail=f"Companion file renamed with video: {source.name} → {target.name}",
-                        metadata={"companion_type": target.suffix.lower()},
-                    )
-                except Exception:
-                    pass
-            return {**preview, "status": "renamed", "reason": "Stash confirmed the rename",
-                    "renamed_sidecars": [{"source": str(source), "target": str(target)} for source, target in moved_sidecars],
-                    "action_performed": True, "local_cache_updated": True}
-        except Exception:
-            if not video_renamed:
-                for source, target in reversed(moved_sidecars):
-                    if target.exists() and not source.exists():
-                        expect_filesystem_move(database_path, str(target), str(source))
-                        target.rename(source)
-            raise
+    from librarymanager.services.renaming import apply_scene_filename as _impl
+    return _impl(database_path, scene_id, move_file, filename_options=filename_options)
+
+apply_scene_filename._is_watchtower_wrapper = True
 
 
 def preview_manual_filename(database_path: Path, scene_id: str, requested_name: str) -> dict:
@@ -2747,83 +2579,16 @@ def preview_manual_filename(database_path: Path, scene_id: str, requested_name: 
     from librarymanager.scanning.naming_rules import preview_manual_filename as _impl
     return _impl(database_path, scene_id, requested_name, associated_file_target_fn=associated_file_target)
 
+preview_manual_filename._is_watchtower_wrapper = True
+
 
 
 def apply_manual_filename(database_path: Path, scene_id: str, requested_name: str, move_file) -> dict:
     """Apply one exact previewed correction and make it the scene's new filename base."""
-    with rename_lock(database_path):
-        preview = preview_manual_filename(database_path, scene_id, requested_name)
-        if preview.get("status") != "ready":
-            return preview
-        moved_sidecars = []
-        video_renamed = False
-        try:
-            for item in preview["associated_files"]:
-                source, target = Path(item["source"]), Path(item["target"])
-                expect_filesystem_move(database_path, str(source), str(target))
-                source.rename(target)
-                moved_sidecars.append((source, target))
-            current, proposed = Path(preview["current_path"]), Path(preview["proposed_path"])
-            expect_filesystem_move(database_path, str(current), str(proposed))
-            result = move_file(preview["file_id"], str(current.parent), proposed.name)
-            if result is False or result is None:
-                raise RuntimeError("Stash did not confirm the file rename")
-            video_renamed = True
-            connection = None
-            try:
-                connection = connect(database_path)
-                connection.execute("UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=? WHERE file_id=?",
-                                   (str(proposed), proposed.name, utc_now(), preview["file_id"]))
-                connection.execute(
-                    """INSERT INTO filename_state(file_id,base_stem,base_source,source_title,last_generated_stem,
-                           manual_studio,manual_performers_json,created_at,updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(file_id) DO UPDATE SET base_stem=excluded.base_stem,
-                       base_source='manual',source_title=NULL,last_generated_stem=excluded.last_generated_stem,
-                       manual_studio=excluded.manual_studio,manual_performers_json=excluded.manual_performers_json,
-                       updated_at=excluded.updated_at""",
-                    (preview["file_id"], proposed.stem, "manual", None, proposed.stem, preview.get("metadata_studio"),
-                     json.dumps(preview.get("metadata_performers") or [], ensure_ascii=False), utc_now(), utc_now()),
-                )
-                connection.commit()
-            except Exception as database_error:
-                if connection is not None:
-                    connection.rollback()
-                return {**preview, "status": "renamed_with_warning",
-                        "reason": f"Stash renamed the video, but Watchtower must refresh its local record: {database_error}",
-                        "renamed_sidecars": [{"source": str(source), "target": str(target)} for source, target in moved_sidecars],
-                        "action_performed": True, "local_cache_updated": False}
-            finally:
-                if connection is not None:
-                    connection.close()
-            # Log successful companion-file renames separately so manual filename
-            # corrections show their JPG/other sidecar updates in Recent Activity.
-            # Keep this best-effort: logging must never undo a completed rename.
-            for source, target in moved_sidecars:
-                try:
-                    record_activity(
-                        database_path,
-                        "filename",
-                        "sidecar_renamed",
-                        "complete",
-                        scene_id=str(scene_id),
-                        file_id=preview.get("file_id"),
-                        old_path=str(source),
-                        new_path=str(target),
-                        detail=f"Companion file renamed with video: {source.name} → {target.name}",
-                        metadata={"companion_type": target.suffix.lower(), "manual_correction": True},
-                    )
-                except Exception:
-                    pass
-            return {**preview, "status": "renamed", "reason": "Stash confirmed the manual correction",
-                    "renamed_sidecars": [{"source": str(source), "target": str(target)} for source, target in moved_sidecars],
-                    "action_performed": True, "local_cache_updated": True}
-        except Exception:
-            if not video_renamed:
-                for source, target in reversed(moved_sidecars):
-                    if target.exists() and not source.exists():
-                        expect_filesystem_move(database_path, str(target), str(source))
-                        target.rename(source)
-            raise
+    from librarymanager.services.renaming import apply_manual_filename as _impl
+    return _impl(database_path, scene_id, requested_name, move_file)
+
+apply_manual_filename._is_watchtower_wrapper = True
 
 
 def find_csm_font():
