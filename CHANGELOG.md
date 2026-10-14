@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.25 — 2026-10-14
+
+- **Packaging Hotfix: Distribution Archive Dependency Bootstrap**: Included `librarymanager_bootstrap.py` in the release archive (`librarymanager.zip`). Resolves `ModuleNotFoundError: No module named 'librarymanager_bootstrap'` and `Live status could not be refreshed: exit status 1` after updating.
+
 ## 1.0.24 — 2026-10-14
 
 - **Cross-Process SQLite Lock Contention Resolution**: Eliminated `sqlite3.OperationalError: database is locked` errors caused by routine status polling (`filesystem_monitor_summary`, `live_status`) executing multi-statement DDL scripts (`executescript(SCHEMA)`) concurrently with the background filesystem monitor. `_ensure_schema` now checks `sqlite_master` first and skips DDL table creation when tables already exist, and enforces `PRAGMA busy_timeout=30000;` and `PRAGMA journal_mode=WAL;`.
