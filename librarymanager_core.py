@@ -3083,92 +3083,135 @@ def clean_deleted_scenes_from_stash(database_path: Path, stash: Any = None) -> d
     - Also verifies files on disk; if a missing file was restored/reconnected, updates exists_on_disk = 1.
     - Records an activity audit event in the live feed.
     """
-    connection = connect(database_path)
     pruned_count = 0
     restored_count = 0
+
+    conn_read = connect(database_path)
     try:
-        rows = connection.execute(
+        rows = conn_read.execute(
             "SELECT file_id, scene_id, path, basename FROM files WHERE exists_on_disk = 0"
         ).fetchall()
-        if not rows:
-            return {
-                "cleaned_count": 0,
-                "restored_count": 0,
-                "remaining_missing": 0,
-                "message": "No missing files found to clean."
-            }
+        rows = [dict(r) for r in rows]
+    finally:
+        conn_read.close()
 
-        active_missing = []
-        for r in rows:
-            p = r["path"]
+    if not rows:
+        return {
+            "cleaned_count": 0,
+            "restored_count": 0,
+            "remaining_missing": 0,
+            "message": "No missing files found to clean."
+        }
+
+    active_missing = []
+    restored_fids = []
+    for r in rows:
+        p = r["path"]
+        exists = False
+        try:
+            exists = os.path.isfile(p)
+        except OSError:
             exists = False
-            try:
-                exists = os.path.isfile(p)
-            except OSError:
-                exists = False
-            if exists:
-                connection.execute("UPDATE files SET exists_on_disk = 1, missing_since = NULL WHERE file_id = ?", (r["file_id"],))
-                restored_count += 1
-            else:
-                active_missing.append(r)
+        if exists:
+            restored_fids.append(r["file_id"])
+        else:
+            active_missing.append(r)
 
-        active_stash_scenes = set()
-        active_stash_files = set()
-        checked_stash = False
-        if stash and active_missing:
-            scene_ids = list({str(r["scene_id"]) for r in active_missing if r["scene_id"]})
-            from librarymanager.integrations.stash_graphql import check_scenes_batch
-            active_stash_scenes, active_stash_files, checked_stash = check_scenes_batch(stash, scene_ids)
+    restored_count = len(restored_fids)
+    if restored_fids:
+        conn_restore = connect(database_path)
+        try:
+            conn_restore.execute("BEGIN IMMEDIATE")
+            for fid in restored_fids:
+                conn_restore.execute(
+                    "UPDATE files SET exists_on_disk = 1, missing_since = NULL WHERE file_id = ?",
+                    (fid,),
+                )
+            conn_restore.commit()
+        finally:
+            conn_restore.close()
 
-        dead_files = []
-        for r in active_missing:
-            fid = str(r["file_id"])
-            sid = str(r["scene_id"])
-            if checked_stash:
-                if sid not in active_stash_scenes or (fid and fid not in active_stash_files):
-                    dead_files.append(fid)
-            elif stash is None:
+    active_stash_scenes = set()
+    active_stash_files = set()
+    checked_stash = False
+    if stash and active_missing:
+        scene_ids = list({str(r["scene_id"]) for r in active_missing if r["scene_id"]})
+        from librarymanager.integrations.stash_graphql import check_scenes_batch
+        active_stash_scenes, active_stash_files, checked_stash = check_scenes_batch(stash, scene_ids)
+
+    dead_files = []
+    for r in active_missing:
+        fid = str(r["file_id"])
+        sid = str(r["scene_id"])
+        if checked_stash:
+            if sid not in active_stash_scenes or (fid and fid not in active_stash_files):
                 dead_files.append(fid)
+        elif stash is None:
+            dead_files.append(fid)
 
-        if dead_files:
-            dead_paths = [r["path"] for r in active_missing if str(r["file_id"]) in dead_files and r["path"]]
+    if dead_files:
+        dead_paths = [r["path"] for r in active_missing if str(r["file_id"]) in dead_files and r["path"]]
+        conn_prune = connect(database_path)
+        try:
+            conn_prune.execute("BEGIN IMMEDIATE")
             for fid in dead_files:
-                connection.execute("DELETE FROM filename_state WHERE file_id = ?", (fid,))
-                connection.execute("DELETE FROM filename_previews WHERE file_id = ?", (fid,))
-                connection.execute("DELETE FROM files WHERE file_id = ?", (fid,))
+                conn_prune.execute("DELETE FROM filename_state WHERE file_id = ?", (fid,))
+                conn_prune.execute("DELETE FROM filename_previews WHERE file_id = ?", (fid,))
+                conn_prune.execute("DELETE FROM files WHERE file_id = ?", (fid,))
             for dp in dead_paths:
-                connection.execute(
+                conn_prune.execute(
                     "UPDATE filesystem_events SET status='reviewed' WHERE (source_path=? OR destination_path=?) AND status='pending'",
                     (dp, dp),
                 )
             if dead_paths:
-                connection.executemany(
+                conn_prune.executemany(
                     "DELETE FROM unindexed_external_media WHERE path = ?",
                     [(dp,) for dp in dead_paths],
                 )
+            conn_prune.commit()
             pruned_count = len(dead_files)
+        finally:
+            conn_prune.close()
 
-        connection.commit()
+        # Prune dead records from cached diagnostic report files so UI clears cleanly
+        dead_fids_set = {str(fid) for fid in dead_files}
+        for r_name, list_key in [("reconciliation-report.json", "matches"), ("resolution-plan.json", "items")]:
+            r_path = Path(__file__).with_name(r_name)
+            if r_path.is_file():
+                try:
+                    content = json.loads(r_path.read_text(encoding="utf-8"))
+                    rows_list = content.get(list_key, [])
+                    if isinstance(rows_list, list):
+                        filtered = [row for row in rows_list if str(row.get("file_id")) not in dead_fids_set]
+                        if len(filtered) != len(rows_list):
+                            content[list_key] = filtered
+                            if isinstance(content.get("summary"), dict):
+                                content["summary"]["missing"] = len(filtered)
+                            r_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
 
-        remaining_missing = connection.execute(
+    conn_count = connect(database_path)
+    try:
+        remaining_missing = conn_count.execute(
             "SELECT COUNT(*) AS c FROM files WHERE exists_on_disk = 0"
         ).fetchone()["c"]
-
-        if pruned_count > 0:
-            record_activity(
-                database_path, "clean", "clean deleted from stash", "complete",
-                severity="info",
-                detail=f"Cleaned Stash database: pruned {pruned_count} deleted scene record(s) from Watchtower."
-            )
-
-        return {
-            "cleaned_count": pruned_count,
-            "restored_count": restored_count,
-            "remaining_missing": remaining_missing,
-            "message": f"Pruned {pruned_count} dead record(s). {remaining_missing} missing file(s) remain."
-        }
     finally:
-        connection.close()
+        conn_count.close()
+
+    if pruned_count > 0:
+        record_activity(
+            database_path, "clean", "clean deleted from stash", "complete",
+            severity="info",
+            detail=f"Cleaned Stash database: pruned {pruned_count} deleted scene record(s) from Watchtower."
+        )
+
+    return {
+        "cleaned_count": pruned_count,
+        "restored_count": restored_count,
+        "remaining_missing": remaining_missing,
+        "message": f"Pruned {pruned_count} dead record(s). {remaining_missing} missing file(s) remain."
+    }
 
 
 def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list, config: dict = None) -> dict:
@@ -3186,7 +3229,7 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
 
     if roots is not None:
         accessible_roots = [str(r) for r in roots if os.path.isdir(str(r))]
-        if roots and not accessible_roots:
+        if not accessible_roots:
             return {
                 "status": "warning",
                 "missing_checked": 0,
@@ -3195,7 +3238,7 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
                 "unmatched": [],
                 "unindexed_found_count": 0,
                 "auto_ingested_count": 0,
-                "message": "Selected library drive(s) are currently offline or unavailable.",
+                "message": "Selected library drive(s) are currently offline or unavailable." if roots else "No library roots selected.",
             }
     else:
         cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
@@ -3436,93 +3479,112 @@ def reconcile_missing_media_across_roots(database_path: Path, stash, roots: list
 
     reconciled = []
     unmatched = []
-    connection = connect(database_path)
-    try:
-        for item in missing_candidates:
-            matches_for_item = [
-                c for c in candidates_found if c["item"].get("file_id") == item.get("file_id")
-            ]
-            if len(matches_for_item) == 1:
-                cand_path = matches_for_item[0]["candidate_path"]
-                scan_job_id = None
-                if stash:
-                    try:
-                        scan_job_id = stash.metadata_scan(paths=[cand_path])
-                        stash.wait_for_job(scan_job_id, timeout=60)
-                    except Exception as scan_err:
-                        logger.warning("Targeted scan failed for %s: %s", cand_path, scan_err)
+    for item in missing_candidates:
+        matches_for_item = [
+            c for c in candidates_found if c["item"].get("file_id") == item.get("file_id")
+        ]
+        if len(matches_for_item) == 1:
+            cand_path = matches_for_item[0]["candidate_path"]
+            scan_job_id = None
+            if stash:
+                try:
+                    scan_job_id = stash.metadata_scan(paths=[cand_path])
+                    stash.wait_for_job(scan_job_id, timeout=60)
+                except Exception as scan_err:
+                    logger.warning("Targeted scan failed for %s: %s", cand_path, scan_err)
 
-                connection.execute(
+            conn_upd = connect(database_path)
+            try:
+                conn_upd.execute("BEGIN IMMEDIATE")
+                conn_upd.execute(
                     """UPDATE files SET path=?, basename=?, exists_on_disk=1, last_seen_at=?, missing_since=NULL
                        WHERE file_id=?""",
                     (cand_path, Path(cand_path).name, utc_now(), item.get("file_id")),
                 )
-                connection.execute(
+                conn_upd.execute(
                     "UPDATE filesystem_events SET status='reviewed' WHERE source_path=? OR source_path=?",
                     (item["path"], cand_path),
                 )
-                connection.commit()
+                conn_upd.commit()
+            finally:
+                conn_upd.close()
 
-                # Relocate any companion files left behind in the old folder
-                moved_companions = []
-                old_p = Path(item["path"])
-                new_p = Path(cand_path)
-                if (
-                    any(_is_subpath_of(str(old_p), root) for root in accessible_roots)
-                    and old_p.parent.is_dir()
-                    and new_p.parent.is_dir()
-                    and old_p.parent != new_p.parent
-                ):
-                    for comp_name in get_companion_files(old_p):
-                        src_comp = old_p.parent / comp_name
-                        tgt = associated_file_target(src_comp, old_p, new_p)
-                        if tgt:
-                            dst_comp = new_p.parent / tgt.name
-                            if src_comp.is_file() and not dst_comp.exists():
-                                try:
-                                    expect_filesystem_move(database_path, str(src_comp), str(dst_comp))
-                                    shutil.move(str(src_comp), str(dst_comp))
-                                    moved_companions.append(dst_comp.name)
-                                    record_activity(
-                                        database_path, "companion", "moved companion", "recorded",
-                                        severity="info",
-                                        scene_id=item.get("scene_id"), file_id=item.get("file_id"),
-                                        old_path=str(src_comp), new_path=str(dst_comp),
-                                        detail=f"Moved companion file alongside {new_p.name}"
-                                    )
-                                except Exception as comp_err:
-                                    logger.warning("Failed moving companion %s to %s: %s", src_comp, dst_comp, comp_err)
+            # Relocate any companion files left behind in the old folder
+            moved_companions = []
+            old_p = Path(item["path"])
+            new_p = Path(cand_path)
+            if (
+                any(_is_subpath_of(str(old_p), root) for root in accessible_roots)
+                and old_p.parent.is_dir()
+                and new_p.parent.is_dir()
+                and old_p.parent != new_p.parent
+            ):
+                for comp_name in get_companion_files(old_p):
+                    src_comp = old_p.parent / comp_name
+                    tgt = associated_file_target(src_comp, old_p, new_p)
+                    if tgt:
+                        dst_comp = new_p.parent / tgt.name
+                        if src_comp.is_file() and not dst_comp.exists():
+                            try:
+                                expect_filesystem_move(database_path, str(src_comp), str(dst_comp))
+                                shutil.move(str(src_comp), str(dst_comp))
+                                moved_companions.append(dst_comp.name)
+                                record_activity(
+                                    database_path, "companion", "moved companion", "recorded",
+                                    severity="info",
+                                    scene_id=item.get("scene_id"), file_id=item.get("file_id"),
+                                    old_path=str(src_comp), new_path=str(dst_comp),
+                                    detail=f"Moved companion file alongside {new_p.name}"
+                                )
+                            except Exception as comp_err:
+                                logger.warning("Failed moving companion %s to %s: %s", src_comp, dst_comp, comp_err)
 
-                comp_detail = f" (along with {len(moved_companions)} companion file{'s' if len(moved_companions) != 1 else ''})" if moved_companions else ""
-                record_activity(
-                    database_path, "reconciliation", "missing file reconnected", "updated",
-                    severity="info", scene_id=item.get("scene_id"), file_id=item.get("file_id"),
-                    old_path=item["path"], new_path=cand_path,
-                    detail=f"Reconnected {Path(cand_path).name} in Stash via targeted scan{comp_detail}"
-                )
-                reconciled.append({
-                    "scene_id": item.get("scene_id"),
-                    "file_id": item.get("file_id"),
-                    "old_path": item["path"],
-                    "new_path": cand_path,
-                    "filename": Path(cand_path).name,
-                    "moved_companions": moved_companions,
-                })
-            else:
-                reason = (
-                    "Multiple matching files found across library roots; manual review required"
-                    if len(matches_for_item) > 1
-                    else "File not found in monitored library roots"
-                )
-                unmatched.append({
-                    "scene_id": item.get("scene_id"),
-                    "file_id": item.get("file_id"),
-                    "old_path": item["path"],
-                    "filename": item.get("basename"),
-                    "reason": reason,
-                })
-    finally:
-        connection.close()
+            comp_detail = f" (along with {len(moved_companions)} companion file{'s' if len(moved_companions) != 1 else ''})" if moved_companions else ""
+            record_activity(
+                database_path, "reconciliation", "missing file reconnected", "updated",
+                severity="info", scene_id=item.get("scene_id"), file_id=item.get("file_id"),
+                old_path=item["path"], new_path=cand_path,
+                detail=f"Reconnected {Path(cand_path).name} in Stash via targeted scan{comp_detail}"
+            )
+            reconciled.append({
+                "scene_id": item.get("scene_id"),
+                "file_id": item.get("file_id"),
+                "old_path": item["path"],
+                "new_path": cand_path,
+                "filename": Path(cand_path).name,
+                "moved_companions": moved_companions,
+            })
+        else:
+            reason = (
+                "Multiple matching files found across library roots; manual review required"
+                if len(matches_for_item) > 1
+                else "File not found in monitored library roots"
+            )
+            unmatched.append({
+                "scene_id": item.get("scene_id"),
+                "file_id": item.get("file_id"),
+                "old_path": item["path"],
+                "filename": item.get("basename"),
+                "reason": reason,
+            })
+
+    if reconciled:
+        reconnected_fids_set = {str(item.get("file_id")) for item in reconciled if item.get("file_id")}
+        for r_name, list_key in [("reconciliation-report.json", "matches"), ("resolution-plan.json", "items")]:
+            r_path = Path(__file__).with_name(r_name)
+            if r_path.is_file():
+                try:
+                    content = json.loads(r_path.read_text(encoding="utf-8"))
+                    rows_list = content.get(list_key, [])
+                    if isinstance(rows_list, list):
+                        filtered = [row for row in rows_list if str(row.get("file_id")) not in reconnected_fids_set]
+                        if len(filtered) != len(rows_list):
+                            content[list_key] = filtered
+                            if isinstance(content.get("summary"), dict):
+                                content["summary"]["missing"] = len(filtered)
+                            r_path.write_text(json.dumps(content, indent=2, ensure_ascii=False), encoding="utf-8")
+                except Exception:
+                    pass
 
     status_str = "complete" if (reconciled or auto_ingested_count) else ("warning" if unmatched else "info")
     record_activity(
@@ -8673,93 +8735,106 @@ def invalidate_stale_filing_proposals(database_path: Path, stash=None) -> list[i
     whose source video file or Stash scene no longer exists.
     Does not affect valid proposals or transactions requiring recovery.
     Returns list of invalidated proposal IDs."""
-    invalidated = []
-    has_updates = False
-    connection = connect(database_path)
+    conn_read = connect(database_path)
     try:
-        rows = connection.execute(
+        rows = conn_read.execute(
             "SELECT id, scene_id, file_id, source_path, proposed_path, destination_folder FROM filing_proposals WHERE status='pending'"
         ).fetchall()
-        now = utc_now()
-        for r in rows:
-            prop_id = r["id"]
-            src_path = Path(r["source_path"])
-            dest_path = Path(r["proposed_path"]) if r["proposed_path"] else None
-            is_stale = False
-            is_completed = False
-            reason = ""
+        rows = [dict(r) for r in rows]
+    finally:
+        conn_read.close()
 
-            # 1. Source video file deleted from disk
-            if not src_path.is_file():
-                # Check whether the file was moved to the proposed destination on disk and verified in Stash
-                if dest_path and dest_path.is_file() and r["scene_id"] and stash:
-                    try:
-                        scene_obj = None
-                        if hasattr(stash, "call_GQL"):
-                            res = stash.call_GQL(
-                                "query CheckScene($id: ID!) { findScene(id: $id) { id files { id path } } }",
-                                {"id": str(r["scene_id"])}
-                            )
-                            scene_obj = (res or {}).get("findScene")
-                        elif hasattr(stash, "find_scene"):
-                            scene_obj = stash.find_scene(str(r["scene_id"]))
+    now = utc_now()
+    completed_updates = []
+    invalidated = []
+    stale_updates = []
 
-                        if scene_obj and str(scene_obj.get("id")) == str(r["scene_id"]):
-                            s_files = scene_obj.get("files") or []
-                            for sf in s_files:
-                                sf_p = sf.get("path") or ""
-                                sf_id = str(sf.get("id") or "")
-                                if sf_p and str(Path(sf_p).resolve()) == str(dest_path.resolve()):
-                                    if not r["file_id"] or sf_id == str(r["file_id"]):
-                                        is_completed = True
-                                        break
-                    except Exception:
-                        pass
+    for r in rows:
+        prop_id = r["id"]
+        src_path = Path(r["source_path"])
+        dest_path = Path(r["proposed_path"]) if r["proposed_path"] else None
+        is_stale = False
+        is_completed = False
+        reason = ""
 
-                if is_completed:
-                    connection.execute(
-                        "UPDATE filing_proposals SET status='completed', last_error=NULL, updated_at=? WHERE id=?",
-                        (now, prop_id)
-                    )
-                    connection.execute(
-                        "UPDATE incoming_files SET filing_diagnostic=NULL, last_checked_at=? WHERE path=? OR path=?",
-                        (now, str(src_path), str(dest_path))
-                    )
-                    has_updates = True
-                    continue
-                else:
-                    is_stale = True
-                    reason = f"Proposed video source file was deleted: {src_path.name}"
-            # 2. Stash scene deleted from Stash
-            elif stash and r["scene_id"]:
+        # 1. Source video file deleted from disk
+        if not src_path.is_file():
+            # Check whether the file was moved to the proposed destination on disk and verified in Stash
+            if dest_path and dest_path.is_file() and r["scene_id"] and stash:
                 try:
+                    scene_obj = None
                     if hasattr(stash, "call_GQL"):
                         res = stash.call_GQL(
-                            "query CheckScene($id: ID!) { findScene(id: $id) { id } }",
+                            "query CheckScene($id: ID!) { findScene(id: $id) { id files { id path } } }",
                             {"id": str(r["scene_id"])}
                         )
-                        if not (res or {}).get("findScene"):
-                            is_stale = True
-                            reason = f"Proposed Stash scene {r['scene_id']} was deleted"
+                        scene_obj = (res or {}).get("findScene")
                     elif hasattr(stash, "find_scene"):
-                        if not stash.find_scene(str(r["scene_id"])):
-                            is_stale = True
-                            reason = f"Proposed Stash scene {r['scene_id']} was deleted"
+                        scene_obj = stash.find_scene(str(r["scene_id"]))
+
+                    if scene_obj and str(scene_obj.get("id")) == str(r["scene_id"]):
+                        s_files = scene_obj.get("files") or []
+                        for sf in s_files:
+                            sf_p = sf.get("path") or ""
+                            sf_id = str(sf.get("id") or "")
+                            if sf_p and str(Path(sf_p).resolve()) == str(dest_path.resolve()):
+                                if not r["file_id"] or sf_id == str(r["file_id"]):
+                                    is_completed = True
+                                    break
                 except Exception:
                     pass
 
-            if is_stale:
-                connection.execute(
+            if is_completed:
+                completed_updates.append((prop_id, str(src_path), str(dest_path) if dest_path else ""))
+                continue
+            else:
+                is_stale = True
+                reason = f"Proposed video source file was deleted: {src_path.name}"
+        # 2. Stash scene deleted from Stash
+        elif stash and r["scene_id"]:
+            try:
+                if hasattr(stash, "call_GQL"):
+                    res = stash.call_GQL(
+                        "query CheckScene($id: ID!) { findScene(id: $id) { id } }",
+                        {"id": str(r["scene_id"])}
+                    )
+                    if not (res or {}).get("findScene"):
+                        is_stale = True
+                        reason = f"Proposed Stash scene {r['scene_id']} was deleted"
+                elif hasattr(stash, "find_scene"):
+                    if not stash.find_scene(str(r["scene_id"])):
+                        is_stale = True
+                        reason = f"Proposed Stash scene {r['scene_id']} was deleted"
+            except Exception:
+                pass
+
+        if is_stale:
+            stale_updates.append((prop_id, reason))
+            invalidated.append(prop_id)
+
+    if completed_updates or stale_updates:
+        conn_write = connect(database_path)
+        try:
+            conn_write.execute("BEGIN IMMEDIATE")
+            for prop_id, s_path, d_path in completed_updates:
+                conn_write.execute(
+                    "UPDATE filing_proposals SET status='completed', last_error=NULL, updated_at=? WHERE id=?",
+                    (now, prop_id)
+                )
+                conn_write.execute(
+                    "UPDATE incoming_files SET filing_diagnostic=NULL, last_checked_at=? WHERE path=? OR path=?",
+                    (now, s_path, d_path)
+                )
+            for prop_id, reason in stale_updates:
+                conn_write.execute(
                     "UPDATE filing_proposals SET status='invalid', last_error=?, updated_at=? WHERE id=?",
                     (reason, now, prop_id)
                 )
-                invalidated.append(prop_id)
-                has_updates = True
-        if has_updates:
-            connection.commit()
-        return invalidated
-    finally:
-        connection.close()
+            conn_write.commit()
+        finally:
+            conn_write.close()
+
+    return invalidated
 
 
 def get_pending_filing_proposals(database_path: Path, stash=None) -> list[dict]:

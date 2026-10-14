@@ -1831,6 +1831,7 @@
         } catch (cleanErr) {
           console.warn("clean_deleted_from_stash failed:", cleanErr);
         }
+        await loadReports();
         await refresh(true);
         setNotice(`Resolution complete!${cleanMsg || " Verified files were re-linked and dead records were cleanly pruned."}`);
       } catch (err) {
@@ -2759,7 +2760,7 @@
     function handleInitiateManualSync() {
       const rootsList = getCleanRootsList();
       if (rootsList.length <= 1) {
-        handleExecuteManualSync(rootsList);
+        handleExecuteManualSync(rootsList.length === 1 ? rootsList : undefined);
         return;
       }
       const initial = {};
@@ -2785,6 +2786,7 @@
         } else {
           setNotice(`Sync complete: checked ${res?.missing_checked || 0} missing files, ${res?.reconciled_count || 0} reconnected.`);
         }
+        await loadReports();
         await refresh(true);
       } catch (err) {
         setError(err.message || String(err));
