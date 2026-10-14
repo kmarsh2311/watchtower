@@ -1480,18 +1480,65 @@
     function openBacklogFastTag(event, sceneId) {
       event?.stopPropagation?.();
       if (!sceneId) return;
-      const cardEl = event?.currentTarget?.closest?.(`[data-scene-id="${sceneId}"]`)
-        || document.querySelector(`[data-scene-id="${sceneId}"]`);
-      if (cardEl && window.FastTag) {
-        cardEl.dispatchEvent(new MouseEvent("contextmenu", {
+      if (window.FastTag) {
+        let cardEl = event?.currentTarget?.closest?.(`[data-scene-id="${sceneId}"]`)
+          || document.querySelector(`[data-scene-id="${sceneId}"]`);
+
+        // FastTag expects event.target or an ancestor to match:
+        // .scene-card, [class*="scene-card"], [class*="SceneCard"], .card, [class*="grid-card"]
+        // and to contain an <a href*="/scenes/{id}"> anchor.
+        let targetEl = (cardEl?.classList?.contains('scene-card') ? cardEl : null)
+          || cardEl?.querySelector?.('.scene-card, [class*="scene-card"], [class*="SceneCard"]')
+          || cardEl?.closest?.('.scene-card, [class*="scene-card"], [class*="SceneCard"]');
+
+        let tempContainer = null;
+        if (!targetEl) {
+          if (cardEl) {
+            cardEl.classList.add('scene-card');
+            targetEl = cardEl;
+          } else {
+            tempContainer = document.createElement('div');
+            tempContainer.className = 'scene-card';
+            tempContainer.setAttribute('data-scene-id', String(sceneId));
+            tempContainer.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0;pointer-events:none;';
+            document.body.appendChild(tempContainer);
+            targetEl = tempContainer;
+          }
+        }
+
+        // Ensure targetEl contains an <a href="/scenes/{sceneId}"> anchor so FastTag's extractSceneId finds it
+        let link = targetEl.querySelector?.(`a[href*="/scenes/${sceneId}"]`) || targetEl.querySelector?.('a[href*="/scenes/"]');
+        if (!link) {
+          link = document.createElement('a');
+          link.href = `/scenes/${sceneId}`;
+          link.className = 'lm-fasttag-scene-context';
+          link.style.display = 'none';
+          targetEl.appendChild(link);
+        }
+
+        const clientX = event?.clientX || (event?.currentTarget ? event.currentTarget.getBoundingClientRect().left : window.innerWidth / 2);
+        const clientY = event?.clientY || (event?.currentTarget ? event.currentTarget.getBoundingClientRect().top : window.innerHeight / 3);
+
+        targetEl.dispatchEvent(new MouseEvent("contextmenu", {
           bubbles: true,
           cancelable: true,
-          clientX: event?.clientX || window.innerWidth / 2,
-          clientY: event?.clientY || window.innerHeight / 3
+          clientX: clientX,
+          clientY: clientY
         }));
+
+        if (tempContainer) {
+          setTimeout(() => tempContainer.remove(), 1000);
+        }
+
+        // Fallback: If FastTag's menu (#scenes-custom-menu) or popup does not mount within 200ms, open the scene in a new tab
+        setTimeout(() => {
+          if (!document.getElementById('scenes-custom-menu') && !document.querySelector('.fasttag-popup')) {
+            window.open(`/scenes/${sceneId}`, "_blank", "noopener");
+          }
+        }, 200);
         return;
       }
-      window.open(`/scenes/${sceneId}/edit`, "_blank", "noopener");
+      window.open(`/scenes/${sceneId}`, "_blank", "noopener");
     }
 
     async function handleReevaluateBacklogItem(item) {
@@ -3102,7 +3149,7 @@
             const sceneId = item.scene_id;
             const displayTitle = item.title || item.basename || `Scene ${sceneId}`;
             return React.createElement("div", {
-              className: "lm-terminal-attention-item failed",
+              className: "lm-terminal-attention-item failed scene-card",
               key: `failed-rename-${sceneId}`,
               "data-scene-id": sceneId
             },
@@ -3183,7 +3230,7 @@
             const sceneIdMatch = String(item.detail || "").match(/scene\s+(\d+)/i);
             const sceneId = item.scene_id || (sceneIdMatch ? sceneIdMatch[1] : null);
             return React.createElement("div", {
-              className: "lm-terminal-attention-item warn",
+              className: `lm-terminal-attention-item warn${sceneId ? " scene-card" : ""}`,
               key: `filing-attention-${item.path}`,
               "data-scene-id": sceneId || undefined
             },
@@ -3818,19 +3865,10 @@
                     React.createElement("button", {
                       type: "button", className: "lm-filing-dropdown-item",
                       style: { background: "transparent", border: "none", color: "#f1f5f9", textAlign: "left", padding: "8px 12px", fontSize: "0.82rem", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px" },
-                      onClick: () => {
+                      onClick: (e) => {
                         setActiveFilingMenuId(null);
                         if (prop.scene_id) {
-                          const cardEl = document.querySelector(`[data-scene-id="${prop.scene_id}"]`);
-                          if (cardEl && window.FastTag) {
-                            cardEl.dispatchEvent(new MouseEvent("contextmenu", {
-                              bubbles: true, cancelable: true,
-                              clientX: window.innerWidth / 2,
-                              clientY: window.innerHeight / 3
-                            }));
-                          } else {
-                            window.open(`/scenes/${prop.scene_id}`, "_blank");
-                          }
+                          openBacklogFastTag(e, prop.scene_id);
                         }
                       }
                     }, "⚡ Edit Scene with FastTag"),
