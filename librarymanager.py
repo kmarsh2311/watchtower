@@ -46,67 +46,19 @@ from librarymanager_core import dashboard_data, incoming_summary, annotate_pendi
 from librarymanager_reconciliation import (dismiss_review_batch, execute_grouped_move_reconciliation,
                                            list_review_batches)
 
-QUERY = """
-query LibraryManagerInventory($filter: FindFilterType) {
-  findScenes(filter: $filter) {
-    count
-    scenes {
-      id title details date director code rating100 organized urls
-      studio { name }
-      performers { id name }
-      tags { id name }
-      galleries { id title }
-      stash_ids { endpoint stash_id }
-      groups { group { id name } scene_index }
-      files { id path basename size duration width height video_codec fingerprints { type value } }
-    }
-  }
-}
-"""
-
-SCENE_QUERY = """
-query LibraryManagerScene($id: ID!) {
-  findScene(id: $id) {
-    id title details date director code rating100 organized urls
-    studio { name }
-    performers { id name }
-    tags { id name }
-    galleries { id title }
-    stash_ids { endpoint stash_id }
-    groups { group { id name } scene_index }
-    files { id path basename size duration width height video_codec fingerprints { type value } }
-  }
-}
-"""
-
-PERFORMER_SCENES_QUERY = """
-query LibraryManagerPerformerScenes($id: ID!) {
-  findScenes(scene_filter: { performers: { value: [$id], modifier: INCLUDES } }, filter: { per_page: -1 }) {
-    scenes { id }
-  }
-}
-"""
-
-STUDIO_SCENES_QUERY = """
-query LibraryManagerStudioScenes($id: ID!) {
-  findScenes(scene_filter: { studios: { value: [$id], modifier: INCLUDES } }, filter: { per_page: -1 }) {
-    scenes { id }
-  }
-}
-"""
-
-ROOTS_QUERY = "query LibraryManagerRoots { configuration { general { stashes { path } } } }"
-SCENE_COUNT_QUERY = "query LibraryManagerSceneCount { findScenes(filter: {per_page: 1}) { count } }"
-DELETE_FILES_MUTATION = """
-mutation LibraryManagerDeleteFiles($ids: [ID!]!) {
-  deleteFiles(ids: $ids)
-}
-"""
-
-
-def current_scene_count(stash):
-    result = stash.call_GQL(SCENE_COUNT_QUERY)
-    return int(((result or {}).get("findScenes") or {}).get("count") or 0)
+from librarymanager.integrations.stash_graphql import (
+    QUERY,
+    SCENE_QUERY,
+    PERFORMER_SCENES_QUERY,
+    STUDIO_SCENES_QUERY,
+    ROOTS_QUERY,
+    SCENE_COUNT_QUERY,
+    DELETE_FILES_MUTATION,
+    current_scene_count,
+    fetch_scenes,
+    fetch_scene,
+    fetch_library_roots,
+)
 
 
 def activity_logger():
@@ -457,22 +409,8 @@ def load_input():
     return json.load(sys.stdin)
 
 
-def fetch_scenes(stash, page_size=250):
-    scenes = []
-    page = 1
-    while True:
-        result = stash.call_GQL(QUERY, {"filter": {"page": page, "per_page": page_size}})
-        found = (result or {}).get("findScenes") or {}
-        batch = found.get("scenes") or []
-        scenes.extend(batch)
-        if not batch or len(scenes) >= int(found.get("count") or 0):
-            return scenes
-        page += 1
-
-
 def refresh_scene(stash, database_path, scene_id):
-    result = stash.call_GQL(SCENE_QUERY, {"id": str(scene_id)})
-    scene = (result or {}).get("findScene")
+    scene = fetch_scene(stash, scene_id)
     if not scene:
         raise ValueError(f"Scene {scene_id} was not found in Stash")
     refresh_scene_inventory(database_path, scene)
@@ -520,12 +458,6 @@ def should_process_parent_entity_hook(hook_type: str, config: dict) -> bool:
     if "Performer" in str(hook_type) or "Studio" in str(hook_type):
         return bool((config or {}).get("renameOnPerformerStudioUpdates"))
     return True
-
-
-def fetch_library_roots(stash):
-    result = stash.call_GQL(ROOTS_QUERY)
-    stashes = (((result or {}).get("configuration") or {}).get("general") or {}).get("stashes") or []
-    return sorted({str(item.get("path")).strip() for item in stashes if item.get("path")})
 
 
 def filing_config_with_library_roots(stash, config=None):

@@ -3117,25 +3117,8 @@ def clean_deleted_scenes_from_stash(database_path: Path, stash: Any = None) -> d
         checked_stash = False
         if stash and active_missing:
             scene_ids = list({str(r["scene_id"]) for r in active_missing if r["scene_id"]})
-            for i in range(0, len(scene_ids), 100):
-                chunk = scene_ids[i:i+100]
-                try:
-                    res = stash.call_GQL(
-                        """query CheckScenes($ids: [ID!]) {
-                             findScenes(scene_filter: { ids: { value: $ids, modifier: INCLUDES } }, filter: { per_page: -1 }) {
-                               scenes { id files { id path } }
-                             }
-                           }""",
-                        {"ids": chunk}
-                    )
-                    if isinstance(res, dict) and "findScenes" in res:
-                        checked_stash = True
-                        for sc in ((res.get("findScenes") or {}).get("scenes") or []):
-                            active_stash_scenes.add(str(sc["id"]))
-                            for f in sc.get("files") or []:
-                                active_stash_files.add(str(f.get("id")))
-                except Exception as check_err:
-                    logger.warning("Error checking scenes in Stash: %s", check_err)
+            from librarymanager.integrations.stash_graphql import check_scenes_batch
+            active_stash_scenes, active_stash_files, checked_stash = check_scenes_batch(stash, scene_ids)
 
         dead_files = []
         for r in active_missing:
@@ -3613,23 +3596,8 @@ INCOMING_SCAN_FLAGS = {
 
 def _ensure_stash_supports_extension(stash, path: str):
     """Ensure Stash's configured videoExtensions include this file's extension so the scanner accepts it."""
-    if not stash or not path:
-        return
-    ext = Path(path).suffix.lstrip(".").lower()
-    if not ext:
-        return
-    try:
-        cfg = stash.call_GQL("query { configuration { general { videoExtensions } } }")
-        current_exts = set(((cfg or {}).get("configuration") or {}).get("general", {}).get("videoExtensions") or [])
-        if ext not in current_exts:
-            current_exts.add(ext)
-            stash.call_GQL(
-                "mutation ConfigureGeneral($input: ConfigGeneralInput!) { configureGeneral(input: $input) { videoExtensions } }",
-                {"input": {"videoExtensions": sorted(list(current_exts))}}
-            )
-            logger.info("Added supported extension '%s' to Stash videoExtensions", ext)
-    except Exception as ext_err:
-        logger.debug("Failed checking/updating Stash videoExtensions: %s", ext_err)
+    from librarymanager.integrations.stash_graphql import ensure_stash_supports_extension
+    ensure_stash_supports_extension(stash, path)
 
 
 def notify_desktop(message: str, title: str = "Stash Library Manager"):
@@ -3688,54 +3656,8 @@ def add_unindexed_media_file(database_path: Path, stash, path: str, config: dict
 
         # Look up the newly created scene in Stash
         try:
-            res = stash.call_GQL(
-                """query FindSceneByPath($path: String!) {
-                  findScenes(scene_filter: {path: {value: $path, modifier: EQUALS}}) {
-                    scenes {
-                      id title details date director code rating100 organized urls
-                      studio { name }
-                      performers { id name }
-                      tags { id name aliases }
-                      galleries { id title }
-                      stash_ids { endpoint stash_id }
-                      groups { group { id name } scene_index }
-                      files { id path basename size duration fingerprints { type value } }
-                    }
-                  }
-                }""",
-                {"path": path}
-            )
-            scenes = ((res or {}).get("findScenes") or {}).get("scenes") or []
-            if not scenes:
-                bn = Path(path).name
-                res = stash.call_GQL(
-                    """query FindSceneByBasename($name: String!) {
-                      findScenes(scene_filter: {path: {value: $name, modifier: INCLUDES}}, filter: {per_page: 20}) {
-                        scenes {
-                          id title details date director code rating100 organized urls
-                          studio { name }
-                          performers { id name }
-                          tags { id name aliases }
-                          galleries { id title }
-                          stash_ids { endpoint stash_id }
-                          groups { group { id name } scene_index }
-                          files { id path basename size duration fingerprints { type value } }
-                        }
-                      }
-                    }""",
-                    {"name": bn}
-                )
-                for candidate_sc in ((res or {}).get("findScenes") or {}).get("scenes") or []:
-                    for f in candidate_sc.get("files") or []:
-                        fpath = str(f.get("path") or "")
-                        if fpath == path or os.path.normcase(os.path.abspath(fpath)) == os.path.normcase(os.path.abspath(path)):
-                            scene = candidate_sc
-                            break
-                    if scene:
-                        break
-            else:
-                scene = scenes[0]
-
+            from librarymanager.integrations.stash_graphql import find_scene_by_path
+            scene = find_scene_by_path(stash, path)
             if scene:
                 refresh_scene_inventory(database_path, scene)
         except Exception as query_err:
@@ -6880,12 +6802,8 @@ def evaluate_filing_proposal(database_path: Path, stash, file_path: str, scene: 
     matched_candidates_by_folder = {}
 
     if organize_by == "studio":
-        all_studios = []
-        try:
-            gql_res = stash.call_GQL('{ allStudios { id name aliases } }')
-            all_studios = (gql_res or {}).get("allStudios") or []
-        except Exception:
-            pass
+        from librarymanager.integrations.stash_graphql import fetch_all_studios
+        all_studios = fetch_all_studios(stash)
         s_match = match_studio_for_filing(scene, src.name, all_studios, match_source=match_source)
         if not s_match.get("matched"):
             s_reason = s_match.get("reason") or "No matching studio found in filename or Stash metadata."
@@ -6916,18 +6834,9 @@ def evaluate_filing_proposal(database_path: Path, stash, file_path: str, scene: 
         effective_organize_by = "studio"
 
     elif organize_by == "both":
-        all_performers = []
-        all_studios = []
-        try:
-            gql_p = stash.call_GQL('{ allPerformers { id name disambiguation alias_list } }')
-            all_performers = (gql_p or {}).get("allPerformers") or []
-        except Exception:
-            pass
-        try:
-            gql_s = stash.call_GQL('{ allStudios { id name aliases } }')
-            all_studios = (gql_s or {}).get("allStudios") or []
-        except Exception:
-            pass
+        from librarymanager.integrations.stash_graphql import fetch_all_performers, fetch_all_studios
+        all_performers = fetch_all_performers(stash)
+        all_studios = fetch_all_studios(stash)
 
         p_match = match_performer_for_filing(scene, src.name, all_performers, match_source=match_source)
         s_match = match_studio_for_filing(scene, src.name, all_studios, match_source=match_source)
@@ -7147,12 +7056,8 @@ def evaluate_filing_proposal(database_path: Path, stash, file_path: str, scene: 
         effective_organize_by = "both"
 
     else:
-        all_performers = []
-        try:
-            gql_res = stash.call_GQL('{ allPerformers { id name disambiguation alias_list } }')
-            all_performers = (gql_res or {}).get("allPerformers") or []
-        except Exception:
-            pass
+        from librarymanager.integrations.stash_graphql import fetch_all_performers
+        all_performers = fetch_all_performers(stash)
         p_match = match_performer_for_filing(scene, src.name, all_performers, match_source=match_source)
         if not p_match.get("matched"):
             p_reason = p_match.get("reason") or "No matching performer found in filename or Stash metadata."
@@ -9683,4 +9588,31 @@ from librarymanager.database.migrations import (  # noqa: E402
     _schema_applied,
     _schema_lock,
 )
+
+# Backward compatibility exports for Stash GraphQL integration
+from librarymanager.integrations.stash_graphql import (  # noqa: E402
+    QUERY,
+    INVENTORY_SCENES_QUERY,
+    SCENE_QUERY,
+    PERFORMER_SCENES_QUERY,
+    STUDIO_SCENES_QUERY,
+    ROOTS_QUERY,
+    SCENE_COUNT_QUERY,
+    DELETE_FILES_MUTATION,
+    check_scenes_batch,
+    check_scene_files,
+    check_scene_exists,
+    current_scene_count,
+    delete_files,
+    ensure_stash_supports_extension,
+    execute_gql,
+    fetch_all_files,
+    fetch_all_performers,
+    fetch_all_studios,
+    fetch_library_roots,
+    fetch_scene,
+    fetch_scenes,
+    find_scene_by_path,
+)
+
 
