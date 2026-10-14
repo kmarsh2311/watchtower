@@ -838,18 +838,8 @@ def _ensure_schema(connection: "sqlite3.Connection", database_path: Path | str) 
 
 
 def connect(database_path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(database_path, timeout=60.0)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA journal_mode=WAL")
-    except Exception:
-        pass
-    try:
-        connection.execute("PRAGMA busy_timeout=30000")
-    except Exception:
-        pass
-    # SQLite does not persist this per-connection setting.
-    connection.execute("PRAGMA foreign_keys=ON")
+    from librarymanager.database.connection import create_connection
+    connection = create_connection(database_path)
     _ensure_schema(connection, database_path)
     return connection
 

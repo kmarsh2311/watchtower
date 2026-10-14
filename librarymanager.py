@@ -16,6 +16,9 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Treat this entry point module as a package root for modular subpackages (e.g. librarymanager.database)
+__path__ = [os.path.join(os.path.dirname(__file__), "librarymanager")]
+
 from librarymanager_bootstrap import ensure_dependencies
 
 ensure_dependencies()

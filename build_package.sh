@@ -51,6 +51,9 @@ DIRS_TO_PACK=(
 if [[ -d "${PROJECT_ROOT}/docs/images" ]]; then
     DIRS_TO_PACK+=("docs/images")
 fi
+if [[ -d "${PROJECT_ROOT}/librarymanager" ]]; then
+    DIRS_TO_PACK+=("librarymanager")
+fi
 
 echo "Discovered files to pack:"
 for f in "${FILES_TO_PACK[@]}"; do
@@ -96,6 +99,7 @@ REQUIRED_FILES=(
     "librarymanager_core.py"
     "librarymanager_monitor.py"
     "librarymanager_startup.py"
+    "librarymanager/database/connection.py"
 )
 
 for req in "${REQUIRED_FILES[@]}"; do
