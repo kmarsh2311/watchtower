@@ -2555,26 +2555,43 @@ def apply_filing_proposal(
                     detail=f"Moving {len(companions)} companion file(s)...",
                     total_bytes=file_size,
                 )
+            unresolved_missing_companion = None
             for c_src, c_dst in companions:
-                if c_src.is_file():
-                    try:
-                        expect_filesystem_move(database_path, str(c_src), str(c_dst))
-                        _move_file(c_src, c_dst)
-                        moved_companions.append((c_src, c_dst))
-                    except Exception as c_err:
-                        companion_fail = f"Failed moving companion {c_src.name} to {c_dst}: {c_err}"
-                        break
+                if not c_src.is_file():
+                    companion_fail = f"Companion missing at transfer time: {c_src.name}"
+                    unresolved_missing_companion = f"expected companion missing from source before transfer: {c_src.name}"
+                    break
+                if c_dst.exists():
+                    companion_fail = f"Destination companion collision already exists on disk: {c_dst.name}"
+                    break
+                try:
+                    expect_filesystem_move(database_path, str(c_src), str(c_dst))
+                    _move_file(c_src, c_dst)
+                    moved_companions.append((c_src, c_dst))
+                except Exception as c_err:
+                    companion_fail = f"Failed moving companion {c_src.name} to {c_dst}: {c_err}"
+                    break
 
             if companion_fail:
                 # Rollback moved companions
                 rollback_ok = True
+                companion_rb_failures = []
                 for orig_src, orig_dst in reversed(moved_companions):
-                    if orig_dst.is_file():
-                        try:
-                            expect_filesystem_move(database_path, str(orig_dst), str(orig_src))
-                            _move_file(orig_dst, orig_src)
-                        except Exception:
-                            rollback_ok = False
+                    if not orig_dst.is_file():
+                        rollback_ok = False
+                        companion_rb_failures.append(f"companion missing at destination {orig_dst.name}")
+                        continue
+                    if orig_src.exists():
+                        rollback_ok = False
+                        companion_rb_failures.append(f"source collision exists for companion {orig_src.name}")
+                        continue
+                    try:
+                        expect_filesystem_move(database_path, str(orig_dst), str(orig_src))
+                        _move_file(orig_dst, orig_src)
+                    except Exception as c_rb_err:
+                        rollback_ok = False
+                        companion_rb_failures.append(f"failed restoring companion {orig_dst.name} to source: {c_rb_err}")
+
                 # Move video back via Stash
                 video_rb_err = None
                 try:
@@ -2591,12 +2608,35 @@ def apply_filing_proposal(
                     rollback_ok = False
                     video_rb_err = str(v_err)
 
-                if rollback_ok and src.is_file() and not dest_video.exists():
+                # Post-rollback verification of video and all moved companions
+                video_verified = src.is_file() and not dest_video.exists() and (video_rb_err is None)
+                companion_unverified = list(companion_rb_failures)
+                if unresolved_missing_companion:
+                    companion_unverified.append(unresolved_missing_companion)
+                for orig_src, orig_dst in moved_companions:
+                    if not orig_src.is_file():
+                        companion_unverified.append(f"companion missing at source {orig_src.name}")
+                    if orig_dst.exists():
+                        companion_unverified.append(f"companion still exists at destination {orig_dst.name}")
+
+                companions_verified = rollback_ok and not companion_unverified
+
+                if video_verified and companions_verified:
                     err_msg = f"{companion_fail}; safely restored to source"
                     _update_proposal_status(database_path, proposal_id, "failed", err_msg)
                     return {"id": proposal_id, "status": "failed", "rolled_back": True, "reason": err_msg}
                 else:
-                    err_msg = f"CRITICAL: Failed moving companion: {companion_fail}; Video rollback failed: {video_rb_err or 'dest exists or src missing'}"
+                    failures = []
+                    if video_verified:
+                        failures.append("video restored to source")
+                    else:
+                        failures.append(f"Video rollback failed: {video_rb_err or 'dest exists or src missing'}")
+
+                    if not companions_verified:
+                        unique_comp = list(dict.fromkeys(companion_unverified))
+                        failures.append(f"Companion rollback failed or unverified: {'; '.join(unique_comp) if unique_comp else 'unknown companion discrepancy'}")
+
+                    err_msg = f"CRITICAL: Failed moving companion: {companion_fail}; {'; '.join(failures)}"
                     _update_proposal_status(database_path, proposal_id, "needs_recovery", err_msg)
                     return {"id": proposal_id, "status": "needs_recovery", "rolled_back": False, "reason": err_msg}
 

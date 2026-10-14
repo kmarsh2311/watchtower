@@ -320,3 +320,230 @@ def test_ignore_filing_proposal(test_db):
     res_rec = filing.ignore_filing_proposal(test_db, 302)
     assert res_rec["status"] == "blocked"
     assert "requires recovery" in res_rec["reason"]
+
+
+def _setup_filing_proposal_with_companions(tmp_path, test_db, companion_names):
+    incoming = tmp_path / "Incoming"
+    incoming.mkdir(parents=True, exist_ok=True)
+    dest_root = tmp_path / "DestRoot"
+    dest_folder = dest_root / "Performer"
+    dest_folder.mkdir(parents=True, exist_ok=True)
+
+    video = incoming / "TestVideo.mp4"
+    video.write_bytes(b"V" * 5000)
+
+    companions = []
+    for name in companion_names:
+        c_path = incoming / name
+        c_path.write_bytes(b"C" * 100)
+        companions.append(c_path)
+
+    conn = filing.connect(test_db)
+    cur = conn.execute(
+        """INSERT INTO filing_proposals (
+            file_id, scene_id, source_path, proposed_path, destination_folder, destination_filename,
+            organize_by, matched_entity_id, matched_entity_name, match_source,
+            reason, status, candidate_destinations_json, created_at, updated_at
+        ) VALUES ('f100', 's100', ?, ?, ?, ?, 'performer', 'p1', 'Performer', 'filename', 'test', 'pending', ?, ?, ?)""",
+        (
+            str(video),
+            str(dest_folder / video.name),
+            str(dest_folder),
+            video.name,
+            json.dumps([{"destination_folder": str(dest_folder)}]),
+            filing.utc_now(),
+            filing.utc_now(),
+        ),
+    )
+    proposal_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+
+    current_vid = [video]
+    mock_stash = MagicMock()
+    mock_stash.find_plugin_config.return_value = {
+        "incomingFolders": [str(incoming)],
+        "autoFilingDestinationRoot": str(dest_root),
+    }
+    mock_stash.call_GQL.return_value = {
+        "findScene": {"id": "s100", "files": [{"id": "f100", "path": str(video)}]}
+    }
+
+    def mock_move_files(payload):
+        target = Path(payload["destination_folder"]) / payload["destination_basename"]
+        curr = current_vid[0]
+        curr.rename(target)
+        current_vid[0] = target
+        return True
+
+    mock_stash.move_files.side_effect = mock_move_files
+    return {
+        "db": test_db,
+        "incoming": incoming,
+        "dest_folder": dest_folder,
+        "video": video,
+        "companions": companions,
+        "proposal_id": proposal_id,
+        "mock_stash": mock_stash,
+        "current_vid": current_vid,
+    }
+
+
+def test_apply_filing_proposal_companion_disappears_before_move(tmp_path, test_db):
+    """Scenario A: Companion disappears after preflight succeeds and video moves, but before
+    the companion transfer loop reaches it. Transfer must fail, restore video, and report
+    needs_recovery because the missing companion cannot be verified clean."""
+    env = _setup_filing_proposal_with_companions(tmp_path, test_db, ["TestVideo.jpg"])
+    video = env["video"]
+    comp = env["companions"][0]
+    dest_video = env["dest_folder"] / video.name
+
+    # Hook mock_stash.move_files: after video moves to destination on the first call, delete companion at source!
+    orig_move = env["mock_stash"].move_files.side_effect
+    deleted = [False]
+
+    def move_and_delete_companion(payload):
+        res = orig_move(payload)
+        if not deleted[0]:
+            comp.unlink()  # Vanishes after preflight!
+            deleted[0] = True
+        return res
+
+    env["mock_stash"].move_files.side_effect = move_and_delete_companion
+
+    res = filing.apply_filing_proposal(
+        env["db"], env["mock_stash"], env["proposal_id"], target_destination_folder=str(env["dest_folder"])
+    )
+
+    # Must report needs_recovery with rolled_back=False because expected companion is missing
+    assert res["status"] == "needs_recovery"
+    assert res.get("rolled_back") is False
+    assert "CRITICAL" in res["reason"]
+    # Communicates both facts: verified video restoration and unresolved missing companion
+    assert "video restored to source" in res["reason"]
+    assert "Companion missing at transfer time" in res["reason"]
+    assert "TestVideo.jpg" in res["reason"]
+
+    # Video must be safely restored to source and absent from destination
+    assert video.is_file()
+    assert not dest_video.exists()
+
+    # Missing companion is not falsely reported as restored at source
+    assert not comp.exists()
+
+    # DB status must be needs_recovery
+    conn = filing.connect(test_db)
+    row = conn.execute("SELECT status, last_error FROM filing_proposals WHERE id=?", (env["proposal_id"],)).fetchone()
+    conn.close()
+    assert row["status"] == "needs_recovery"
+    assert "CRITICAL" in row["last_error"]
+    assert "video restored to source" in row["last_error"]
+    assert "Companion missing at transfer time" in row["last_error"]
+
+
+def test_apply_filing_proposal_companion_missing_during_rollback(tmp_path, test_db):
+    """Scenario B: After companion 1 moves, companion 2 move fails. During rollback,
+    companion 1 at destination is missing. Operation must report needs_recovery, NOT rolled_back=True."""
+    env = _setup_filing_proposal_with_companions(tmp_path, test_db, ["TestVideo.jpg", "TestVideo.nfo"])
+    # Companions are sorted: TestVideo.nfo is moved first, TestVideo.jpg is moved second
+    comp_first = env["incoming"] / "TestVideo.nfo"
+    dest_first = env["dest_folder"] / "TestVideo.nfo"
+
+    orig_move_file = filing._move_file
+
+    def faulty_move(src, target):
+        src_p = Path(src)
+        if src_p.suffix == ".jpg":  # Second companion transfer fails
+            # Before rolling back, simulate first companion at destination vanishing!
+            if dest_first.exists():
+                dest_first.unlink()
+            raise OSError("Simulated second companion transfer error")
+        return orig_move_file(src, target)
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(filing, "_move_file", faulty_move)
+        res = filing.apply_filing_proposal(
+            env["db"], env["mock_stash"], env["proposal_id"], target_destination_folder=str(env["dest_folder"])
+        )
+
+    # Must NOT report rolled_back=True because companion 1 could not be restored!
+    assert res["status"] == "needs_recovery"
+    assert res.get("rolled_back") is False
+    assert "CRITICAL" in res["reason"]
+    assert "Companion rollback failed or unverified" in res["reason"]
+    assert "TestVideo.nfo" in res["reason"]
+
+    # DB status must be needs_recovery
+    conn = filing.connect(test_db)
+    row = conn.execute("SELECT status, last_error FROM filing_proposals WHERE id=?", (env["proposal_id"],)).fetchone()
+    conn.close()
+    assert row["status"] == "needs_recovery"
+    assert "CRITICAL" in row["last_error"]
+
+
+def test_apply_filing_proposal_companion_collision_during_rollback(tmp_path, test_db):
+    """Rollback safety: If a collision file appears at companion source during rollback,
+    do NOT overwrite it. Set needs_recovery and rolled_back=False."""
+    env = _setup_filing_proposal_with_companions(tmp_path, test_db, ["TestVideo.jpg", "TestVideo.nfo"])
+    comp_first = env["incoming"] / "TestVideo.nfo"
+
+    orig_move_file = filing._move_file
+
+    def collision_move(src, target):
+        src_p = Path(src)
+        if src_p.suffix == ".jpg":  # Second companion transfer fails
+            # A rogue collision file appeared at first companion's source location!
+            comp_first.write_bytes(b"collision-data")
+            raise OSError("Simulated second companion transfer error")
+        return orig_move_file(src, target)
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(filing, "_move_file", collision_move)
+        res = filing.apply_filing_proposal(
+            env["db"], env["mock_stash"], env["proposal_id"], target_destination_folder=str(env["dest_folder"])
+        )
+
+    assert res["status"] == "needs_recovery"
+    assert res.get("rolled_back") is False
+    assert "CRITICAL" in res["reason"]
+    assert "source collision exists" in res["reason"]
+    # Collision file must NOT have been overwritten
+    assert comp_first.read_bytes() == b"collision-data"
+
+
+def test_apply_filing_proposal_verified_clean_rollback(tmp_path, test_db):
+    """Ensure existing verified clean rollback behavior works when companion 2 fails and all companions
+    plus video are safely restored and verified."""
+    env = _setup_filing_proposal_with_companions(tmp_path, test_db, ["TestVideo.jpg", "TestVideo.nfo"])
+    video = env["video"]
+    comp1 = env["incoming"] / "TestVideo.nfo"
+    comp2 = env["incoming"] / "TestVideo.jpg"
+    dest_video = env["dest_folder"] / video.name
+    dest_comp1 = env["dest_folder"] / comp1.name
+    dest_comp2 = env["dest_folder"] / comp2.name
+
+    orig_move_file = filing._move_file
+
+    def fail_on_second_comp(src, target):
+        if Path(src).suffix == ".jpg":
+            raise OSError("Simulated second companion transfer failure")
+        return orig_move_file(src, target)
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(filing, "_move_file", fail_on_second_comp)
+        res = filing.apply_filing_proposal(
+            env["db"], env["mock_stash"], env["proposal_id"], target_destination_folder=str(env["dest_folder"])
+        )
+
+    assert res["status"] == "failed"
+    assert res.get("rolled_back") is True
+    assert "safely restored to source" in res["reason"]
+
+    # Everything verified restored at source
+    assert video.is_file()
+    assert comp1.is_file()
+    assert comp2.is_file()
+    # Nothing left at destination
+    assert not dest_video.exists()
+    assert not dest_comp1.exists()
+    assert not dest_comp2.exists()
