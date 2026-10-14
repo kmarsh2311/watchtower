@@ -39,6 +39,8 @@ def test_zip_contains_all_critical_modules():
         "librarymanager_monitor.py",
         "librarymanager_reconciliation.py",
         "librarymanager_startup.py",
+        "librarymanager/scanning/naming_rules.py",
+        "librarymanager/scanning/reconciliation.py",
         "requirements.txt",
     ]
 
