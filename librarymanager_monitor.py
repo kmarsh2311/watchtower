@@ -430,9 +430,39 @@ logger = logging.getLogger("librarymanager.monitor")
 
 
 def monitor_code_signature(path=None):
-    """Return a content signature so a detached daemon can detect plugin updates."""
+    """Return a content signature across plugin modules so a detached daemon detects updates."""
     try:
-        return hashlib.sha256(Path(path or __file__).read_bytes()).hexdigest()
+        target = Path(path or __file__).resolve()
+        plugin_dir = target.parent if target.is_file() else target
+        hasher = hashlib.sha256()
+
+        # Core root plugin files
+        for p in sorted(plugin_dir.glob("librarymanager*.py")):
+            try:
+                hasher.update(p.name.encode("utf-8"))
+                hasher.update(p.read_bytes())
+            except OSError:
+                pass
+
+        # Modular subsystem package
+        pkg_dir = plugin_dir / "librarymanager"
+        if pkg_dir.is_dir():
+            for p in sorted(pkg_dir.rglob("*.py")):
+                try:
+                    hasher.update(str(p.relative_to(plugin_dir)).encode("utf-8"))
+                    hasher.update(p.read_bytes())
+                except OSError:
+                    pass
+
+        # Manifest containing version string
+        manifest = plugin_dir / "librarymanager.yml"
+        if manifest.is_file():
+            try:
+                hasher.update(manifest.read_bytes())
+            except OSError:
+                pass
+
+        return hasher.hexdigest()
     except OSError:
         return None
 
