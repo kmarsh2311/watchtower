@@ -485,19 +485,17 @@ class TestFinding8RelocationPathReuse:
 # ==========================================================================
 
 class TestFinding1NoRglobTimeout:
-    def test_no_timeout_around_rglob_in_current_incoming_paths(self):
+    def test_bounded_scan_guard_in_current_incoming_paths(self):
         """
-        CODE-CONFIRMED: _current_incoming_paths uses rglob with no timeout.
-        On an unresponsive NFS/SMB mount the IncomingWorker thread will block.
-        Cannot be reproduced safely in an automated test without a real mount.
+        VERIFIED FIX: _current_incoming_paths uses bounded iterator _iter_directory_bounded
+        instead of unbounded rglob, with deadline and timeout guards for network mounts.
         """
         import inspect
         src = inspect.getsource(CompletedDownloadWorker._current_incoming_paths)
-        assert "rglob" in src, "rglob must be present"
-        has_timeout = any(t in src.lower() for t in ["timeout", "signal.alarm", "threading.timer", "concurrent.futures"])
-        assert not has_timeout, (
-            "Timeout guard found — finding 1 would be FALSE POSITIVE"
-        )
+        assert "_iter_directory_bounded" in src, "Must use bounded iterator"
+        src_iter = inspect.getsource(CompletedDownloadWorker._iter_directory_bounded)
+        has_timeout = any(t in src_iter.lower() for t in ["timeout", "deadline"])
+        assert has_timeout, "Timeout/deadline guard must be present in iterator"
 
 
 # ==========================================================================

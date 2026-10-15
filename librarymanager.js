@@ -1178,9 +1178,8 @@
     const groupedReconciliation = (payload.grouped_reconciliation || []).length;
     const filingRecovery = (payload.filing_proposals || []).filter(item => item.status === "needs_recovery").length;
     const failedRenames = (payload.failed_renames || []).length;
-    const missingFilesCount = Number(payload.missing_files_count || 0);
-    const unindexedMediaCount = (payload.unindexed_media || []).length;
-    const alertCount = failedIncoming + filingAttentionIncoming + unavailableRoots + attentionEvents + groupedReconciliation + filingRecovery + failedRenames + missingFilesCount + unindexedMediaCount + (stale ? 1 : 0);
+    const scanIssuesCount = (payload.scan_issues || []).length;
+    const alertCount = failedIncoming + filingAttentionIncoming + unavailableRoots + attentionEvents + groupedReconciliation + filingRecovery + failedRenames + missingFilesCount + unindexedMediaCount + scanIssuesCount + (stale ? 1 : 0);
     return {
       watcher: {
         active: watcherRunning,
@@ -2824,7 +2823,11 @@
         const payload = (chosenRoots && chosenRoots.length > 0) ? { roots: chosenRoots } : {};
         const raw = await operation("reconcile_missing_media", payload);
         const res = typeof raw === "string" ? JSON.parse(raw) : raw;
-        if (res && res.reconciled_count > 0) {
+        if (res && res.status === "completed_with_errors") {
+          setNotice(`⚠️ ${res.message || "Manual sync completed with errors. See Overview alerts for details."}`);
+        } else if (res && (res.status === "warning" || res.status === "failed")) {
+          setError(res.message || "Manual sync encountered an error.");
+        } else if (res && res.reconciled_count > 0) {
           setNotice(`✓ Reconnected ${res.reconciled_count} of ${res.missing_checked} missing file(s) across selected drives!`);
         } else if (res?.message) {
           setNotice(res.message);
@@ -3134,6 +3137,44 @@
               }, "Reset Ignored Media")
             )
           ),
+
+          (data?.scan_issues || []).map(issue => {
+            const isError = issue.severity === "error" || issue.status === "failed";
+            const badgeClass = isError ? "error" : "warn";
+            const badgeLabel = issue.status === "timed_out" ? "SCAN TIMEOUT"
+              : (issue.status === "completed_with_errors" ? "SCAN WARNING"
+              : (isError ? "SCAN FAILED" : "SCAN INCOMPLETE"));
+            const title = issue.action ? `! SCAN ISSUE: ${issue.action.toUpperCase()}` : "! SCAN ISSUE DETECTED";
+            const affectedPath = issue.old_path || issue.new_path || "";
+            return React.createElement("div", {
+              className: `lm-terminal-attention-item ${badgeClass}`,
+              key: `scan-issue-${issue.id}`
+            },
+              React.createElement("div", { className: "lm-terminal-attention-title" },
+                React.createElement("strong", null, title),
+                React.createElement("span", { className: `lm-terminal-badge ${badgeClass}` }, badgeLabel)),
+              React.createElement("p", { className: "lm-terminal-attention-detail" },
+                React.createElement("b", null, "Details: "),
+                issue.detail || "An error occurred during a filesystem scan."),
+              React.createElement("p", { className: "lm-terminal-attention-sub" },
+                `Recorded: ${new Date(issue.recorded_at).toLocaleString()}`,
+                affectedPath ? ` • Location: ${affectedPath}` : "",
+                ` • Status: ${issue.status}`),
+              React.createElement("p", { className: "lm-terminal-attention-fix" },
+                "→ Fix: Verify network drive connection or folder read permissions. Click MANUAL SYNC to test drive access again."),
+              React.createElement("div", { className: "lm-terminal-actions" },
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn retry",
+                  disabled: !!busy,
+                  onClick: handleReconcileMissingMedia
+                }, busy === "reconcile_missing_media" ? "⚡️ SYNCING…" : "⚡️ MANUAL SYNC"),
+                React.createElement("button", {
+                  type: "button",
+                  className: "lm-terminal-btn details",
+                  onClick: () => { setSearch(issue.action || "scan"); setTab("activity"); }
+                }, "👁 VIEW IN ACTIVITY LOG")));
+          }),
 
           isMonitorStale && React.createElement("div", { className: "lm-terminal-attention-item warn", key: "stale-monitor" },
             React.createElement("div", { className: "lm-terminal-attention-title" },

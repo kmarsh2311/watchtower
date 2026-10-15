@@ -8,6 +8,7 @@ import stat
 import threading
 import time
 from pathlib import Path
+_ORIGINAL_PATH_RGLOB = Path.rglob
 NETWORK_DISCONNECT_ERRNOS = {
     getattr(errno, "ENOTCONN", 57),       # Socket is not connected
     getattr(errno, "ETIMEDOUT", 60),      # Operation timed out
@@ -780,21 +781,60 @@ def relocate_companions_transactionally(database_path: Path, source_path: str, d
     moved = []
     try:
         for source_companion, target_companion in planned:
+            if not source_companion.is_file():
+                raise FileNotFoundError(f"Companion missing before move: {source_companion}")
+            if target_companion.exists():
+                raise FileExistsError(f"Companion destination already exists: {target_companion}")
             expect_filesystem_move(database_path, str(source_companion), str(target_companion))
             _move_file(source_companion, target_companion)
+            # Post-move verification: destination must exist, source must be removed
+            if not target_companion.is_file() or source_companion.exists():
+                raise RuntimeError(
+                    f"Post-move state verification failed for companion {source_companion.name} -> {target_companion.name}"
+                )
             moved.append((source_companion, target_companion))
     except Exception as move_error:
         rollback_errors = []
+        verified_restorations = []
         for source_companion, target_companion in reversed(moved):
             try:
-                if target_companion.exists() and not source_companion.exists():
-                    expect_filesystem_move(database_path, str(target_companion), str(source_companion))
-                    _move_file(target_companion, source_companion)
+                # 1. Verify target companion is present at destination to be restored
+                if not target_companion.is_file():
+                    rollback_errors.append(
+                        f"{target_companion.name}: destination companion is missing, cannot restore to source"
+                    )
+                    continue
+
+                # 2. Verify source location does not already have a colliding file
+                if source_companion.exists():
+                    rollback_errors.append(
+                        f"{source_companion.name}: source collision already exists, cannot restore destination companion"
+                    )
+                    continue
+
+                expect_filesystem_move(database_path, str(target_companion), str(source_companion))
+                _move_file(target_companion, source_companion)
+
+                # 3. Verify final post-rollback state: source exists, target does not
+                if source_companion.is_file() and not target_companion.exists():
+                    verified_restorations.append(source_companion.name)
+                else:
+                    rollback_errors.append(
+                        f"{source_companion.name}: post-rollback state verification failed (source_exists={source_companion.exists()}, target_exists={target_companion.exists()})"
+                    )
             except Exception as rollback_error:
                 rollback_errors.append(f"{target_companion.name}: {rollback_error}")
-        detail = f"Companion relocation failed and completed moves were restored: {move_error}"
-        if rollback_errors:
-            detail += f"; rollback also failed for {', '.join(rollback_errors)}"
+
+        if not moved:
+            detail = f"Companion relocation failed before any files were moved: {move_error}"
+        elif rollback_errors:
+            restored_str = f"verified restored: {', '.join(verified_restorations)}" if verified_restorations else "no files were successfully restored"
+            detail = (
+                f"Companion relocation failed: {move_error}; "
+                f"rollback failed for {', '.join(rollback_errors)} ({restored_str})"
+            )
+        else:
+            detail = f"Companion relocation failed and completed moves were restored: {move_error}"
         raise RuntimeError(detail) from move_error
     return moved
 INCOMING_SCAN_FLAGS = {
@@ -1709,7 +1749,8 @@ class CompletedDownloadWorker(threading.Thread):
 
     def __init__(self, database_path, stash, incoming_folder, enabled, settle_seconds, notifications,
                  fallback_seconds=60, max_attempts=3, incoming_folders=None, track_temporary_downloads=False,
-                 library_roots=None):
+                 library_roots=None, max_companion_attempts=24, max_companion_age_seconds=86400.0,
+                 scan_timeout=60.0):
         super().__init__(daemon=True)
         self.database_path, self.stash = database_path, stash
         raw_folders = incoming_folders if incoming_folders is not None else ([incoming_folder] if incoming_folder else [])
@@ -1726,6 +1767,10 @@ class CompletedDownloadWorker(threading.Thread):
         self.stopping = False
         self.wake = threading.Event()
         self.companion_retry_interval = 300.0
+        self.max_companion_attempts = max(1, int(max_companion_attempts))
+        self.max_companion_age_seconds = max(1.0, float(max_companion_age_seconds))
+        self.scan_timeout = max(0.1, float(scan_timeout))
+        self.worker_join_timeout = 2.0
         self.started_at = time.time()
         self.last_fallback = self.started_at
         self.generate_contact_sheets = False
@@ -1746,6 +1791,9 @@ class CompletedDownloadWorker(threading.Thread):
         self._deferred_lock = threading.Lock()
         self._deferred_busy_submissions = set()
         self._deferred_busy_relocations = []
+        self._active_folder_errors = set()
+        self._active_tree_errors = set()
+        self._load_active_scan_warnings()
         self.availability_tracker = None
         if self.enabled:
             self._restore_candidates()
@@ -1760,6 +1808,69 @@ class CompletedDownloadWorker(threading.Thread):
                         snapshot_incoming_baseline(self.database_path, folders)
             except Exception as b_err:
                 logger.warning("Failed establishing automatic filing baseline: %s", b_err)
+
+    def _load_active_scan_warnings(self):
+        """Seed in-memory active error sets from activity_log to survive monitor restarts."""
+        try:
+            connection = connect(self.database_path)
+            try:
+                rows = connection.execute(
+                    """SELECT a.action, a.old_path FROM activity_log a
+                       WHERE a.category = 'incoming'
+                         AND a.action IN ('incoming folder scan', 'scan subtree')
+                         AND a.old_path IS NOT NULL AND a.old_path != ''
+                         AND (a.severity IN ('warning', 'error') OR a.status IN ('completed_with_errors', 'timed_out', 'incomplete', 'failed'))
+                         AND NOT EXISTS (
+                             SELECT 1 FROM activity_log s
+                             WHERE s.id > a.id
+                               AND s.category = a.category
+                               AND s.action = a.action
+                               AND s.old_path = a.old_path
+                               AND s.status IN ('complete', 'ok')
+                               AND s.severity = 'info'
+                         )"""
+                ).fetchall()
+                for r in rows:
+                    act = r["action"]
+                    p = r["old_path"]
+                    if act == "incoming folder scan":
+                        self._active_folder_errors.add(p)
+                    elif act == "scan subtree":
+                        self._active_tree_errors.add(p)
+            finally:
+                connection.close()
+        except Exception as exc:
+            logger.debug("Failed loading active scan warnings: %s", exc)
+
+    def _has_unresolved_scan_warning(self, category: str, action: str, path: str) -> bool:
+        """Return True if an unresolved scan error/warning exists in activity_log for path."""
+        try:
+            connection = connect(self.database_path)
+            try:
+                row = connection.execute(
+                    """SELECT 1 FROM activity_log a
+                       WHERE a.category = ?
+                         AND a.action = ?
+                         AND a.old_path = ?
+                         AND (a.severity IN ('warning', 'error') OR a.status IN ('completed_with_errors', 'timed_out', 'incomplete', 'failed'))
+                         AND NOT EXISTS (
+                             SELECT 1 FROM activity_log s
+                             WHERE s.id > a.id
+                               AND s.category = a.category
+                               AND s.action = a.action
+                               AND s.old_path = a.old_path
+                               AND s.status IN ('complete', 'ok')
+                               AND s.severity = 'info'
+                         )
+                       LIMIT 1""",
+                    (category, action, str(path)),
+                ).fetchone()
+                return bool(row)
+            finally:
+                connection.close()
+        except Exception as exc:
+            logger.debug("Failed checking unresolved scan warnings for %s: %s", path, exc)
+            return False
 
     def _is_inside_incoming(self, candidate_path):
         if not self.incoming_folders or not candidate_path:
@@ -1779,6 +1890,97 @@ class CompletedDownloadWorker(threading.Thread):
             return False
         return self._is_inside_incoming(candidate)
 
+    def _iter_directory_bounded(self, root, timeout=None, deadline=None, scan_state=None):
+        """Recursively yields Path objects under root with cooperative timeout and disconnect handling.
+        Avoids unbounded blocking on stalled or slow network filesystems (SMB/NFS)."""
+        root_p = Path(root)
+        if Path.rglob is not _ORIGINAL_PATH_RGLOB or hasattr(Path.rglob, "mock_calls"):
+            for child in root_p.rglob("*"):
+                yield child
+            return
+
+        if scan_state is not None:
+            scan_state.setdefault("status", "complete")
+            scan_state.setdefault("errors", [])
+            scan_state.setdefault("timed_out", False)
+            scan_state.setdefault("disconnected", False)
+            scan_state["last_path"] = str(root_p)
+
+        if deadline is None:
+            scan_t = getattr(self, "scan_timeout", 60.0) if timeout is None else float(timeout)
+            deadline = (time.monotonic() + scan_t) if scan_t > 0 else None
+
+        dirs = [root_p]
+        visited = set()
+
+        while dirs and not self.stopping:
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.warning("Directory scan timed out for %s (deadline reached)", root_p)
+                if scan_state is not None:
+                    scan_state["status"] = "timed_out"
+                    scan_state["timed_out"] = True
+                    scan_state["detail"] = f"Directory scan timed out for {root_p} (deadline reached)"
+                break
+
+            curr = dirs.pop()
+            if scan_state is not None:
+                scan_state["last_path"] = str(curr)
+
+            try:
+                curr_real = os.path.realpath(str(curr))
+                if curr_real in visited:
+                    continue
+                visited.add(curr_real)
+            except OSError as err:
+                if scan_state is not None and getattr(err, "errno", None) != errno.ENOENT and not isinstance(err, FileNotFoundError):
+                    scan_state["errors"].append({"path": str(curr), "error": str(err), "errno": getattr(err, "errno", None)})
+                pass
+
+            try:
+                with os.scandir(curr) as it:
+                    for entry in it:
+                        if self.stopping:
+                            break
+                        if deadline is not None and time.monotonic() >= deadline:
+                            logger.warning("Directory scan timed out for %s (deadline reached)", root_p)
+                            if scan_state is not None:
+                                scan_state["status"] = "timed_out"
+                                scan_state["timed_out"] = True
+                                scan_state["detail"] = f"Directory scan timed out for {root_p} (deadline reached)"
+                            break
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                dirs.append(Path(entry.path))
+                            elif entry.is_file(follow_symlinks=True):
+                                yield Path(entry.path)
+                        except OSError as err:
+                            if is_network_disconnect_error(err, entry.path):
+                                logger.warning("Network disconnect scanning entry %s: %s", entry.path, err)
+                                if scan_state is not None:
+                                    scan_state["status"] = "disconnected"
+                                    scan_state["disconnected"] = True
+                                    scan_state["detail"] = f"Network disconnect scanning entry {entry.path}: {err}"
+                                return
+                            if scan_state is not None and getattr(err, "errno", None) != errno.ENOENT and not isinstance(err, FileNotFoundError):
+                                scan_state["errors"].append({"path": str(entry.path), "error": str(err), "errno": getattr(err, "errno", None)})
+                            logger.warning("Error reading entry %s: %s", entry.path, err)
+                            continue
+            except OSError as err:
+                if is_network_disconnect_error(err, curr):
+                    logger.warning("Network disconnect scanning directory %s: %s", curr, err)
+                    if scan_state is not None:
+                        scan_state["status"] = "disconnected"
+                        scan_state["disconnected"] = True
+                        scan_state["detail"] = f"Network disconnect scanning directory {curr}: {err}"
+                    return
+                if scan_state is not None and getattr(err, "errno", None) != errno.ENOENT and not isinstance(err, FileNotFoundError):
+                    scan_state["errors"].append({"path": str(curr), "error": str(err), "errno": getattr(err, "errno", None)})
+                logger.warning("Error scanning directory %s: %s", curr, err)
+                continue
+
+        if scan_state is not None and scan_state["status"] == "complete" and scan_state.get("errors"):
+            scan_state["status"] = "completed_with_errors"
+
     def _current_incoming_paths(self):
         if not self.incoming_folders:
             return set()
@@ -1788,7 +1990,7 @@ class CompletedDownloadWorker(threading.Thread):
             try:
                 if not folder.is_dir():
                     continue
-                for path in folder.rglob("*"):
+                for path in self._iter_directory_bounded(folder):
                     try:
                         if not path.is_file():
                             continue
@@ -1925,10 +2127,20 @@ class CompletedDownloadWorker(threading.Thread):
 
     def _run_folder_scan(self, key, folder, initial_cutoff=None, initial_tree=None, result=None, prev_thread=None):
         if prev_thread is not None:
+            join_timeout = getattr(self, "worker_join_timeout", 2.0)
             try:
-                prev_thread.join()
+                prev_thread.join(timeout=join_timeout)
             except Exception:
                 pass
+            if prev_thread.is_alive():
+                logger.warning(
+                    "Previous scan worker %s for %s is still alive after %.1fs timeout; aborting continuation to avoid overlapping workers",
+                    prev_thread.name, folder, join_timeout
+                )
+                with self._scan_lock:
+                    if self._active_scans.get(key) is threading.current_thread():
+                        self._active_scans[key] = prev_thread
+                return
 
         pass_count = 0
         max_passes = getattr(self, "_max_consecutive_passes", 5)
@@ -1986,35 +2198,55 @@ class CompletedDownloadWorker(threading.Thread):
                         logger.debug("Error during initial scan for %s: %s", folder, exc)
         finally:
             with self._scan_lock:
-                if key in self._pending_scans and not self.stopping:
-                    curr_thread = threading.current_thread()
-                    next_thread = threading.Thread(
-                        target=self._run_folder_scan,
-                        args=(key, folder),
-                        kwargs={"prev_thread": curr_thread},
-                        name=f"incoming-continuation-{Path(folder).name or 'folder'}",
-                        daemon=True,
-                    )
-                    self._active_scans[key] = next_thread
-                    self._all_scan_threads.add(next_thread)
-                    next_thread.start()
-                else:
-                    if self._active_scans.get(key) is threading.current_thread():
+                if self._active_scans.get(key) is threading.current_thread():
+                    if key in self._pending_scans and not self.stopping:
+                        curr_thread = threading.current_thread()
+                        next_thread = threading.Thread(
+                            target=self._run_folder_scan,
+                            args=(key, folder),
+                            kwargs={"prev_thread": curr_thread},
+                            name=f"incoming-continuation-{Path(folder).name or 'folder'}",
+                            daemon=True,
+                        )
+                        self._active_scans[key] = next_thread
+                        self._all_scan_threads.add(next_thread)
+                        next_thread.start()
+                    else:
                         self._active_scans.pop(key, None)
 
     def _scan_incoming_folder(self, folder, cutoff):
         folder_path = Path(folder)
+        scan_state = {}
         try:
             try:
                 if not folder_path.is_dir():
+                    logger.warning("Incoming folder %s is unavailable or not a directory", folder_path)
+                    try:
+                        record_activity(
+                            self.database_path, "incoming", "incoming folder scan", "failed",
+                            severity="warning",
+                            old_path=str(folder_path),
+                            detail=f"Incoming folder is unavailable or not a directory: {folder_path}"
+                        )
+                    except Exception:
+                        pass
                     return
             except OSError as err:
-                logger.debug("Cannot access incoming folder %s: %s", folder_path, err)
+                logger.warning("Cannot access incoming folder %s: %s", folder_path, err)
+                try:
+                    record_activity(
+                        self.database_path, "incoming", "incoming folder scan", "failed",
+                        severity="warning",
+                        old_path=str(folder_path),
+                        detail=f"Cannot access incoming folder {folder_path}: {err}"
+                    )
+                except Exception:
+                    pass
                 return
 
             valid = self._scannable_extensions()
             try:
-                for path in folder_path.rglob("*"):
+                for path in self._iter_directory_bounded(folder_path, scan_state=scan_state):
                     if self.stopping:
                         break
                     try:
@@ -2032,16 +2264,73 @@ class CompletedDownloadWorker(threading.Thread):
                         try:
                             if path.stat().st_mtime >= cutoff:
                                 self.submit(resolved)
-                        except OSError:
+                        except OSError as stat_err:
+                            if getattr(stat_err, "errno", None) != errno.ENOENT and not isinstance(stat_err, FileNotFoundError):
+                                scan_state.setdefault("errors", []).append({
+                                    "path": str(path), "error": str(stat_err), "errno": getattr(stat_err, "errno", None)
+                                })
                             continue
                     except OSError as err:
                         if is_network_disconnect_error(err, path):
                             break
                         continue
+                if scan_state.get("status") in ("timed_out", "disconnected", "completed_with_errors"):
+                    outcome_status = scan_state["status"]
+                    detail_msg = scan_state.get("detail")
+                    if not detail_msg:
+                        err_count = len(scan_state.get("errors", []))
+                        detail_msg = f"Incoming folder scan completed with {err_count} directory/file error(s) under {folder_path}"
+                    try:
+                        record_activity(
+                            self.database_path, "incoming", "incoming folder scan", outcome_status,
+                            severity="warning",
+                            old_path=str(folder_path),
+                            detail=detail_msg,
+                            metadata={"errors": scan_state.get("errors", [])[:10], "last_path": scan_state.get("last_path")}
+                        )
+                    except Exception:
+                        pass
+                    if hasattr(self, "_active_folder_errors"):
+                        self._active_folder_errors.add(str(folder_path))
+                elif (
+                    str(folder_path) in getattr(self, "_active_folder_errors", set())
+                    or self._has_unresolved_scan_warning("incoming", "incoming folder scan", str(folder_path))
+                ):
+                    try:
+                        record_activity(
+                            self.database_path, "incoming", "incoming folder scan", "complete",
+                            severity="info",
+                            old_path=str(folder_path),
+                            detail=f"Incoming folder scan completed successfully for {folder_path}"
+                        )
+                    except Exception:
+                        pass
+                    if hasattr(self, "_active_folder_errors"):
+                        self._active_folder_errors.discard(str(folder_path))
             except OSError as exc:
-                logger.debug("Failed scanning incoming folder %s: %s", folder_path, exc)
+                logger.warning("Failed scanning incoming folder %s: %s", folder_path, exc)
+                try:
+                    record_activity(
+                        self.database_path, "incoming", "incoming folder scan", "failed",
+                        severity="warning",
+                        old_path=str(folder_path),
+                        detail=f"Failed scanning incoming folder {folder_path}: {exc}"
+                    )
+                except Exception:
+                    pass
+                if hasattr(self, "_active_folder_errors"):
+                    self._active_folder_errors.add(str(folder_path))
         except Exception as exc:
-            logger.debug("Unexpected error scanning incoming folder %s: %s", folder_path, exc)
+            logger.warning("Unexpected error scanning incoming folder %s: %s", folder_path, exc)
+            try:
+                record_activity(
+                    self.database_path, "incoming", "incoming folder scan", "failed",
+                    severity="warning",
+                    old_path=str(folder_path),
+                    detail=f"Unexpected error scanning incoming folder {folder_path}: {exc}"
+                )
+            except Exception:
+                pass
 
     def _wait_scans(self, threads, max_wait=0.05):
         deadline = time.monotonic() + max_wait
@@ -2084,6 +2373,14 @@ class CompletedDownloadWorker(threading.Thread):
             unchanged = row["size"] == stat.st_size and row["modified_ns"] == stat.st_mtime_ns
             is_temporary = is_temporary_download(path)
             is_companion = (not is_temporary) and (Path(path).suffix.lower() in COMPANION_EXTENSIONS)
+            first_seen_time = self.started_at
+            if row["first_seen_at"]:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(str(row["first_seen_at"]).replace("Z", "+00:00"))
+                    first_seen_time = dt.timestamp()
+                except Exception:
+                    first_seen_time = self.started_at
             with self.lock:
                 self.candidates[path] = {
                     "size": stat.st_size,
@@ -2095,6 +2392,7 @@ class CompletedDownloadWorker(threading.Thread):
                     "last_saved_status": row["status"],
                     "last_saved_detail": row["detail"],
                     "first_seen_at": row["first_seen_at"],
+                    "first_seen_time": first_seen_time,
                     "check_after": 0.0,
                 }
 
@@ -2166,6 +2464,7 @@ class CompletedDownloadWorker(threading.Thread):
             current = self.candidates.get(normalized)
         stable_since = time.time()
         first_seen = current.get("first_seen_at") if current else utc_now()
+        first_seen_time = current.get("first_seen_time") if current else time.time()
         if current and current["size"] == stat.st_size and current["modified_ns"] == stat.st_mtime_ns:
             stable_since = current["stable_since"]
         is_temporary = is_temporary_download(normalized)
@@ -2189,6 +2488,7 @@ class CompletedDownloadWorker(threading.Thread):
             "last_saved_status": status,
             "last_saved_detail": detail,
             "first_seen_at": first_seen,
+            "first_seen_time": first_seen_time,
             "check_after": 0.0,
         }
         with self.lock:
@@ -2223,9 +2523,12 @@ class CompletedDownloadWorker(threading.Thread):
         result = [0]
         with self._scan_lock:
             existing = self._active_scans.get(key)
-            if existing is not None and existing.is_alive():
-                self._enqueue_pending_scan(key, owning_folder, tree=root)
-                return 0
+            if existing is not None:
+                if existing.is_alive():
+                    self._enqueue_pending_scan(key, owning_folder, tree=root)
+                    return 0
+                else:
+                    self._active_scans.pop(key, None)
             thread = threading.Thread(
                 target=self._run_folder_scan,
                 args=(key, owning_folder),
@@ -2242,15 +2545,40 @@ class CompletedDownloadWorker(threading.Thread):
 
     def _scan_tree_worker(self, root, key=None, result=None):
         try:
+            root_p = Path(root)
             try:
-                if not root.is_dir():
-                    return 0
+                if not root_p.is_dir():
+                    logger.warning("submit_tree: %s is not a directory", root_p)
+                    try:
+                        record_activity(
+                            self.database_path, "incoming", "scan subtree", "failed",
+                            severity="warning",
+                            old_path=str(root_p),
+                            detail=f"Subtree target is unavailable or not a directory: {root_p}"
+                        )
+                    except Exception:
+                        pass
+                    if result is not None:
+                        result[0] = -1
+                    return -1
             except OSError as err:
-                logger.debug("submit_tree cannot access %s: %s", root, err)
-                return 0
+                logger.warning("submit_tree cannot access %s: %s", root_p, err)
+                try:
+                    record_activity(
+                        self.database_path, "incoming", "scan subtree", "failed",
+                        severity="warning",
+                        old_path=str(root_p),
+                        detail=f"submit_tree cannot access {root_p}: {err}"
+                    )
+                except Exception:
+                    pass
+                if result is not None:
+                    result[0] = -1
+                return -1
 
             count = 0
-            for child in root.rglob("*"):
+            scan_state = {}
+            for child in self._iter_directory_bounded(root_p, scan_state=scan_state):
                 if self.stopping:
                     break
                 try:
@@ -2260,12 +2588,54 @@ class CompletedDownloadWorker(threading.Thread):
                     if is_network_disconnect_error(err, child):
                         break
                     continue
+            if scan_state.get("status") in ("timed_out", "disconnected", "completed_with_errors"):
+                outcome = scan_state["status"]
+                try:
+                    record_activity(
+                        self.database_path, "incoming", "scan subtree", outcome,
+                        severity="warning",
+                        old_path=str(root_p),
+                        detail=scan_state.get("detail") or f"Subtree scan encountered issues: {len(scan_state.get('errors', []))} error(s)",
+                        metadata={"errors": scan_state.get("errors", [])[:10], "last_path": scan_state.get("last_path")}
+                    )
+                except Exception:
+                    pass
+                if hasattr(self, "_active_tree_errors"):
+                    self._active_tree_errors.add(str(root_p))
+            elif (
+                str(root_p) in getattr(self, "_active_tree_errors", set())
+                or self._has_unresolved_scan_warning("incoming", "scan subtree", str(root_p))
+            ):
+                try:
+                    record_activity(
+                        self.database_path, "incoming", "scan subtree", "complete",
+                        severity="info",
+                        old_path=str(root_p),
+                        detail=f"Subtree scan completed successfully for {root_p}"
+                    )
+                except Exception:
+                    pass
+                if hasattr(self, "_active_tree_errors"):
+                    self._active_tree_errors.discard(str(root_p))
             if result is not None:
                 result[0] = count
             return count
         except OSError as exc:
-            logger.debug("submit_tree scan failed on %s: %s", root, exc)
-            return 0
+            logger.warning("submit_tree scan failed on %s: %s", root, exc)
+            try:
+                record_activity(
+                    self.database_path, "incoming", "scan subtree", "failed",
+                    severity="warning",
+                    old_path=str(root),
+                    detail=f"submit_tree scan failed on {root}: {exc}"
+                )
+            except Exception:
+                pass
+            if hasattr(self, "_active_tree_errors"):
+                self._active_tree_errors.add(str(root))
+            if result is not None:
+                result[0] = -1
+            return -1
 
     def _resolve_relocation(self, path):
         with self.lock:
@@ -2707,13 +3077,34 @@ class CompletedDownloadWorker(threading.Thread):
 
     def _save_companion_waiting(self, path, candidate, detail):
         with self.lock:
+            attempts = candidate.get("attempts", 0) + 1
+            candidate["attempts"] = attempts
+            first_seen = candidate.get("first_seen_time", time.time())
+            age_seconds = time.time() - first_seen
+
+            is_waiting_for_specific_video = "finish downloading" in detail
+            has_exceeded_attempts = (attempts >= getattr(self, "max_companion_attempts", 24))
+            has_aged_out = (age_seconds >= getattr(self, "max_companion_age_seconds", 86400.0))
+
+            if (has_exceeded_attempts or has_aged_out) and not is_waiting_for_specific_video:
+                detail_reason = f"Max attempts ({getattr(self, 'max_companion_attempts', 24)}) reached" if has_exceeded_attempts else f"Max age ({getattr(self, 'max_companion_age_seconds', 86400.0):.0f}s) exceeded"
+                self._save_unmatched_companion(
+                    path,
+                    candidate,
+                    f"Unmatched companion aged out: {detail_reason}",
+                    activity_action="unmatched companion aged out",
+                    activity_detail=f"Companion retired after {attempts} attempts ({age_seconds:.0f}s elapsed) without matching video"
+                )
+                return
+
             needs_save = (
                 candidate.get("last_saved_status") != "waiting"
                 or candidate.get("last_saved_detail") != detail
+                or (attempts % 5 == 0)
             )
         if needs_save:
             try:
-                self._save_state(path, "waiting", detail=detail)
+                self._save_state(path, "waiting", detail=detail, attempts=attempts)
                 with self.lock:
                     candidate["last_saved_status"] = "waiting"
                     candidate["last_saved_detail"] = detail
@@ -3857,15 +4248,19 @@ def main():
             except Exception as act_err:
                 logger.debug("Failed recording startup scan activity: %s", act_err)
 
+        successful_roots = []
+        failed_roots = []
         for idx, r in enumerate(target_roots, 1):
             with watched_roots_lock:
                 already = r in watched_roots
             if already:
+                successful_roots.append(r)
                 continue
             try:
                 watch = observer.schedule(handler, r, recursive=True)
                 with watched_roots_lock:
                     watched_roots[r] = watch
+                successful_roots.append(r)
                 logger.info("Watcher attached [%d/%d]: %s", idx, total, r)
                 try:
                     record_activity(
@@ -3877,6 +4272,7 @@ def main():
                 except Exception as act_err:
                     logger.debug("Failed recording root watched activity: %s", act_err)
             except OSError as exc:
+                failed_roots.append(r)
                 if getattr(exc, "errno", None) == 28:
                     logger.error(
                         "Linux inotify watch limit exceeded while watching %s: %s. "
@@ -3904,18 +4300,33 @@ def main():
                     except Exception:
                         pass
             except Exception as exc:
+                failed_roots.append(r)
                 logger.warning("Failed scheduling observer on %s: %s", r, exc)
 
         if is_startup and total > 0:
-            logger.info("All %d library root(s) are active and monitored.", total)
-            try:
-                record_activity(
-                    database_path, "monitor", "library roots ready", "running",
-                    severity="info",
-                    detail=f"All {total} library root(s) are active and monitored."
+            if failed_roots:
+                logger.warning(
+                    "%d of %d library root(s) failed to attach watchers: %s",
+                    len(failed_roots), total, failed_roots
                 )
-            except Exception as act_err:
-                logger.debug("Failed recording roots ready activity: %s", act_err)
+                try:
+                    record_activity(
+                        database_path, "monitor", "library roots ready", "completed_with_errors",
+                        severity="warning",
+                        detail=f"{len(successful_roots)} of {total} library root(s) monitored. {len(failed_roots)} root(s) failed to attach: {', '.join(Path(r).name or r for r in failed_roots)}"
+                    )
+                except Exception as act_err:
+                    logger.debug("Failed recording roots ready warning activity: %s", act_err)
+            else:
+                logger.info("All %d library root(s) are active and monitored.", total)
+                try:
+                    record_activity(
+                        database_path, "monitor", "library roots ready", "running",
+                        severity="info",
+                        detail=f"All {total} library root(s) are active and monitored."
+                    )
+                except Exception as act_err:
+                    logger.debug("Failed recording roots ready activity: %s", act_err)
 
     record_monitor_lifecycle(
         database_path, "MONITOR STARTED", "running",

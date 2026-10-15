@@ -247,20 +247,32 @@ def test_concurrent_migrations_from_separate_processes(tmp_path: Path):
 
 
 def test_migration_failure_rollback_and_recovery(tmp_path: Path, monkeypatch):
-    """Verifies transactional rollback if an unhandled failure occurs during migration."""
+    """Verifies transactional rollback if an unhandled failure occurs mid-migration after some DDL succeeds."""
     db_path = tmp_path / "failure_recovery.sqlite3"
     con = create_connection(db_path)
     try:
         assert get_schema_version(con) == 0
 
-        # Simulate a migration error by injecting invalid SQL into SCHEMA
+        # Simulate a migration error by injecting invalid SQL mid-migration after DDL changes succeed
         import librarymanager.database.migrations as mig_mod
 
-        monkeypatch.setattr(mig_mod, "SCHEMA", "THIS IS INVALID SQL STATEMENT;")
+        partial_schema = (
+            "CREATE TABLE test_rollback_table_1 (id INT);\n"
+            "CREATE TABLE test_rollback_table_2 (id INT);\n"
+            "THIS IS AN INVALID SQL SYNTAX ERROR;"
+        )
+        monkeypatch.setattr(mig_mod, "SCHEMA", partial_schema)
 
         _schema_applied.discard(str(db_path.resolve()))
         with pytest.raises(sqlite3.OperationalError, match="syntax error"):
             ensure_schema(con, db_path)
+
+        # Crucial assertion: the tables created before the error MUST BE ROLLED BACK
+        # Neither test_rollback_table_1 nor test_rollback_table_2 must exist in the database!
+        tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        assert "test_rollback_table_1" not in tables, "Table 1 must be rolled back on mid-migration error"
+        assert "test_rollback_table_2" not in tables, "Table 2 must be rolled back on mid-migration error"
+        assert len(tables) == 0, f"Expected 0 tables after rollback, found {tables}"
 
         # user_version must remain 0 after rollback, not corrupted to 3
         assert get_schema_version(con) == 0
@@ -272,7 +284,43 @@ def test_migration_failure_rollback_and_recovery(tmp_path: Path, monkeypatch):
         version = ensure_schema(con, db_path)
         assert version == CURRENT_SCHEMA_VERSION
         assert get_schema_version(con) == CURRENT_SCHEMA_VERSION
+
+        # Verify all actual schema tables now exist
+        final_tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        assert "files" in final_tables
+        assert "grouped_reconciliation_batches" in final_tables
     finally:
+        con.close()
+
+
+def test_lock_timeout_does_not_falsely_cache_legacy_database(tmp_path: Path):
+    """Verifies that a lock timeout on a legacy database with tables does NOT falsely cache the schema as applied."""
+    db_path = tmp_path / "legacy_locked.sqlite3"
+    setup_con = sqlite3.connect(db_path)
+    # Create a table so is_database_initialized() is True, but user_version is 1 (below CURRENT_SCHEMA_VERSION 3)
+    setup_con.execute("CREATE TABLE files (file_id TEXT PRIMARY KEY)")
+    setup_con.execute("PRAGMA user_version = 1")
+    setup_con.commit()
+    setup_con.close()
+
+    # Open con first with a short timeout so pragmas succeed before locking
+    con = create_connection(db_path, timeout=0.1, busy_timeout_ms=100)
+    assert get_schema_version(con) == 1
+    _schema_applied.discard(str(db_path.resolve()))
+
+    # Lock the database exclusively with blocker_con
+    blocker_con = sqlite3.connect(db_path, timeout=0.1)
+    blocker_con.execute("BEGIN EXCLUSIVE")
+
+    try:
+        # ensure_schema tries BEGIN IMMEDIATE which will time out in 100ms
+        with pytest.raises(sqlite3.OperationalError, match="locked|busy"):
+            ensure_schema(con, db_path)
+
+        assert str(db_path.resolve()) not in _schema_applied
+    finally:
+        blocker_con.rollback()
+        blocker_con.close()
         con.close()
 
 

@@ -9,6 +9,7 @@ This module is responsible for:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -331,13 +332,39 @@ def add_all_unindexed_media_files(database_path: Path, stash: Any, config: dict 
         items = [i for i in items if any(_is_subpath_of(i["path"], r) for r in roots)]
     paths = [i["path"] for i in items if os.path.isfile(i["path"])]
     if not paths:
-        return {"status": "ok", "count": 0, "message": "No unindexed media to add."}
+        return {"status": "ok", "count": 0, "failed_count": 0, "failed": [], "message": "No unindexed media to add."}
     added_count = 0
+    failed_items = []
     for p in paths:
         res = add_unindexed_media_file(database_path, stash, p, config=config)
         if res.get("status") == "ok":
             added_count += 1
-    return {"status": "ok", "count": added_count, "message": f"Successfully added {added_count} video(s) to Stash with previews & contact sheets!"}
+        else:
+            failed_items.append({"path": p, "error": res.get("message", "Ingestion failed")})
+
+    if failed_items:
+        record_activity_fn = _get_record_activity_fn()
+        if record_activity_fn:
+            record_activity_fn(
+                database_path, "incoming", "add external video batch", "completed_with_errors",
+                severity="warning",
+                detail=f"Batch ingestion completed with errors: {added_count} succeeded, {len(failed_items)} failed.",
+                metadata={"failed": failed_items[:10]}
+            )
+        return {
+            "status": "completed_with_errors",
+            "count": added_count,
+            "failed_count": len(failed_items),
+            "failed": failed_items,
+            "message": f"Added {added_count} of {len(paths)} video(s) to Stash. {len(failed_items)} video(s) failed ingestion.",
+        }
+    return {
+        "status": "ok",
+        "count": added_count,
+        "failed_count": 0,
+        "failed": [],
+        "message": f"Successfully added {added_count} video(s) to Stash with previews & contact sheets!"
+    }
 
 
 def ignore_unindexed_media_file(database_path: Path, path: str) -> dict:

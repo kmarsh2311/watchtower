@@ -43,8 +43,7 @@ from librarymanager_core import (
 from librarymanager_core import dashboard_data, incoming_summary, annotate_pending_events_processing_state, record_activity, record_monitor_lifecycle, recent_activity, cancel_pending_rename, make_pending_rename_due, snapshot_incoming_baseline, evaluate_filing_proposal, apply_filing_proposal, ignore_filing_proposal, get_pending_filing_proposals, recover_filing_proposal, invalidate_stale_filing_proposals, get_configured_filing_destination_roots, get_filing_folder_mappings, save_filing_folder_mapping, delete_filing_folder_mapping, invalidate_destination_dir_cache, refresh_destination_dir_cache, process_incoming_file_now, retry_filing_proposal, get_backlog_items, evaluate_backlog_batch, acknowledge_backlog_missing, prune_resolved_filing_baseline, invalidate_incoming_discovery_cache, enqueue_filing_transfer, claim_next_filing_transfer, finish_filing_transfer, fail_filing_transfer, set_filing_transfer_job_id, recover_abandoned_processing_queue, recover_stale_active_transfers, get_active_filing_transfers
 
 
-from librarymanager_reconciliation import (dismiss_review_batch, execute_grouped_move_reconciliation,
-                                           list_review_batches)
+
 
 from librarymanager.integrations.stash_graphql import (
     QUERY,
@@ -1338,10 +1337,8 @@ def main():
         arguments = plugin_input.get("args") or {}
         all_roots = fetch_library_roots(stash)
         requested_roots = arguments.get("roots")
-        if isinstance(requested_roots, list) and len(requested_roots) > 0:
-            roots = [r for r in requested_roots if r in all_roots or os.path.exists(r)]
-        elif isinstance(requested_roots, list) and len(requested_roots) == 0:
-            roots = []
+        if isinstance(requested_roots, list):
+            roots = [str(r) for r in requested_roots if str(r).strip()]
         else:
             roots = list(all_roots)
         result = reconcile_missing_media_across_roots(database_path, stash, roots, config=config)
@@ -1599,6 +1596,7 @@ def main():
         # the same authoritative filing state in this response.
         filing_proposals = get_pending_filing_proposals(database_path, stash=stash)
         incoming = incoming_summary(database_path, config=config)
+        from librarymanager_reconciliation import list_review_batches
         result = {
             "monitor": monitor_summary,
             "incoming": incoming,
@@ -1704,6 +1702,7 @@ def main():
         batch_id = arguments.get("batch_id")
         if batch_id in (None, ""):
             raise ValueError("Grouped reconciliation batch ID is required")
+        from librarymanager_reconciliation import execute_grouped_move_reconciliation
         stash = StashInterface(plugin_input["server_connection"])
         result = execute_grouped_move_reconciliation(
             database_path, int(batch_id), stash, owner=f"plugin-{os.getpid()}-{uuid.uuid4().hex}",
@@ -1720,6 +1719,7 @@ def main():
         batch_id = arguments.get("batch_id")
         if batch_id in (None, ""):
             raise ValueError("Grouped reconciliation batch ID is required")
+        from librarymanager_reconciliation import dismiss_review_batch
         result = dismiss_review_batch(database_path, int(batch_id))
         audit(database_path, "filesystem", "grouped reconciliation", "dismissed",
               old_path=result.get("source_prefix"), new_path=result.get("destination_prefix"),

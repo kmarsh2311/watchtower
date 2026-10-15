@@ -59,6 +59,43 @@ def set_schema_version(connection: sqlite3.Connection, version: int) -> None:
     connection.execute(f"PRAGMA user_version = {int(version)}")
 
 
+def _split_sql_script(script: str) -> list[str]:
+    """Split a multi-statement SQL script into individual executable statements using sqlite3 parsing."""
+    statements: list[str] = []
+    statement: list[str] = []
+    for line in script.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("--"):
+            continue
+        statement.append(line)
+        joined = "\n".join(statement)
+        if sqlite3.complete_statement(joined):
+            stmt = joined.strip()
+            if stmt.endswith(";"):
+                stmt = stmt[:-1].strip()
+            if stmt:
+                statements.append(stmt)
+            statement = []
+    rem = "\n".join(statement).strip()
+    if rem:
+        if rem.endswith(";"):
+            rem = rem[:-1].strip()
+        if rem:
+            statements.append(rem)
+    return statements
+
+
+def _execute_script_transactionally(connection: sqlite3.Connection, script: str) -> None:
+    """Execute a multi-statement SQL script statement-by-statement inside the active transaction.
+
+    Unlike connection.executescript() which issues an implicit COMMIT before executing,
+    this helper preserves the surrounding BEGIN IMMEDIATE transaction, ensuring full
+    atomic rollback on failure.
+    """
+    for stmt in _split_sql_script(script):
+        connection.execute(stmt)
+
+
 def is_database_initialized(connection: sqlite3.Connection) -> bool:
     """Checks whether any user tables exist in the database."""
     try:
@@ -140,7 +177,7 @@ def _apply_legacy_migrations(connection: sqlite3.Connection) -> None:
                 "ALTER TABLE file_checksum_cache ADD COLUMN inode INTEGER")
 
     # 2. Ensure all schema tables exist (creates any newly added tables like grouped_reconciliation)
-    connection.executescript(SCHEMA)
+    _execute_script_transactionally(connection, SCHEMA)
 
     # 3. Clean up legacy rename_protected state
     try:
@@ -217,7 +254,7 @@ def ensure_schema(connection: sqlite3.Connection, database_path: Union[Path, str
             if version == 0:
                 if not is_database_initialized(connection):
                     # Fresh database: create all tables at current schema
-                    connection.executescript(SCHEMA)
+                    _execute_script_transactionally(connection, SCHEMA)
                 else:
                     # Legacy un-versioned database: bring up to date
                     _apply_legacy_migrations(connection)
@@ -241,7 +278,7 @@ def ensure_schema(connection: sqlite3.Connection, database_path: Union[Path, str
             if "locked" in err_msg or "busy" in err_msg:
                 try:
                     v = get_schema_version(connection)
-                    if v >= CURRENT_SCHEMA_VERSION or is_database_initialized(connection):
+                    if v >= CURRENT_SCHEMA_VERSION:
                         _schema_applied.add(key)
                         return v
                 except Exception:

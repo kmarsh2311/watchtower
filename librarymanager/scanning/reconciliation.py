@@ -9,6 +9,7 @@ This module is responsible for:
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -401,10 +402,23 @@ def reconcile_missing_files(database_path: Path) -> Tuple[Dict[str, Any], List[D
                 summary["unmatched"] += 1
             else:
                 size_matches = []
+                read_error = None
                 try:
                     entries = list(folder.iterdir())
-                except OSError:
+                except OSError as iter_err:
+                    if getattr(iter_err, "errno", None) != errno.ENOENT and not isinstance(iter_err, FileNotFoundError):
+                        read_error = iter_err
                     entries = []
+                if read_error is not None:
+                    summary["read_errors"] = summary.get("read_errors", 0) + 1
+                    result.update(confidence="error", reason=f"Failed to read original folder: {read_error}")
+                    candidates_to_insert.append((
+                        run_id, result["file_id"], result["scene_id"], result["expected_path"],
+                        result["candidate_path"], result["confidence"], result["reason"],
+                        result["expected_size"], result["candidate_size"], result["oshash_match"], now
+                    ))
+                    report.append(result)
+                    continue
                 for candidate in entries:
                     try:
                         normalized = os.path.normcase(os.path.abspath(candidate))
@@ -485,11 +499,12 @@ def reconcile_missing_files(database_path: Path) -> Tuple[Dict[str, Any], List[D
                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 candidates_to_insert,
             )
+        run_status = "completed_with_errors" if summary.get("read_errors", 0) > 0 else "complete"
         conn_finish.execute(
             """UPDATE reconciliation_runs SET completed_at=?,missing_count=?,matched_count=?,ambiguous_count=?,
-                   unmatched_count=?,skipped_folder_count=?,status='complete' WHERE id=?""",
+                   unmatched_count=?,skipped_folder_count=?,status=? WHERE id=?""",
             (now, summary["missing"], summary["matched"], summary["ambiguous"], summary["unmatched"],
-             summary["skipped_folders"], run_id),
+             summary["skipped_folders"], run_status, run_id),
         )
         conn_finish.commit()
         summary["run_id"] = run_id
@@ -545,9 +560,24 @@ def reconcile_missing_media_across_roots(
     elif config is None:
         config = {}
 
+    unavailable_roots = []
     if roots is not None:
-        accessible_roots = [str(r) for r in roots if os.path.isdir(str(r))]
+        accessible_roots = []
+        for r in roots:
+            r_str = str(r)
+            if os.path.isdir(r_str):
+                accessible_roots.append(r_str)
+            else:
+                unavailable_roots.append(r_str)
         if not accessible_roots:
+            msg = "Selected library drive(s) are currently offline or unavailable." if roots else "No library roots selected."
+            if unavailable_roots:
+                record_activity(
+                    database_path, "reconciliation", "reconcile missing media", "failed",
+                    severity="warning",
+                    detail=f"Selected library drive(s) are currently offline or unavailable: {', '.join(unavailable_roots)}",
+                    metadata={"unavailable_roots": unavailable_roots}
+                )
             return {
                 "status": "warning",
                 "missing_checked": 0,
@@ -556,7 +586,10 @@ def reconcile_missing_media_across_roots(
                 "unmatched": [],
                 "unindexed_found_count": 0,
                 "auto_ingested_count": 0,
-                "message": "Selected library drive(s) are currently offline or unavailable." if roots else "No library roots selected.",
+                "unavailable_roots": unavailable_roots,
+                "errors": [{"path": r, "error": "Drive offline or unavailable", "errno": None} for r in unavailable_roots],
+                "error_count": len(unavailable_roots),
+                "message": msg,
             }
     else:
         cold_storage_roots = set(parse_cold_storage_roots(config.get("coldStorageRoots")))
@@ -696,8 +729,18 @@ def reconcile_missing_media_across_roots(
     candidates_found = []
     unindexed_found = []
     visited_dirs = set()
+    walk_errors = []
+
+    def _on_walk_error(err: OSError):
+        walk_errors.append({
+            "path": getattr(err, "filename", str(err)),
+            "error": str(err),
+            "errno": getattr(err, "errno", None),
+        })
+        logger.warning("Directory traversal error during reconciliation on %s: %s", getattr(err, "filename", "path"), err)
+
     for root in accessible_roots:
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_on_walk_error):
             dirnames[:] = [
                 d for d in dirnames
                 if not d.startswith(".")
@@ -722,7 +765,14 @@ def reconcile_missing_media_across_roots(
                         try:
                             st = os.stat(cand_path)
                             cand_size = st.st_size
-                        except OSError:
+                        except OSError as stat_err:
+                            if getattr(stat_err, "errno", None) != errno.ENOENT and not isinstance(stat_err, FileNotFoundError):
+                                walk_errors.append({
+                                    "path": cand_path,
+                                    "error": str(stat_err),
+                                    "errno": getattr(stat_err, "errno", None),
+                                })
+                                logger.warning("Failed to stat candidate %s: %s", cand_path, stat_err)
                             continue
 
                         expected_size = item.get("size")
@@ -758,7 +808,14 @@ def reconcile_missing_media_across_roots(
                                 st = os.stat(cand_path)
                                 if st.st_size > 0:
                                     unindexed_found.append((cand_path, fn, st.st_size, now))
-                            except OSError:
+                            except OSError as stat_err:
+                                if getattr(stat_err, "errno", None) != errno.ENOENT and not isinstance(stat_err, FileNotFoundError):
+                                    walk_errors.append({
+                                        "path": cand_path,
+                                        "error": str(stat_err),
+                                        "errno": getattr(stat_err, "errno", None),
+                                    })
+                                    logger.warning("Failed to stat unindexed file %s: %s", cand_path, stat_err)
                                 pass
 
     # Persist newly discovered unindexed media
@@ -858,7 +915,8 @@ def reconcile_missing_media_across_roots(
                         if src_comp.is_file() and not dst_comp.exists():
                             try:
                                 expect_filesystem_move(database_path, str(src_comp), str(dst_comp))
-                                shutil.move(str(src_comp), str(dst_comp))
+                                from librarymanager.services.filing import _move_file
+                                _move_file(src_comp, dst_comp)
                                 moved_companions.append(dst_comp.name)
                                 record_activity(
                                     database_path, "companion", "moved companion", "recorded",
@@ -902,11 +960,28 @@ def reconcile_missing_media_across_roots(
     if reconciled:
         _prune_cached_reports({str(item.get("file_id")) for item in reconciled if item.get("file_id")}, root_dir=root_dir)
 
-    status_str = "complete" if (reconciled or auto_ingested_count) else ("warning" if unmatched else "info")
+    has_errors = bool(unavailable_roots or walk_errors)
+    status_str = "completed_with_errors" if has_errors else "complete"
+    severity_str = "warning" if has_errors else "info"
+
+    error_summary_parts = []
+    if unavailable_roots:
+        error_summary_parts.append(
+            f"{len(unavailable_roots)} drive(s) unavailable ({', '.join(Path(u).name or u for u in unavailable_roots)})"
+        )
+    if walk_errors:
+        error_summary_parts.append(f"{len(walk_errors)} directory/file error(s)")
+    error_summary = f" [Errors: {'; '.join(error_summary_parts)}]" if error_summary_parts else ""
+
     record_activity(
         database_path, "reconciliation", "reconcile missing media", status_str,
-        severity="warning" if unmatched else "info",
-        detail=f"Reconciliation complete: {len(reconciled)} reconnected, {len(unmatched)} unresolved, {auto_ingested_count if auto_ingested_count else len(unindexed_found)} {'automatically ingested into Stash' if auto_ingested_count else 'unindexed media discovered'}"
+        severity=severity_str,
+        detail=f"Reconciliation {status_str.replace('_', ' ')}: {len(reconciled)} reconnected, {len(unmatched)} unresolved, {auto_ingested_count if auto_ingested_count else len(unindexed_found)} {'automatically ingested into Stash' if auto_ingested_count else 'unindexed media discovered'}{error_summary}",
+        metadata={
+            "unavailable_roots": unavailable_roots,
+            "errors": walk_errors[:10],
+            "error_count": len(walk_errors) + len(unavailable_roots),
+        }
     )
 
     msg = ""
@@ -920,15 +995,20 @@ def reconcile_missing_media_across_roots(
         msg += f" Automatically ingested {auto_ingested_count} new video(s) into Stash with full previews & contact sheets."
     elif unindexed_found:
         msg += f" Found {len(unindexed_found)} unindexed new video(s) on disk."
+    if error_summary_parts:
+        msg += f" Note: {'; '.join(error_summary_parts)}."
 
     return {
-        "status": "ok",
+        "status": "completed_with_errors" if has_errors else "ok",
         "missing_checked": len(missing_candidates),
         "reconciled_count": len(reconciled),
         "reconciled": reconciled,
         "unmatched": unmatched,
         "unindexed_found_count": len(unindexed_found),
         "auto_ingested_count": auto_ingested_count,
+        "unavailable_roots": unavailable_roots,
+        "errors": walk_errors[:20],
+        "error_count": len(walk_errors) + len(unavailable_roots),
         "message": msg,
     }
 

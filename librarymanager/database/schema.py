@@ -5,7 +5,67 @@ It is imported by migration and database initialisation services.
 """
 from __future__ import annotations
 
-from librarymanager_reconciliation import RECONCILIATION_SCHEMA
+RECONCILIATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS grouped_reconciliation_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    correlation_key TEXT NOT NULL UNIQUE,
+    operation_type TEXT NOT NULL,
+    source_prefix TEXT,
+    destination_prefix TEXT,
+    state TEXT NOT NULL DEFAULT 'collecting',
+    tracked_count INTEGER NOT NULL DEFAULT 0,
+    verified_count INTEGER NOT NULL DEFAULT 0,
+    uncertain_count INTEGER NOT NULL DEFAULT 0,
+    failed_count INTEGER NOT NULL DEFAULT 0,
+    stash_job_id TEXT,
+    reason TEXT,
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    claimed_by TEXT,
+    claim_expires_at REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_state
+    ON grouped_reconciliation_batches(state, updated_at);
+CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_claim
+    ON grouped_reconciliation_batches(claim_expires_at);
+
+CREATE TABLE IF NOT EXISTS grouped_reconciliation_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES grouped_reconciliation_batches(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL,
+    scene_id TEXT NOT NULL,
+    old_path TEXT NOT NULL,
+    relative_path TEXT,
+    expected_path TEXT,
+    expected_size INTEGER,
+    source_fingerprints_json TEXT NOT NULL DEFAULT '[]',
+    destination_size INTEGER,
+    destination_mtime_ns INTEGER,
+    state TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT,
+    observed_file_id TEXT,
+    observed_scene_id TEXT,
+    observed_path TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(batch_id, file_id, old_path)
+);
+CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_members_batch
+    ON grouped_reconciliation_members(batch_id, state);
+CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_members_file
+    ON grouped_reconciliation_members(file_id, scene_id);
+
+CREATE TABLE IF NOT EXISTS grouped_reconciliation_event_links (
+    batch_id INTEGER NOT NULL REFERENCES grouped_reconciliation_batches(id) ON DELETE CASCADE,
+    event_key TEXT NOT NULL REFERENCES filesystem_events(event_key) ON DELETE CASCADE,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY(batch_id, event_key),
+    UNIQUE(event_key)
+);
+CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_event_batch
+    ON grouped_reconciliation_event_links(batch_id);
+"""
 
 BASE_SCHEMA = """
 PRAGMA journal_mode=WAL;

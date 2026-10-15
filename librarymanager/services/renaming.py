@@ -277,11 +277,12 @@ def apply_scene_filename(
         expect_move_fn = _get_core_fn("expect_filesystem_move", expect_filesystem_move)
         connect_fn = _get_core_fn("connect", _connect)
         record_fn = _get_core_fn("record_activity", None)
+        from librarymanager.services.filing import _move_file
         try:
             for item in preview["associated_files"]:
                 source, target = Path(item["source"]), Path(item["target"])
                 expect_move_fn(database_path, str(source), str(target))
-                source.rename(target)
+                _move_file(source, target)
                 moved_sidecars.append((source, target))
             current = Path(preview["current_path"])
             proposed = Path(preview["proposed_path"])
@@ -362,7 +363,7 @@ def apply_scene_filename(
                 for source, target in reversed(moved_sidecars):
                     if target.exists() and not source.exists():
                         expect_move_fn(database_path, str(target), str(source))
-                        target.rename(source)
+                        _move_file(target, source)
             raise
 
 
@@ -381,11 +382,12 @@ def apply_manual_filename(
         expect_move_fn = _get_core_fn("expect_filesystem_move", expect_filesystem_move)
         connect_fn = _get_core_fn("connect", _connect)
         record_fn = _get_core_fn("record_activity", None)
+        from librarymanager.services.filing import _move_file
         try:
             for item in preview["associated_files"]:
                 source, target = Path(item["source"]), Path(item["target"])
                 expect_move_fn(database_path, str(source), str(target))
-                source.rename(target)
+                _move_file(source, target)
                 moved_sidecars.append((source, target))
             current, proposed = Path(preview["current_path"]), Path(preview["proposed_path"])
             expect_move_fn(database_path, str(current), str(proposed))
@@ -468,7 +470,7 @@ def apply_manual_filename(
                 for source, target in reversed(moved_sidecars):
                     if target.exists() and not source.exists():
                         expect_move_fn(database_path, str(target), str(source))
-                        target.rename(source)
+                        _move_file(target, source)
             raise
 
 

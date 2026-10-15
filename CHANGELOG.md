@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.26 — 2026-10-14
+
+- **Database Integrity & Transactional Migrations**: Separated standard SQLite connection creation from DDL schema migration checks. Standard connections enforce WAL mode and busy timeouts without executing schema scripts. Database migrations now execute DDL statements transactionally (`_execute_script_transactionally`) with atomic rollback on failure, eliminating implicit transaction commits from `executescript()`, and resolving lock-timeout handling to prevent false-success reporting.
+- **Filesystem Move Safety & Verified Companion Rollback**: Implemented safe, no-overwrite file moves (`_move_file` and `_safe_cross_device_move`) across filing, renaming, and reconciliation services. Hard-link atomic moves prevent destination collisions on same-filesystem transfers; cross-filesystem moves stage to isolated hidden files (`.wt_tmp_*`) with exclusive creation (`O_CREAT | O_EXCL`), verify byte counts, and delete sources only after successful transfer. Companion relocation rollback explicitly inspects and verifies source and destination file states on disk, reporting exact discrepancies without claiming unverified restoration.
+- **Network Share Scan Resiliency & Lock Protection**: Replaced unbounded directory recursion (`rglob`) with a cooperative bounded iterator (`_iter_directory_bounded`) enforcing per-scan deadlines and network disconnect handling (`is_network_disconnect_error`). Continuation scan workers detect still-running previous workers and abort to prevent overlapping worker execution while preserving active-scan locks.
+- **Unmatched Companion Aging & Bounded Retries**: Implemented bounded retry attempts (`max_companion_attempts`, default 24) and maximum age limits (`max_companion_age_seconds`, default 24h) for unmatched companions in `_save_companion_waiting`. Retired orphan companions are cleanly transitioned to `'unmatched'`, purged from in-memory candidate tracking to prevent memory leaks and infinite retry loops, and recorded in `activity_log`. Companions actively waiting on an in-progress downloading video are preserved.
+- **Operational Limitations & Notes**:
+  - *OS-level SMB/NFS Blocking*: While traversal timeouts cooperatively bound directory walking between entries, an individual OS-level SMB/NFS system call (`os.scandir` or `stat`) can remain blocked in the kernel driver if a network mount freezes. WatchTower protects concurrency by keeping that root's scan lock held so overlapping workers are never spawned.
+  - *Post-Aging Companion Arrival*: A companion retired after its age or attempt limit is marked `'unmatched'` and removed from active memory. If its matching video arrives days or weeks later, pairing can be triggered via a rescan or "Process Now" on that folder.
+
 ## 1.0.25 — 2026-10-14
 
 - **Packaging Hotfix: Distribution Archive Dependency Bootstrap**: Included `librarymanager_bootstrap.py` in the release archive (`librarymanager.zip`). Resolves `ModuleNotFoundError: No module named 'librarymanager_bootstrap'` and `Live status could not be refreshed: exit status 1` after updating.

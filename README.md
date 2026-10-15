@@ -5,7 +5,7 @@
 # 🗼 Watchtower for Stash
 ### Filesystem monitoring, media ingest and library management for Stash
 
-[![Version](https://img.shields.io/badge/version-1.0.25-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases/tag/v1.0.25)
+[![Version](https://img.shields.io/badge/version-1.0.26-00f0ff?style=for-the-badge)](https://github.com/kmarsh2311/watchtower/releases/tag/v1.0.26)
 [![Stash](https://img.shields.io/badge/Stash-v0.26+-ff0055?style=for-the-badge)](https://github.com/stashapp/stash)
 [![Python](https://img.shields.io/badge/Python-3.10+-39ff64?style=for-the-badge)](https://python.org)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-ffe600?style=for-the-badge)](LICENSE)
@@ -120,15 +120,20 @@ Designate auxiliary, external USB, or sleeping network disks as **Cold Storage**
 
 3. Find **Watchtower**, install it and reload plugins.
 
-### Option 2: Manual installation
+### Option 2: Manual installation & upgrades
 
-1. Download [`librarymanager.zip` from the v1.0.25 release](https://github.com/kmarsh2311/watchtower/releases/download/v1.0.25/librarymanager.zip).
-2. Extract it into the Watchtower plugin directory, for example `~/.stash/plugins/librarymanager/` on macOS/Linux or `C:\Users\<Username>\.stash\plugins\librarymanager\` on Windows.
-3. Reload plugins in Stash.
+1. Download [`librarymanager.zip` from the v1.0.26 release](https://github.com/kmarsh2311/watchtower/releases/download/v1.0.26/librarymanager.zip).
+2. **Fresh Installation:** Extract the archive into your Stash plugins folder as `librarymanager`, for example `~/.stash/plugins/librarymanager/` on macOS/Linux or `C:\Users\<Username>\.stash\plugins\librarymanager\` on Windows.
+3. **Upgrading from an Existing Version:**
+   - Stop the filesystem monitor from Stash settings or the UI navigation popover.
+   - Back up your persistent database (`librarymanager.sqlite3`) and inventory progress (`librarymanager.sqlite3.inventory-progress.json`).
+   - Move or rename the old plugin directory out of `plugins/` rather than extracting over stale files, ensuring obsolete backups and Python bytecode caches from prior versions are cleanly replaced.
+   - Extract `librarymanager.zip` cleanly into `plugins/librarymanager/` and restore your `librarymanager.sqlite3` and `librarymanager.sqlite3.inventory-progress.json` files into the clean directory.
+   - Reload plugins in Stash.
 
 The filesystem-monitoring dependency is bundled with the plugin. Contact-sheet generation uses available supporting tools such as ImageMagick or FFmpeg; see the in-app setup and diagnostics for your environment.
 
-**Upgrading:** Back up the plugin's configuration/database and your Stash database before upgrading, especially if you use Automatic Filing or external-move reconciliation. The v1.0.13 migration removes legacy filing-created filename locks without scheduling a bulk rename; future metadata edits still follow your Automatic Renaming setting.
+> **Important Database Backup & Rollback Caveat:** Always create a consistent backup of `librarymanager.sqlite3` before major upgrades. However, **do not automatically restore a database backup after filing or renaming operations have executed** without first verifying physical media locations and Stash's file catalog. Because WatchTower coordinates moves with Stash, restoring an earlier database snapshot over moved media creates split-brain discrepancies. Always verify or revert physical files first before touching database records.
 
 ---
 
@@ -169,7 +174,11 @@ Watchtower uses read-only inventory and preview operations, checks file identity
 
 These safeguards reduce risk; they are **not a zero-data-loss guarantee**. Back up your Stash database and irreplaceable media, particularly before reorganising a large folder tree. If a NAS disconnects, a file changes during transfer, or a proposed match is ambiguous, inspect the warning and resolve the underlying problem before approving further changes.
 
-Grouped folder recovery is a substantial new feature in v1.0.13. Its automated tests cover complex cases, but real-world results can depend on the operating system, file watcher and network share. Please report issues with enough detail to reproduce them.
+### Specific Operational Limitations
+- **OS-Level SMB/NFS Call Blocking**: Directory scans cooperatively enforce timeouts between entries and subdirectories. However, if an underlying OS kernel SMB or NFS filesystem call (`os.scandir` or `stat`) blocks indefinitely on a frozen network share, the thread remains in that system call. WatchTower protects concurrency by keeping that root's scan lock held so overlapping workers are never spawned.
+- **Companion Aging & Late Video Ingest**: Unmatched companion files (images, NFOs) that arrive without a matching video age out after a bounded retry period (default 24 attempts / 24 hours) and transition to `'unmatched'` status to prevent memory and polling leaks. If their matching video arrives later after aging has occurred, the companion will not pair automatically in background polling, but can be paired by running a folder rescan or triggering "Process Now" on that directory.
+
+Grouped folder recovery is a substantial feature in WatchTower. Its automated tests cover complex cases, but real-world results can depend on the operating system, file watcher and network share. Please report issues with enough detail to reproduce them.
 
 ---
 

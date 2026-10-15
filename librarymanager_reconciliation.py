@@ -16,68 +16,8 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-
-RECONCILIATION_SCHEMA = """
-CREATE TABLE IF NOT EXISTS grouped_reconciliation_batches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    correlation_key TEXT NOT NULL UNIQUE,
-    operation_type TEXT NOT NULL,
-    source_prefix TEXT,
-    destination_prefix TEXT,
-    state TEXT NOT NULL DEFAULT 'collecting',
-    tracked_count INTEGER NOT NULL DEFAULT 0,
-    verified_count INTEGER NOT NULL DEFAULT 0,
-    uncertain_count INTEGER NOT NULL DEFAULT 0,
-    failed_count INTEGER NOT NULL DEFAULT 0,
-    stash_job_id TEXT,
-    reason TEXT,
-    evidence_json TEXT NOT NULL DEFAULT '{}',
-    claimed_by TEXT,
-    claim_expires_at REAL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_state
-    ON grouped_reconciliation_batches(state, updated_at);
-CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_claim
-    ON grouped_reconciliation_batches(claim_expires_at);
-
-CREATE TABLE IF NOT EXISTS grouped_reconciliation_members (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id INTEGER NOT NULL REFERENCES grouped_reconciliation_batches(id) ON DELETE CASCADE,
-    file_id TEXT NOT NULL,
-    scene_id TEXT NOT NULL,
-    old_path TEXT NOT NULL,
-    relative_path TEXT,
-    expected_path TEXT,
-    expected_size INTEGER,
-    source_fingerprints_json TEXT NOT NULL DEFAULT '[]',
-    destination_size INTEGER,
-    destination_mtime_ns INTEGER,
-    state TEXT NOT NULL DEFAULT 'pending',
-    reason TEXT,
-    observed_file_id TEXT,
-    observed_scene_id TEXT,
-    observed_path TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    UNIQUE(batch_id, file_id, old_path)
-);
-CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_members_batch
-    ON grouped_reconciliation_members(batch_id, state);
-CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_members_file
-    ON grouped_reconciliation_members(file_id, scene_id);
-
-CREATE TABLE IF NOT EXISTS grouped_reconciliation_event_links (
-    batch_id INTEGER NOT NULL REFERENCES grouped_reconciliation_batches(id) ON DELETE CASCADE,
-    event_key TEXT NOT NULL REFERENCES filesystem_events(event_key) ON DELETE CASCADE,
-    linked_at TEXT NOT NULL,
-    PRIMARY KEY(batch_id, event_key),
-    UNIQUE(event_key)
-);
-CREATE INDEX IF NOT EXISTS idx_grouped_reconciliation_event_batch
-    ON grouped_reconciliation_event_links(batch_id);
-"""
+from librarymanager.database.connection import create_connection
+from librarymanager.database.schema import RECONCILIATION_SCHEMA
 
 
 BATCH_STATES = frozenset({
@@ -122,16 +62,17 @@ def _utc_now() -> str:
 
 
 def ensure_reconciliation_schema(connection: sqlite3.Connection) -> None:
-    """Install the additive grouped-reconciliation schema on an open database."""
-    connection.executescript(RECONCILIATION_SCHEMA)
+    """Install the additive grouped-reconciliation schema on an open database.
+
+    Deprecated: Schema is now installed centrally via ensure_schema().
+    Retained for backward compatibility.
+    """
+    from librarymanager.database.migrations import _execute_script_transactionally
+    _execute_script_transactionally(connection, RECONCILIATION_SCHEMA)
 
 
 def _connect(database_path: Path | str) -> sqlite3.Connection:
-    connection = sqlite3.connect(Path(database_path), timeout=30)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys=ON")
-    ensure_reconciliation_schema(connection)
-    return connection
+    return create_connection(database_path)
 
 
 def _json_object(value: dict | None) -> str:
@@ -163,15 +104,32 @@ def create_or_get_batch(
     connection = _connect(database_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            """INSERT INTO grouped_reconciliation_batches(
-                   correlation_key,operation_type,source_prefix,destination_prefix,state,
-                   reason,evidence_json,created_at,updated_at
-               ) VALUES (?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(correlation_key) DO NOTHING""",
-            (key, operation, source_prefix, destination_prefix, state,
-             reason, _json_object(evidence), now, now),
-        )
+        try:
+            connection.execute(
+                """INSERT INTO grouped_reconciliation_batches(
+                       correlation_key,operation_type,source_prefix,destination_prefix,state,
+                       reason,evidence_json,created_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(correlation_key) DO NOTHING""",
+                (key, operation, source_prefix, destination_prefix, state,
+                 reason, _json_object(evidence), now, now),
+            )
+        except sqlite3.OperationalError as op_err:
+            if "no such table" in str(op_err):
+                connection.rollback()
+                ensure_reconciliation_schema(connection)
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """INSERT INTO grouped_reconciliation_batches(
+                           correlation_key,operation_type,source_prefix,destination_prefix,state,
+                           reason,evidence_json,created_at,updated_at
+                       ) VALUES (?,?,?,?,?,?,?,?,?)
+                       ON CONFLICT(correlation_key) DO NOTHING""",
+                    (key, operation, source_prefix, destination_prefix, state,
+                     reason, _json_object(evidence), now, now),
+                )
+            else:
+                raise
         row = connection.execute(
             "SELECT * FROM grouped_reconciliation_batches WHERE correlation_key=?", (key,)
         ).fetchone()

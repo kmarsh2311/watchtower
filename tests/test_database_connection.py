@@ -177,3 +177,33 @@ def test_concurrent_connections_busy_timeout(tmp_path: Path):
         assert final_count == 11
     finally:
         writer1.close()
+
+
+def test_reconciliation_connect_uses_central_factory_and_executes_no_ddl(tmp_path: Path):
+    """Verifies that librarymanager_reconciliation._connect uses create_connection and executes no DDL."""
+    import librarymanager_reconciliation
+
+    db_path = tmp_path / "recon_connect_test.sqlite3"
+    assert not db_path.exists()
+
+    con = librarymanager_reconciliation._connect(db_path)
+    try:
+        # 1. Connection pragmas must match central factory
+        info = get_connection_info(con)
+        assert info["journal_mode"].lower() == "wal"
+        assert int(info["busy_timeout"]) == DEFAULT_BUSY_TIMEOUT_MS
+        assert info["foreign_keys"] is True
+        assert con.row_factory is sqlite3.Row
+
+        # 2. PROOF: _connect must execute zero DDL and create zero tables on empty DB
+        tables = con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        assert len(tables) == 0, f"Expected 0 tables from reconciliation _connect, found: {[t[0] for t in tables]}"
+
+        # 3. ensure_reconciliation_schema executes transactionally
+        librarymanager_reconciliation.ensure_reconciliation_schema(con)
+        tables_after = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        assert "grouped_reconciliation_batches" in tables_after
+        assert "grouped_reconciliation_members" in tables_after
+        assert "grouped_reconciliation_event_links" in tables_after
+    finally:
+        con.close()
