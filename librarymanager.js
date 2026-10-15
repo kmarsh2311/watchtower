@@ -3049,16 +3049,33 @@
               React.createElement("span", { className: "lm-terminal-badge warn" }, "MEDIA RELOCATED")),
             React.createElement("p", { className: "lm-terminal-attention-detail" },
               React.createElement("b", null, "Reason: "),
-              `${data.missing_files_count} scene file${data.missing_files_count === 1 ? " is" : "s are"} missing from disk at their recorded path. This typically occurs when files are moved on a phone, tablet, or external file manager where filesystem monitor events are bypassed.`),
-            React.createElement("p", { className: "lm-terminal-attention-fix" },
-              "→ Fix: If you moved these files (e.g. from your phone or external share), click MANUAL SYNC to search drives and reconnect them. If you intentionally deleted these files, click CLEAN DELETED FROM STASH to prune dead scene records from Stash."),
+              `${data.missing_files_count} scene file${data.missing_files_count === 1 ? " is" : "s are"} missing from disk at the recorded path. This occurs when media is moved or deleted outside of Stash.`),
+            ((data?.missing_files || []).length > 0) && React.createElement("div", {
+              className: "lm-missing-file-list",
+              style: { marginTop: "8px", display: "flex", flexDirection: "column", gap: "6px" }
+            },
+              data.missing_files.map(item => {
+                const itemPath = item.path || "";
+                const fileName = item.basename || itemPath.split("/").pop() || `Scene ${item.scene_id}`;
+                return React.createElement("div", {
+                  key: item.file_id || itemPath,
+                  style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 8px", background: "rgba(255,255,255,0.03)", borderRadius: "4px", border: "1px solid rgba(255,255,255,0.06)" }
+                },
+                  React.createElement("div", { style: { display: "flex", flexDirection: "column", overflow: "hidden", textOverflow: "ellipsis", marginRight: "10px" } },
+                    React.createElement("span", { style: { fontWeight: "bold", fontSize: "0.85rem", color: "#f8fafc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, fileName),
+                    React.createElement("span", { style: { fontSize: "0.75rem", color: "rgba(255,255,255,0.45)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, itemPath)
+                  ),
+                  item.scene_id ? React.createElement("span", {
+                    className: "scene-card lm-scene-pill-card",
+                    style: { flexShrink: 0 },
+                    onClick: e => e.stopPropagation()
+                  }, SceneLink(item.scene_id, `Scene ${item.scene_id}`, "lm-terminal-stream-pill")) : null
+                );
+              })
+            ),
+            React.createElement("p", { className: "lm-terminal-attention-fix", style: { marginTop: "8px" } },
+              "→ Fix: If you intentionally deleted this media, click CLEAN DELETED FROM STASH to prune dead scene records from Stash. If the file was moved to a newly connected drive, use MANUAL SYNC in the header bar above to reconnect it."),
             React.createElement("div", { className: "lm-terminal-actions" },
-              React.createElement("button", {
-                type: "button",
-                className: "lm-terminal-btn retry",
-                disabled: !!busy,
-                onClick: handleReconcileMissingMedia
-              }, busy === "reconcile_missing_media" ? "⚡️ SYNCING…" : `⚡️ MANUAL SYNC (${data.missing_files_count})`),
               React.createElement("button", {
                 type: "button",
                 className: "lm-terminal-btn dismiss",

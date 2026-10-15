@@ -891,6 +891,12 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
             "SELECT COUNT(*) FROM files WHERE exists_on_disk = 0"
         ).fetchone()
         missing_files_count = int(missing_count_row[0]) if missing_count_row else 0
+        missing_files_rows = connection.execute(
+            """SELECT file_id, scene_id, path, basename, missing_since
+               FROM files WHERE exists_on_disk = 0
+               ORDER BY missing_since DESC LIMIT 50"""
+        ).fetchall()
+        missing_files = [dict(r) for r in missing_files_rows]
         unindexed_rows = connection.execute(
             "SELECT path, basename, size, discovered_at FROM unindexed_external_media WHERE ignored = 0 ORDER BY discovered_at DESC"
         ).fetchall()
@@ -936,6 +942,7 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
             "active_filing_transfers": get_active_filing_transfers(database_path),
             "filing_folder_mappings": get_filing_folder_mappings(database_path),
             "missing_files_count": missing_files_count,
+            "missing_files": missing_files,
             "unindexed_media": unindexed_media,
             "ignored_unindexed_count": ignored_unindexed_count,
             "scan_issues": scan_issues,
