@@ -472,7 +472,7 @@ def _sync_filename_state(connection: sqlite3.Connection, state, row, current: Pa
 
     previous_keys = {_compact_filename_text(name) for name in previous_performers if str(name).strip()}
     current_keys = {_compact_filename_text(name) for name in performers if str(name).strip()}
-    studio_changed = not _same_filename_name(previous_studio or "", current_studio or "")
+    studio_changed = _compact_filename_text(previous_studio or "") != _compact_filename_text(current_studio or "")
     performers_changed = previous_keys != current_keys
     metadata_changed = studio_changed or performers_changed
 
@@ -510,8 +510,11 @@ def _sync_filename_state(connection: sqlite3.Connection, state, row, current: Pa
             else:
                 base = raw_stash_title
         else:
-            if metadata_changed or externally_changed or source == "title":
+            if externally_changed or (metadata_changed and not base) or (source == "title" and not base):
                 base = current.stem
+                source = "filename"
+                source_title = None
+            elif source == "title":
                 source = "filename"
                 source_title = None
             base = _strip_managed_metadata(base, studios_to_strip, performers_to_strip, opts)

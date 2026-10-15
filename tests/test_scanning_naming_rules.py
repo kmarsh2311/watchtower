@@ -151,3 +151,51 @@ class ScanningNamingRulesTests(unittest.TestCase):
             core_mod._proposed_stem("Base", "Studio", ["Perf"], {}),
             nr._proposed_stem("Base", "Studio", ["Perf"], {}),
         )
+
+    def test_09_removing_performer_preserves_base_stem_and_triggers_rename(self):
+        """Verify that removing a performer from a scene with no title/studio correctly proposes reverting to base."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = Path(tmp_dir) / "test.db"
+            conn = nr.connect(db_path)
+
+            file_id = "100"
+            scene_id = "555"
+            vpath = Path(tmp_dir) / "5342 - Aaron Aurora.mp4"
+            vpath.touch()
+
+            # Scene originally had base '5342', was renamed to '5342 - Aaron Aurora.mp4'
+            conn.execute(
+                """INSERT INTO files(file_id, scene_id, basename, path, size, title, studio, performers_json, exists_on_disk, first_seen_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, 1000, '', NULL, '[]', 1, 'now', 'now')""",
+                (file_id, scene_id, vpath.name, str(vpath)),
+            )
+            conn.execute(
+                """INSERT INTO filename_state(file_id, base_stem, base_source, source_title, last_generated_stem,
+                       manual_studio, manual_performers_json, created_at, updated_at)
+                   VALUES (?, '5342', 'filename', NULL, '5342 - Aaron Aurora', NULL, '["Aaron Aurora"]', 'now', 'now')""",
+                (file_id,),
+            )
+            conn.execute(
+                """INSERT INTO rename_queue(scene_id, enqueued_at, available_at, status, attempts)
+                   VALUES (?, 100.0, 200.0, 'pending', 0)""",
+                (scene_id,),
+            )
+            conn.commit()
+
+            # 1. Preview must propose reverting to 5342.mp4
+            preview = nr.preview_scene_filename(db_path, scene_id)
+            self.assertEqual(preview["status"], "ready")
+            self.assertEqual(Path(preview["proposed_path"]).name, "5342.mp4")
+
+            # 2. incoming_summary must NOT delete it from queue and must report proposed_name as 5342.mp4
+            summary = core_mod.incoming_summary(db_path)
+            rename_items = [i for i in summary["active"] if i.get("scene_id") == scene_id]
+            self.assertEqual(len(rename_items), 1)
+            self.assertEqual(rename_items[0]["proposed_name"], "5342.mp4")
+            self.assertEqual(rename_items[0]["current_name"], "5342 - Aaron Aurora.mp4")
+
+            # Queue entry still exists in DB
+            q_row = conn.execute("SELECT status FROM rename_queue WHERE scene_id=?", (scene_id,)).fetchone()
+            self.assertIsNotNone(q_row)
+            self.assertEqual(q_row["status"], "pending")
+            conn.close()

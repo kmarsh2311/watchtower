@@ -487,7 +487,7 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
             """SELECT scene_id,enqueued_at,available_at,status FROM rename_queue WHERE status IN ('pending','processing')"""
         ).fetchall():
             sc_id = r_row["scene_id"]
-            f_row = connection.execute("SELECT basename,path,title,studio,performers_json FROM files WHERE scene_id=? AND exists_on_disk=1 LIMIT 1", (sc_id,)).fetchone()
+            f_row = connection.execute("SELECT file_id,basename,path,title,studio,performers_json FROM files WHERE scene_id=? AND exists_on_disk=1 LIMIT 1", (sc_id,)).fetchone()
             bname = f_row["basename"] if f_row else f"Scene {sc_id}"
             is_proc = r_row["status"] == "processing"
             rem = 0 if is_proc else max(0, int(r_row["available_at"] - now))
@@ -495,11 +495,12 @@ def incoming_summary(database_path: Path, config: dict = None) -> dict:
             proposed_name = None
             if f_row:
                 try:
-                    title = f_row["title"] or Path(f_row["path"]).stem
+                    fn_state = connection.execute("SELECT base_stem FROM filename_state WHERE file_id=?", (f_row["file_id"],)).fetchone()
+                    base = fn_state["base_stem"] if (fn_state and fn_state["base_stem"]) else (f_row["title"] or Path(f_row["path"]).stem)
                     studio = f_row["studio"]
                     perfs = json.loads(f_row["performers_json"] or "[]")
                     ext = Path(f_row["path"]).suffix
-                    stem = _proposed_stem(title, studio, perfs)
+                    stem = _proposed_stem(base, studio, perfs)
                     if stem:
                         proposed_name = stem + ext
                 except Exception:

@@ -2859,23 +2859,6 @@
     const handleReconcileMissingMedia = handleInitiateManualSync;
 
     function RetroStatus() {
-      const activeIncoming = allActive.filter(item => {
-        if (item.status === "downloading" || item.status === "scanning" || item.status === "generating_sheet" || item.status === "renaming" || item.status === "pending_rename") {
-          return true;
-        }
-        if (item.status === "waiting") {
-          const isImage = /\.(jpg|jpeg|png|webp)$/i.test(item.path);
-          return !isImage;
-        }
-        return false;
-      });
-      const waitingAndScanning = activeIncoming;
-      const hasActiveRename = activeIncoming.some(i => i.status === "pending_rename" || i.status === "renaming");
-      const activeJobs = (data?.active_jobs || []).filter(job => {
-        if (job.status !== "RUNNING" && job.status !== "QUEUED") return false;
-        if (hasActiveRename && /rename/i.test(job.description)) return false;
-        return true;
-      });
       const failedIncoming = allActive.filter(item => item.status === "failed");
       const filingAttentionIncoming = allActive.filter(item =>
         item.status === "imported" &&
@@ -2909,6 +2892,103 @@
         }
       });
       const filingRecoveryCount = filingRecoveryProposals.length;
+
+      const activeIncoming = allActive.filter(item => {
+        if (item.status === "downloading" || item.status === "scanning" || item.status === "generating_sheet" || item.status === "renaming" || item.status === "pending_rename") {
+          if (item.status === "pending_rename" || item.status === "renaming") {
+            const hasFilingAttentionCard = filingAttentionIncoming.some(f => {
+              const scMatch = String(f.detail || "").match(/scene\s+(\d+)/i);
+              const scId = f.scene_id || (scMatch ? scMatch[1] : null);
+              return String(scId) === String(item.scene_id);
+            });
+            const hasFilingProposalCard = (filingProposals || []).some(p => String(p.scene_id) === String(item.scene_id));
+            if (hasFilingAttentionCard || hasFilingProposalCard) {
+              return false;
+            }
+          }
+          return true;
+        }
+        if (item.status === "waiting") {
+          const isImage = /\.(jpg|jpeg|png|webp)$/i.test(item.path);
+          return !isImage;
+        }
+        return false;
+      });
+      const waitingAndScanning = activeIncoming;
+      const hasActiveRename = allActive.some(i => i.status === "pending_rename" || i.status === "renaming");
+      const activeJobs = (data?.active_jobs || []).filter(job => {
+        if (job.status !== "RUNNING" && job.status !== "QUEUED") return false;
+        if (hasActiveRename && /rename/i.test(job.description)) return false;
+        return true;
+      });
+
+      function renderInlineRename(renameItem) {
+        if (!renameItem) return null;
+        const isProc = renameItem.status === "renaming";
+        return React.createElement("div", {
+          className: "lm-terminal-pending-rename-card",
+          key: `inline-rename-${renameItem.scene_id}`,
+          style: {
+            margin: "0.55rem 0 0.35rem 0",
+            padding: ".55rem .75rem",
+            border: "1px dashed rgba(32, 230, 74, .45)",
+            borderRadius: "4px",
+            background: "rgba(20, 210, 55, .05)"
+          }
+        },
+          React.createElement("div", {
+            style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: ".3rem" }
+          },
+            React.createElement("strong", { style: { color: "#4ade80", fontSize: "0.82rem" } },
+              isProc ? "RENAMING IN PROGRESS…" : `RENAMING PROPOSAL (SETTLES IN ${countdown(renameItem)})`
+            ),
+            React.createElement("span", { className: "lm-terminal-badge rename" }, "RENAME")),
+          React.createElement("div", { style: { fontSize: "0.8rem", color: "#94a3b8", marginBottom: "2px" } },
+            React.createElement("span", null, "Current: "),
+            React.createElement("span", { style: { color: "#e2e8f0" } }, renameItem.current_name || renameItem.path)),
+          React.createElement("div", { style: { fontSize: "0.8rem", color: "#94a3b8", marginBottom: isProc ? "2px" : "6px" } },
+            React.createElement("span", null, "Proposed: "),
+            React.createElement("span", { style: { color: "#4ade80", fontWeight: "bold" } }, renameItem.proposed_name || renameItem.current_name)),
+          !isProc ? React.createElement("div", { className: "lm-terminal-actions", style: { marginTop: "4px" } },
+            React.createElement("button", {
+              type: "button",
+              className: "lm-terminal-btn rename-approve",
+              disabled: Boolean(busy),
+              onClick: async (e) => {
+                e.stopPropagation();
+                setBusy(`rename:${renameItem.scene_id}`);
+                setError("");
+                try {
+                  await operation("execute_pending_rename_now", { scene_id: renameItem.scene_id });
+                  await refresh();
+                } catch (err) {
+                  setError(`Rename failed: ${err.message}`);
+                } finally {
+                  setBusy("");
+                }
+              }
+            }, "▶ RENAME NOW"),
+            React.createElement("button", {
+              type: "button",
+              className: "lm-terminal-btn dismiss",
+              disabled: Boolean(busy),
+              onClick: async (e) => {
+                e.stopPropagation();
+                setBusy(`cancel:${renameItem.scene_id}`);
+                setError("");
+                try {
+                  await operation("cancel_pending_rename", { scene_id: renameItem.scene_id });
+                  await refresh();
+                } catch (err) {
+                  setError(`Cancel failed: ${err.message}`);
+                } finally {
+                  setBusy("");
+                }
+              }
+            }, "✕ CANCEL RENAME")
+          ) : null
+        );
+      }
 
       const inFlightCount = reconnectingMoves.length + waitingMoves.length + deferredMoves.length;
       const totalPending = monitor.pending_events != null ? monitor.pending_events : unresolved.length;
@@ -3300,6 +3380,7 @@
             const sceneId = item.scene_id || (sceneIdMatch ? sceneIdMatch[1] : null);
             const isRenaming = Boolean(sceneId && (data?.active_rename_scene_ids || []).includes(String(sceneId)));
             const isRetrying = busy === `retry_filing:${item.path}`;
+            const renameItem = allActive.find(i => String(i.scene_id) === String(sceneId) && (i.status === "pending_rename" || i.status === "renaming"));
             return React.createElement("div", {
               className: `lm-terminal-attention-item warn${sceneId ? " scene-card" : ""}`,
               key: `filing-attention-${item.path}`,
@@ -3326,6 +3407,7 @@
                     SceneLink(sceneId, `Scene ${sceneId}`, "lm-terminal-stream-pill")
                   )
                 ) : (item.detail || item.path)),
+              renderInlineRename(renameItem),
               React.createElement("p", { className: "lm-terminal-attention-fix" },
                 "→ Fix: Correct the destination mapping or scene metadata if needed, then click RETRY FILING. If you want to leave the file where it is, click DISMISS ALERT."),
               React.createElement("div", { className: "lm-terminal-actions" },
@@ -3887,6 +3969,7 @@
 
             const isRescanning = busy === `rescan_prop_${prop.source_path}`;
             const isRefreshing = busy === `refresh_prop_${prop.source_path}`;
+            const renameItem = allActive.find(i => String(i.scene_id) === String(prop.scene_id) && (i.status === "pending_rename" || i.status === "renaming"));
 
             return React.createElement("div", {
               className: "lm-terminal-attention-item filing" + (isApproved ? " lm-filing-approved" : ""),
@@ -3980,6 +4063,7 @@
                     React.createElement("span", { style: { marginLeft: "8px", opacity: 0.8 } }, `(${selectedCandidate?.match_source || prop.match_source})`))),
                 React.createElement("p", { className: "lm-terminal-attention-sub", style: { wordBreak: "break-all", overflowWrap: "anywhere", margin: "0 0 6px" } },
                   React.createElement("b", null, "From: "), prop.source_path),
+                renderInlineRename(renameItem),
                 (isRescanning || isRefreshing) ? React.createElement("div", {
                   className: "lm-filing-rescan-indicator",
                   style: {

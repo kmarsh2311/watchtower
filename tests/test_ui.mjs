@@ -1190,3 +1190,14 @@ test("Failed automatic renames appear in Needs Attention with Retry and Dismiss 
   assert.match(javascript, /⟳ RETRY RENAME/);
   assert.match(javascript, /✕ DISMISS ALERT/);
 });
+
+test("Pending rename proposals are unified into filing cards without duplicate Happening Now boxes", () => {
+  // 1. Inline rename renderer defined
+  assert.match(javascript, /function renderInlineRename\(renameItem\)/);
+
+  // 2. Inline rename proposal embedded into filing attention card
+  assert.match(javascript, /renderInlineRename\(renameItem\)/);
+
+  // 3. Duplicate rename cards in activeIncoming are suppressed when a filing card is visible
+  assert.match(javascript, /hasFilingAttentionCard \|\| hasFilingProposalCard/);
+});
