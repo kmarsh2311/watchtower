@@ -909,7 +909,7 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
             dict(row) for row in connection.execute(
                 """SELECT a.id, a.category, a.severity, a.action, a.status, a.old_path, a.new_path, a.detail, a.metadata_json, a.recorded_at
                    FROM activity_log a
-                   WHERE a.category IN ('reconciliation', 'incoming', 'scan', 'monitor')
+                   WHERE a.action IN ('reconcile missing media', 'incoming folder scan', 'scan subtree', 'library roots ready')
                      AND (a.severity IN ('warning', 'error') OR a.status IN ('completed_with_errors', 'timed_out', 'incomplete', 'failed'))
                      AND NOT EXISTS (
                          SELECT 1 FROM activity_log s
@@ -921,7 +921,7 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
                                OR
                                ((a.old_path IS NULL OR a.old_path = '') AND (s.old_path IS NULL OR s.old_path = ''))
                            )
-                           AND s.status IN ('complete', 'ok')
+                           AND (s.status IN ('complete', 'ok') OR (s.action = 'library roots ready' AND s.status = 'running'))
                            AND s.severity = 'info'
                      )
                    ORDER BY a.recorded_at DESC LIMIT 10"""
