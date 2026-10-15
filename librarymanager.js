@@ -1179,6 +1179,8 @@
     const filingRecovery = (payload.filing_proposals || []).filter(item => item.status === "needs_recovery").length;
     const failedRenames = (payload.failed_renames || []).length;
     const scanIssuesCount = (payload.scan_issues || []).length;
+    const missingFilesCount = payload.missing_files_count || 0;
+    const unindexedMediaCount = (payload.unindexed_media || []).length;
     const alertCount = failedIncoming + filingAttentionIncoming + unavailableRoots + attentionEvents + groupedReconciliation + filingRecovery + failedRenames + missingFilesCount + unindexedMediaCount + scanIssuesCount + (stale ? 1 : 0);
     return {
       watcher: {
