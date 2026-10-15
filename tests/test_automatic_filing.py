@@ -4846,6 +4846,48 @@ def test_stale_pending_proposal_recognises_verified_destination(test_env):
     assert diagnostic is None
 
 
+def test_invalidate_stale_filing_proposals_retains_renamed_incoming_scene(test_env):
+    """When a scene in incoming is renamed (e.g. via FastTag), invalidate_stale_filing_proposals
+    must update source_path to the new filename and retain the pending proposal rather than invalidating it."""
+    db, incoming = test_env["db"], test_env["incoming"]
+    old_video = incoming / "6107.mp4"
+    renamed_video = incoming / "6107 - Onlyfans.mp4"
+    renamed_video.write_bytes(b"content")
+
+    conn = connect(db)
+    conn.execute(
+        """INSERT INTO filing_proposals(id,file_id,scene_id,source_path,proposed_path,
+            destination_folder,destination_filename,organize_by,matched_entity_id,matched_entity_name,match_source,
+            reason,status,created_at,updated_at)
+            VALUES(902,'f6107','s6589',?,'','','6107.mp4','both','multiple','Multiple Candidates','multiple','Matched both','pending','before','before')""",
+        (str(old_video),),
+    )
+    conn.execute(
+        """INSERT INTO incoming_files(path,first_seen_at,last_checked_at,status,filing_diagnostic)
+           VALUES(?,'before','before','imported','Diagnostic')""",
+        (str(old_video),),
+    )
+    conn.commit()
+    conn.close()
+
+    stash = MagicMock()
+    stash.call_GQL.return_value = {"findScene": {"id": "s6589", "files": [
+        {"id": "f6107", "path": str(renamed_video)}]}}
+
+    invalidated = invalidate_stale_filing_proposals(db, stash=stash)
+    assert invalidated == []
+
+    conn = connect(db)
+    proposal = conn.execute("SELECT status, source_path, destination_filename FROM filing_proposals WHERE id=902").fetchone()
+    inc = conn.execute("SELECT path FROM incoming_files").fetchone()
+    conn.close()
+
+    assert proposal["status"] == "pending"
+    assert proposal["source_path"] == str(renamed_video)
+    assert proposal["destination_filename"] == "6107 - Onlyfans.mp4"
+    assert inc["path"] == str(renamed_video)
+
+
 def test_retry_recognises_already_completed_destination(test_env):
     db, incoming, root = test_env["db"], test_env["incoming"], test_env["dest_root"]
     source = incoming / "retry-complete.mp4"

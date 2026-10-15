@@ -1450,7 +1450,30 @@ def retry_filing_proposal(
         conn.close()
 
     if not src.is_file():
-        return {"success": False, "error": f"File does not exist on disk: {file_path}"}
+        if active_prop and active_prop["scene_id"] and stash:
+            try:
+                scene_obj = None
+                if hasattr(stash, "call_GQL"):
+                    res = stash.call_GQL(
+                        "query CheckScene($id: ID!) { findScene(id: $id) { id files { id path } } }",
+                        {"id": str(active_prop["scene_id"])},
+                    )
+                    scene_obj = (res or {}).get("findScene")
+                elif hasattr(stash, "find_scene"):
+                    scene_obj = stash.find_scene(str(active_prop["scene_id"]))
+
+                if scene_obj and str(scene_obj.get("id")) == str(active_prop["scene_id"]):
+                    for sf in (scene_obj.get("files") or []):
+                        sf_p = sf.get("path") or ""
+                        if sf_p and Path(sf_p).is_file():
+                            src = Path(sf_p).resolve()
+                            file_path = str(src)
+                            break
+            except Exception:
+                pass
+
+        if not src.is_file():
+            return {"success": False, "error": f"File does not exist on disk: {file_path}"}
 
     # Verify if file is inside configured incoming folders
     incoming_folders = get_configured_incoming_folders(config)
@@ -3054,6 +3077,7 @@ def invalidate_stale_filing_proposals(database_path: Path, stash=None) -> list[i
     completed_updates = []
     invalidated = []
     stale_updates = []
+    renamed_updates = []
 
     for r in rows:
         prop_id = r["id"]
@@ -3094,8 +3118,34 @@ def invalidate_stale_filing_proposals(database_path: Path, stash=None) -> list[i
                 completed_updates.append((prop_id, str(src_path), str(dest_path) if dest_path else ""))
                 continue
             else:
-                is_stale = True
-                reason = f"Proposed video source file was deleted: {src_path.name}"
+                renamed_path = None
+                if r["scene_id"] and stash:
+                    try:
+                        scene_obj = None
+                        if hasattr(stash, "call_GQL"):
+                            res = stash.call_GQL(
+                                "query CheckScene($id: ID!) { findScene(id: $id) { id files { id path } } }",
+                                {"id": str(r["scene_id"])},
+                            )
+                            scene_obj = (res or {}).get("findScene")
+                        elif hasattr(stash, "find_scene"):
+                            scene_obj = stash.find_scene(str(r["scene_id"]))
+
+                        if scene_obj and str(scene_obj.get("id")) == str(r["scene_id"]):
+                            for sf in (scene_obj.get("files") or []):
+                                p_str = sf.get("path") or ""
+                                if p_str and Path(p_str).is_file():
+                                    renamed_path = p_str
+                                    break
+                    except Exception:
+                        pass
+
+                if renamed_path:
+                    renamed_updates.append((prop_id, renamed_path, Path(renamed_path).name, str(src_path)))
+                    continue
+                else:
+                    is_stale = True
+                    reason = f"Proposed video source file was deleted: {src_path.name}"
         # 2. Stash scene deleted from Stash
         elif stash and r["scene_id"]:
             try:
@@ -3118,7 +3168,7 @@ def invalidate_stale_filing_proposals(database_path: Path, stash=None) -> list[i
             stale_updates.append((prop_id, reason))
             invalidated.append(prop_id)
 
-    if completed_updates or stale_updates:
+    if completed_updates or stale_updates or renamed_updates:
         conn_write = connect(database_path)
         try:
             conn_write.execute("BEGIN IMMEDIATE")
@@ -3130,6 +3180,19 @@ def invalidate_stale_filing_proposals(database_path: Path, stash=None) -> list[i
                 conn_write.execute(
                     "UPDATE incoming_files SET filing_diagnostic=NULL, last_checked_at=? WHERE path=? OR path=?",
                     (now, s_path, d_path),
+                )
+            for prop_id, new_path, new_name, old_path in renamed_updates:
+                conn_write.execute(
+                    "UPDATE filing_proposals SET source_path=?, destination_filename=?, updated_at=? WHERE id=?",
+                    (new_path, new_name, now, prop_id),
+                )
+                conn_write.execute(
+                    "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
+                    (new_path, now, old_path),
+                )
+                conn_write.execute(
+                    "UPDATE files SET path=?, basename=?, last_seen_at=? WHERE path=?",
+                    (new_path, new_name, now, old_path),
                 )
             for prop_id, reason in stale_updates:
                 conn_write.execute(

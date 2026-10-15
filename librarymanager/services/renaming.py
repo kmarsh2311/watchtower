@@ -308,6 +308,14 @@ def apply_scene_filename(
                     "UPDATE files SET path=?,basename=?,exists_on_disk=1,last_seen_at=? WHERE file_id=?",
                     (str(proposed), proposed.name, utc_now(), preview["file_id"]),
                 )
+                connection.execute(
+                    "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
+                    (str(proposed), utc_now(), str(current)),
+                )
+                connection.execute(
+                    "UPDATE filing_proposals SET source_path=?, destination_filename=?, updated_at=? WHERE (source_path=? OR (scene_id=? AND status='pending')) AND status='pending'",
+                    (str(proposed), proposed.name, utc_now(), str(current), str(scene_id)),
+                )
                 for source, target in moved_sidecars:
                     connection.execute(
                         "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
@@ -421,6 +429,19 @@ def apply_manual_filename(
                         utc_now(),
                     ),
                 )
+                connection.execute(
+                    "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
+                    (str(proposed), utc_now(), str(current)),
+                )
+                connection.execute(
+                    "UPDATE filing_proposals SET source_path=?, destination_filename=?, updated_at=? WHERE (source_path=? OR (scene_id=? AND status='pending')) AND status='pending'",
+                    (str(proposed), proposed.name, utc_now(), str(current), str(scene_id)),
+                )
+                for source, target in moved_sidecars:
+                    connection.execute(
+                        "UPDATE incoming_files SET path=?, last_checked_at=? WHERE path=?",
+                        (str(target), utc_now(), str(source)),
+                    )
                 connection.commit()
             except Exception as database_error:
                 if connection is not None:
