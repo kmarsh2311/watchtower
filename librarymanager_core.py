@@ -854,6 +854,11 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
         queue_counts = {row["status"]: row["count"] for row in connection.execute(
             "SELECT status,COUNT(*) AS count FROM rename_queue GROUP BY status"
         )}
+        active_rename_scene_ids = [
+            str(row["scene_id"]) for row in connection.execute(
+                "SELECT scene_id FROM rename_queue WHERE status IN ('pending', 'processing')"
+            ).fetchall()
+        ]
         failed_renames = []
         if queue_counts.get("failed", 0) > 0:
             failed_renames = [
@@ -946,6 +951,7 @@ def dashboard_data(database_path: Path, activity_limit: int = 100, stash=None, c
             "unindexed_media": unindexed_media,
             "ignored_unindexed_count": ignored_unindexed_count,
             "scan_issues": scan_issues,
+            "active_rename_scene_ids": active_rename_scene_ids,
         }
     finally:
         connection.close()

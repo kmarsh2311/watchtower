@@ -1014,7 +1014,7 @@ test("Backlog failures can open metadata editing and be re-evaluated", () => {
   assert.match(javascript, /function openBacklogMetadataEditor\(event, sceneId\)/);
   assert.match(javascript, /window\.open\(`\/scenes\/\$\{sceneId\}\/edit`/);
   assert.match(javascript, /function openBacklogFastTag\(event, sceneId\)/);
-  assert.match(javascript, /cardEl\.dispatchEvent\(new MouseEvent\("contextmenu"/);
+  assert.match(javascript, /targetEl\.dispatchEvent\(new MouseEvent\("contextmenu"/);
   assert.match(javascript, /href: `\/scenes\/\$\{result\.scene_id\}`/);
   assert.match(javascript, /className: "lm-fasttag-scene-context"/);
   assert.match(javascript, /async function handleReevaluateBacklogItem\(item\)/);

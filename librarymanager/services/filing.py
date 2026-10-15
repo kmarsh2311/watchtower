@@ -1446,6 +1446,12 @@ def retry_filing_proposal(
                 }
             if allow_refresh:
                 allow_baseline = True
+                if active_prop and active_prop["scene_id"]:
+                    try:
+                        from librarymanager.services.renaming import make_pending_rename_due
+                        make_pending_rename_due(database_path, str(active_prop["scene_id"]))
+                    except Exception:
+                        pass
     finally:
         conn.close()
 
@@ -2398,6 +2404,20 @@ def apply_filing_proposal(
 
         if proposal["status"] not in ("pending", "queued"):
             return {"id": proposal_id, "status": "blocked", "reason": f"Proposal is already '{proposal['status']}'"}
+
+        scene_id = proposal["scene_id"]
+        if scene_id:
+            conn_q = connect(database_path)
+            try:
+                is_renaming = conn_q.execute(
+                    "SELECT 1 FROM rename_queue WHERE scene_id=? AND status IN ('pending', 'processing')",
+                    (str(scene_id),)
+                ).fetchone()
+            finally:
+                conn_q.close()
+            if is_renaming:
+                reason = "Approval held: A filename update is currently settling/processing for this scene. Please wait a moment for the rename to finish."
+                return {"id": proposal_id, "status": "blocked", "reason": reason}
 
         if config is None:
             config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}

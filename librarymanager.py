@@ -1056,6 +1056,25 @@ def process_rename_queue(stash, database_path):
                 if result.get("action_performed"):
                     maybe_notify(config, f"Renamed scene {scene_id}: {Path(result['proposed_path']).name}", success=True)
                     refresh_scene_contact_sheet(database_path, result.get("proposed_path"), scene_id, config)
+                    if config.get("autoFilingEnabled"):
+                        try:
+                            _p_conn = connect(database_path)
+                            _p_row = _p_conn.execute(
+                                "SELECT id FROM filing_proposals WHERE (scene_id=? OR source_path=?) AND status IN ('pending', 'blocked')",
+                                (str(scene_id), str(result.get("proposed_path"))),
+                            ).fetchone()
+                            _p_conn.close()
+                            if _p_row:
+                                retry_filing_proposal(
+                                    database_path,
+                                    stash,
+                                    result.get("proposed_path"),
+                                    config=config,
+                                    allow_refresh=True,
+                                    proposal_id=_p_row["id"],
+                                )
+                        except Exception as prop_refresh_err:
+                            activity_logger().debug("Automatic filing refresh after rename failed: %s", prop_refresh_err)
                 processed += int(bool(result.get("action_performed")))
                 skipped += int(not result.get("action_performed"))
             except Exception as error:
@@ -2199,6 +2218,52 @@ def main():
         proposal_id = args.get("proposal_id")
         stash = StashInterface(plugin_input["server_connection"])
         config = filing_config_with_library_roots(stash)
+
+        if allow_refresh:
+            conn = connect(database_path)
+            target_scene_id = None
+            try:
+                if proposal_id:
+                    row = conn.execute("SELECT scene_id FROM filing_proposals WHERE id=?", (int(proposal_id),)).fetchone()
+                    if row and row["scene_id"]:
+                        target_scene_id = str(row["scene_id"])
+                if not target_scene_id and path:
+                    row = conn.execute("SELECT scene_id FROM files WHERE path=? OR basename=?", (str(path), Path(str(path)).name)).fetchone()
+                    if row and row["scene_id"]:
+                        target_scene_id = str(row["scene_id"])
+                if not target_scene_id and path:
+                    row = conn.execute("SELECT scene_id FROM filing_proposals WHERE source_path=?", (str(path),)).fetchone()
+                    if row and row["scene_id"]:
+                        target_scene_id = str(row["scene_id"])
+            finally:
+                conn.close()
+
+            if target_scene_id:
+                conn = connect(database_path)
+                try:
+                    q_row = conn.execute("SELECT status FROM rename_queue WHERE scene_id=?", (target_scene_id,)).fetchone()
+                finally:
+                    conn.close()
+                if q_row and q_row["status"] in ("pending", "processing"):
+                    make_pending_rename_due(database_path, target_scene_id)
+                    try:
+                        process_rename_queue(stash, database_path)
+                    except Exception as queue_err:
+                        activity_logger().warning("Error processing rename queue during retry_filing_proposal: %s", queue_err)
+
+                conn = connect(database_path)
+                try:
+                    if proposal_id:
+                        p_row = conn.execute("SELECT source_path FROM filing_proposals WHERE id=?", (int(proposal_id),)).fetchone()
+                        if p_row and p_row["source_path"]:
+                            path = p_row["source_path"]
+                    elif target_scene_id:
+                        f_row = conn.execute("SELECT path FROM files WHERE scene_id=? AND exists_on_disk=1 ORDER BY file_id DESC LIMIT 1", (target_scene_id,)).fetchone()
+                        if f_row and f_row["path"]:
+                            path = f_row["path"]
+                finally:
+                    conn.close()
+
         result = retry_filing_proposal(database_path, stash, path, config=config, allow_baseline=allow_baseline, allow_refresh=allow_refresh, proposal_id=proposal_id, force_rescan=force_rescan)
         message = json.dumps(result, ensure_ascii=False)
     elif mode == "get_backlog_items":

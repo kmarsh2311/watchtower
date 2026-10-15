@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest.mock as mock
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -5286,3 +5287,80 @@ def test_retry_filing_proposal_force_rescan_invalidates_and_discovers_new_disk_f
     rescan_res = retry_filing_proposal(db, mock_stash, str(video), config=config, allow_refresh=True, force_rescan=True)
     assert rescan_res["success"] is True
     assert rescan_res["proposal"]["destination_folder"] == str((dest_root / "New Performer").resolve())
+
+
+def test_retry_filing_proposal_flushes_pending_rename_debounce(test_env):
+    """Verify that when a rename is pending in rename_queue with future available_at (debouncing),
+    retry_filing_proposal with allow_refresh=True marks it immediately due."""
+    db = test_env["db"]
+    incoming = test_env["incoming"]
+    dest_root = test_env["dest_root"]
+    (dest_root / "Onlyfans").mkdir(parents=True, exist_ok=True)
+
+    snapshot_incoming_baseline(db, [str(incoming)])
+
+    video = incoming / "6107.mp4"
+    video.write_bytes(b"content" * 1000)
+
+    now_str = utc_now()
+    conn = connect(db)
+    conn.execute(
+        "INSERT INTO files (file_id, scene_id, path, basename, size, exists_on_disk, first_seen_at, last_seen_at) VALUES ('f1', '6589', ?, '6107.mp4', 7000, 1, ?, ?)",
+        (str(video), now_str, now_str),
+    )
+    conn.execute(
+        "INSERT INTO incoming_files (path, first_seen_at, last_checked_at, status, detail) VALUES (?, ?, ?, 'imported', 'Scene 6589')",
+        (str(video), now_str, now_str),
+    )
+    # Insert a debouncing rename into rename_queue with available_at 60 seconds into the future
+    future_time = time.time() + 60.0
+    conn.execute(
+        "INSERT INTO rename_queue (scene_id, enqueued_at, available_at, status, attempts) VALUES ('6589', ?, ?, 'pending', 0)",
+        (time.time(), future_time),
+    )
+    conn.commit()
+    conn.close()
+
+    scene = {
+        "id": "6589",
+        "title": "6107",
+        "files": [{"id": "f1", "path": str(video)}],
+        "performers": [{"id": "p1", "name": "Onlyfans", "alias_list": []}],
+        "studio": None,
+        "tags": [],
+    }
+    mock_stash = MagicMock()
+    mock_stash.call_GQL.return_value = {
+        "findScene": scene,
+        "allPerformers": scene["performers"],
+    }
+
+    config = {
+        "autoFilingEnabled": True,
+        "autoFilingOrganizeBy": "performer",
+        "autoFilingMatchSource": "metadata_first",
+        "autoFilingDestinationRoots": [str(dest_root)],
+        "incomingFolders": [str(incoming)],
+    }
+    refresh_destination_dir_cache(db, [str(dest_root)], max_depth=4)
+
+    prop = evaluate_filing_proposal(db, mock_stash, str(video), scene, config)
+    assert prop is not None
+
+    # Before retry, available_at is in the future (> now)
+    conn = connect(db)
+    q_row = conn.execute("SELECT available_at FROM rename_queue WHERE scene_id='6589'").fetchone()
+    assert q_row["available_at"] > time.time()
+    conn.close()
+
+    # Retry proposal with allow_refresh=True
+    res = retry_filing_proposal(db, mock_stash, str(video), config=config, allow_refresh=True, proposal_id=prop["id"])
+    assert res["success"] is True
+
+    # After retry, available_at should have been flushed to the past (<= now)
+    conn = connect(db)
+    q_row_after = conn.execute("SELECT available_at, status FROM rename_queue WHERE scene_id='6589'").fetchone()
+    conn.close()
+    assert q_row_after["available_at"] <= time.time()
+    assert q_row_after["status"] == "pending"
+

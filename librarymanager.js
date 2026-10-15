@@ -2746,7 +2746,7 @@
     async function handleRefreshFilingProposal(filePath, proposalId, forceRescan = false) {
       const busyKey = forceRescan ? ("rescan_prop_" + filePath) : ("refresh_prop_" + filePath);
       setBusy(busyKey); setError("");
-      setNotice(forceRescan ? "⏳ Scanning storage disks for folder changes…" : "⏳ Refreshing filing choices…");
+      setNotice(forceRescan ? "⏳ Scanning storage disks for folder changes…" : "⏳ Updating filename & refreshing filing choices…");
       try {
         const raw = await operation("retry_filing_proposal", {
           path: filePath,
@@ -3822,17 +3822,20 @@
                   )
                 );
 
+            const isRenaming = (data?.active_rename_scene_ids || []).includes(String(prop.scene_id));
             const activeTransfer = activeTransferMap[prop.id];
             const isApproved = Boolean(approvedFiling[prop.id]);
             const isCurrentTransferring = Boolean(activeTransfer) || (prop.status === "queued" && Boolean(activeTransfer));
             const isAnotherTransferActive = isAnyTransferActive && !isCurrentTransferring && !isApproved;
-            const isApproveDisabled = isApproved || Boolean(busy) || isAnyTransferActive || (hasMultiple && !selectedTarget);
+            const isApproveDisabled = isApproved || Boolean(busy) || isAnyTransferActive || (hasMultiple && !selectedTarget) || isRenaming;
 
             let approveButtonLabel = "✓ APPROVE & MOVE";
             if (isApproved) {
               approveButtonLabel = "✓ APPROVED & QUEUED";
             } else if (isCurrentTransferring) {
               approveButtonLabel = "⟳ IN PROGRESS…";
+            } else if (isRenaming) {
+              approveButtonLabel = "⏳ RENAME IN PROGRESS…";
             } else if (isAnotherTransferActive) {
               approveButtonLabel = "⚠️ TRANSFER IN PROGRESS";
             } else if (hasMultiple && !selectedTarget) {
@@ -3890,7 +3893,11 @@
                   (selectedCandidate?.is_custom_mapped || prop.is_custom_mapped) ? React.createElement("span", {
                     className: "lm-terminal-badge",
                     style: { background: "rgba(99, 102, 241, 0.15)", color: "#818cf8", border: "1px solid rgba(99, 102, 241, 0.3)" }
-                  }, "CUSTOM MAPPED") : null
+                  }, "CUSTOM MAPPED") : null,
+                  isRenaming ? React.createElement("span", {
+                    className: "lm-terminal-badge warn",
+                    style: { background: "rgba(245, 158, 11, 0.15)", color: "#f59e0b", border: "1px solid rgba(245, 158, 11, 0.3)" }
+                  }, "RENAME PENDING") : null
                 ),
                 React.createElement("div", { className: "lm-filing-action-menu-wrap", style: { position: "relative" } },
                   React.createElement("button", {
@@ -4031,8 +4038,10 @@
                   style: isApproved ? { opacity: 0.3, pointerEvents: "none", transition: "opacity 0.2s ease" } : { transition: "opacity 0.2s ease" },
                   disabled: isApproved || Boolean(busy) || isAnyTransferActive,
                   onClick: () => handleRefreshFilingProposal(prop.source_path, prop.id),
-                  title: "Fetch current Stash metadata and recalculate choices using the cached folder list"
-                }, isRescanning ? "⟳ SCANNING DISKS…" : (isRefreshing ? "⟳ REFRESHING…" : "⟳ REFRESH CHOICES")),
+                  title: isRenaming
+                    ? "Finalize pending filename change and recalculate destination choices immediately"
+                    : "Fetch current Stash metadata and recalculate choices using the cached folder list"
+                }, isRescanning ? "⟳ SCANNING DISKS…" : (isRefreshing ? (isRenaming ? "⟳ FINALIZING RENAME…" : "⟳ REFRESHING…") : (isRenaming ? "⟳ RENAME & REFRESH" : "⟳ REFRESH CHOICES"))),
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn dismiss",
