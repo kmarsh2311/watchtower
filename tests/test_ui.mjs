@@ -524,10 +524,11 @@ test("Automatic Filing unresolved imports and Retry Filing appear in Command Cen
 
   // 2. Retry Filing, Dismiss Alert, and interactive scene/FastTag actions on attention card.
   assert.match(javascript, /handleRetryFiling/);
-  assert.match(javascript, /onClick: \(\) => handleRetryFiling\(item\.path\)/);
-  assert.match(javascript, /disabled: !!busy/);
-  assert.match(javascript, /"⟳ RETRYING…" : "⟳ RETRY FILING"/);
-  assert.match(javascript, /operation\("retry_filing_proposal", \{ path \}\)/);
+  assert.match(javascript, /onClick: \(\) => handleRetryFiling\(item\.path/);
+  assert.match(javascript, /disabled: Boolean\(busy\)/);
+  assert.match(javascript, /RENAME PENDING/);
+  assert.match(javascript, /operation\("retry_filing_proposal", \{/);
+  assert.match(javascript, /allow_refresh: true/);
   assert.match(javascript, /onClick: \(\) => handleDismissIncoming\(item\.path\)/);
   assert.match(javascript, /"✕ DISMISS ALERT"/);
   assert.match(javascript, /"data-scene-id": sceneId/);

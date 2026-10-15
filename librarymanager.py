@@ -434,7 +434,7 @@ def automatic_scene_allowed(config, scene_id):
     return not test_scene_id or test_scene_id == str(scene_id)
 
 
-SCENE_NAMING_HOOK_FIELDS = frozenset({"title", "studio_id", "performer_ids", "code", "date"})
+SCENE_NAMING_HOOK_FIELDS = frozenset({"title", "studio_id", "performer_ids", "code", "date", "tag_ids", "tags"})
 
 
 def scene_hook_has_naming_changes(changed):
@@ -1137,7 +1137,7 @@ def main():
                 activity_logger().error("Failed to query scenes for studio %s: %s", entity_id, e)
         else:
             relevant = scene_hook_has_naming_changes(changed)
-            if not relevant:
+            if not relevant and not filing_on_meta:
                 detail = (
                     "Scene update has no explicit naming metadata changes; skipping."
                     if not changed
@@ -1616,6 +1616,19 @@ def main():
         filing_proposals = get_pending_filing_proposals(database_path, stash=stash)
         incoming = incoming_summary(database_path, config=config)
         from librarymanager_reconciliation import list_review_batches
+        conn_q = connect(database_path)
+        try:
+            active_rename_scene_ids = [
+                str(row["scene_id"]) for row in conn_q.execute(
+                    "SELECT scene_id FROM rename_queue WHERE status IN ('pending', 'processing')"
+                ).fetchall()
+            ]
+            rename_queue_counts = {row["status"]: row["count"] for row in conn_q.execute(
+                "SELECT status,COUNT(*) AS count FROM rename_queue GROUP BY status"
+            )}
+        finally:
+            conn_q.close()
+
         result = {
             "monitor": monitor_summary,
             "incoming": incoming,
@@ -1626,6 +1639,8 @@ def main():
             "transcoder_candidates": pending_transcoder_candidates(database_path),
             "filing_proposals": filing_proposals,
             "active_filing_transfers": get_active_filing_transfers(database_path),
+            "active_rename_scene_ids": active_rename_scene_ids,
+            "queue_counts": rename_queue_counts,
             "server_time": time.time(),
             "current_scene_count": current_scene_count(stash),
         }

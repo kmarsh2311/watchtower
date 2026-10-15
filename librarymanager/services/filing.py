@@ -2417,7 +2417,7 @@ def apply_filing_proposal(
                 conn_q.close()
             if is_renaming:
                 reason = "Approval held: A filename update is currently settling/processing for this scene. Please wait a moment for the rename to finish."
-                return {"id": proposal_id, "status": "blocked", "reason": reason}
+                return {"id": proposal_id, "status": "held", "reason": reason}
 
         if config is None:
             config = (stash.find_plugin_config("librarymanager") if hasattr(stash, "find_plugin_config") else {}) or {}

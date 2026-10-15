@@ -2508,10 +2508,16 @@
       }
     }
 
-    async function handleRetryFiling(path) {
+    async function handleRetryFiling(path, sceneId) {
       setBusy(`retry_filing:${path}`); setError("");
+      const isRenaming = Boolean(sceneId && (data?.active_rename_scene_ids || []).includes(String(sceneId)));
+      setNotice(isRenaming ? "⏳ Finalizing filename & evaluating filing choices…" : "⏳ Retrying filing evaluation…");
       try {
-        const raw = await operation("retry_filing_proposal", { path });
+        const raw = await operation("retry_filing_proposal", {
+          path,
+          allow_refresh: true,
+          allow_baseline: true
+        });
         const res = typeof raw === "string" ? JSON.parse(raw) : raw;
         if (res && res.success) {
           setNotice(res.message || "Filing proposal generated successfully.");
@@ -2717,6 +2723,9 @@
           if (res.metadata_updated) msg += " — metadata updated in Stash";
           else if (res.metadata_error) msg += ` (metadata note: ${res.metadata_error})`;
           setNotice(msg);
+          await refresh(true);
+        } else if (res && res.status === "held") {
+          setNotice(`⏳ ${res.reason || "Approval held while filename update is settling. Please wait a moment."}`);
           await refresh(true);
         } else if (res && res.status === "needs_recovery") {
           setError(`CRITICAL: Move incomplete / uncertain. Recovery required: ${res.reason || "Transaction halted safely"}`);
@@ -3289,14 +3298,23 @@
           filingAttentionIncoming.map(item => {
             const sceneIdMatch = String(item.detail || "").match(/scene\s+(\d+)/i);
             const sceneId = item.scene_id || (sceneIdMatch ? sceneIdMatch[1] : null);
+            const isRenaming = Boolean(sceneId && (data?.active_rename_scene_ids || []).includes(String(sceneId)));
+            const isRetrying = busy === `retry_filing:${item.path}`;
             return React.createElement("div", {
               className: `lm-terminal-attention-item warn${sceneId ? " scene-card" : ""}`,
               key: `filing-attention-${item.path}`,
               "data-scene-id": sceneId || undefined
             },
               React.createElement("div", { className: "lm-terminal-attention-title" },
-                React.createElement("strong", null, `! FILING NEEDS ATTENTION: ${basename(item.path)}`),
-                React.createElement("span", { className: "lm-terminal-badge warn" }, "FILING UNRESOLVED")),
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" } },
+                  React.createElement("strong", null, `! FILING NEEDS ATTENTION: ${basename(item.path)}`),
+                  React.createElement("span", { className: "lm-terminal-badge warn" }, "FILING UNRESOLVED"),
+                  isRenaming ? React.createElement("span", {
+                    className: "lm-terminal-badge warn",
+                    style: { background: "rgba(245, 158, 11, 0.15)", color: "#f59e0b", border: "1px solid rgba(245, 158, 11, 0.3)" }
+                  }, "RENAME PENDING") : null
+                )
+              ),
               React.createElement("p", { className: "lm-terminal-attention-detail" },
                 React.createElement("b", null, "Reason: "),
                 item.filing_diagnostic || "The video was added to Stash, but Watchtower could not create a filing proposal."),
@@ -3314,13 +3332,16 @@
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn retry",
-                  disabled: !!busy,
-                  onClick: () => handleRetryFiling(item.path)
-                }, busy === `retry_filing:${item.path}` ? "⟳ RETRYING…" : "⟳ RETRY FILING"),
+                  disabled: Boolean(busy),
+                  onClick: () => handleRetryFiling(item.path, sceneId),
+                  title: isRenaming
+                    ? "Finalize pending filename change and re-evaluate filing immediately"
+                    : "Re-evaluate filing for this imported scene"
+                }, isRetrying ? (isRenaming ? "⟳ FINALIZING RENAME…" : "⟳ RETRYING…") : (isRenaming ? "⟳ RENAME & RETRY" : "⟳ RETRY FILING")),
                 React.createElement("button", {
                   type: "button",
                   className: "lm-terminal-btn dismiss",
-                  disabled: !!busy,
+                  disabled: Boolean(busy),
                   onClick: () => handleDismissIncoming(item.path)
                 }, "✕ DISMISS ALERT"),
                 sceneId ? React.createElement("button", {
