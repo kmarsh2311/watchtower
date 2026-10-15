@@ -325,10 +325,16 @@ def check_scenes_batch(
     id_list = [str(sid) for sid in scene_ids]
     for i in range(0, len(id_list), batch_size):
         chunk = id_list[i : i + batch_size]
-        res = execute_gql(stash, CHECK_SCENES_QUERY, {"ids": chunk})
-        if isinstance(res, dict) and "findScenes" in res:
+        subqueries = [f's{idx}: findScene(id: "{sid}") {{ id files {{ id path }} }}' for idx, sid in enumerate(chunk)]
+        query = "query CheckScenes { " + " ".join(subqueries) + " }"
+        res = execute_gql(stash, query)
+        if isinstance(res, dict):
             query_succeeded = True
-            for sc in (res.get("findScenes") or {}).get("scenes") or []:
+            if "findScenes" in res:
+                scenes_list = (res.get("findScenes") or {}).get("scenes") or []
+            else:
+                scenes_list = [val for val in res.values() if isinstance(val, dict) and "id" in val]
+            for sc in scenes_list:
                 active_scenes.add(str(sc.get("id")))
                 for f in sc.get("files") or []:
                     fid = f.get("id")
