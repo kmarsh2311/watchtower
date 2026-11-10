@@ -47,8 +47,12 @@ from librarymanager.services.filing_rules import (
 )
 from librarymanager.services.inventory import (
     flatten_scene_files,
+    get_active_inventory_run,
     inventory,
+    inventory_progress_path,
+    read_inventory_progress,
     refresh_scene_inventory,
+    write_inventory_progress,
 )
 from librarymanager.services.manual_sync import (
     INCOMING_SCAN_FLAGS,
@@ -102,6 +106,7 @@ __all__ = [
     "generate_ffmpeg_contact_sheet_fallback",
     "generate_video_contact_sheet",
     "get_active_filing_transfers",
+    "get_active_inventory_run",
     "get_configured_filing_destination_roots",
     "get_filing_folder_mappings",
     "get_pending_filing_proposals",
@@ -109,6 +114,7 @@ __all__ = [
     "ignore_all_unindexed_media_files",
     "ignore_filing_proposal",
     "ignore_unindexed_media_file",
+    "inventory_progress_path",
     "invalidate_destination_dir_cache",
     "invalidate_incoming_discovery_cache",
     "invalidate_stale_filing_proposals",
@@ -120,6 +126,7 @@ __all__ = [
     "match_studio_for_filing",
     "notify_desktop",
     "prune_resolved_filing_baseline",
+    "read_inventory_progress",
     "recover_abandoned_processing_queue",
     "recover_filing_proposal",
     "recover_stale_active_transfers",
@@ -135,4 +142,5 @@ __all__ = [
     "save_filing_folder_mapping",
     "set_filing_transfer_job_id",
     "snapshot_incoming_baseline",
+    "write_inventory_progress",
 ]

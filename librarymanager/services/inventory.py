@@ -9,11 +9,14 @@ This module is responsible for:
 from __future__ import annotations
 
 import datetime
+import errno
 import json
 import logging
 import os
 import sqlite3
 import sys
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, Generator, List, Optional, Union
 
@@ -27,6 +30,195 @@ logger = logging.getLogger("librarymanager.services.inventory")
 def utc_now() -> str:
     """Return the current UTC timestamp in ISO 8601 format."""
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def inventory_progress_path(database_path: Path | str) -> Path:
+    """Return the filesystem path for the atomic inventory progress JSON file."""
+    return Path(database_path).with_name(f"{Path(database_path).name}.inventory-progress.json")
+
+
+def _is_transient_filesystem_error(exc: OSError) -> bool:
+    """Check if an OSError is a transient file locking or contention error."""
+    winerror = getattr(exc, "winerror", None)
+    if winerror in (5, 32, 33):
+        return True
+    err = getattr(exc, "errno", None)
+    transient_errnos = {
+        getattr(errno, "EBUSY", None),
+        getattr(errno, "ETXTBSY", None),
+        getattr(errno, "EAGAIN", None),
+        getattr(errno, "EWOULDBLOCK", None),
+    }
+    transient_errnos.discard(None)
+    if err in transient_errnos:
+        return True
+    err_str = str(exc).lower()
+    return any(marker in err_str for marker in ("winerror 5", "winerror 32", "access is denied", "accès refusé"))
+
+
+def _default_is_pid_alive(pid: int | None) -> bool:
+    """Check if a process with the given PID is currently alive on the system."""
+    if not pid or pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (ProcessLookupError, ValueError, OSError):
+        return False
+
+
+def is_pid_alive(pid: int | None) -> bool:
+    is_alive_fn = _get_core_fn("_is_pid_alive", _default_is_pid_alive)
+    return is_alive_fn(pid)
+
+
+def read_inventory_progress(database_path: Path | str) -> dict:
+    """Read and parse the current inventory progress file safely."""
+    progress_path = inventory_progress_path(database_path)
+    if not progress_path.is_file():
+        return {"status": "idle", "processed": 0, "total": 0, "detail": ""}
+    try:
+        payload = json.loads(progress_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {"status": "idle", "processed": 0, "total": 0, "detail": ""}
+    except (OSError, ValueError):
+        return {"status": "unknown", "processed": 0, "total": 0, "detail": "Progress is temporarily unavailable"}
+
+
+def get_active_inventory_run(database_path: Path | str) -> dict | None:
+    """Return active inventory run metadata if an inventory process is currently alive, else None."""
+    current = read_inventory_progress(database_path)
+    if not isinstance(current, dict):
+        return None
+    if current.get("status") not in ("preparing", "running"):
+        return None
+    pid = current.get("pid")
+    if pid is not None:
+        try:
+            pid_int = int(pid)
+        except (ValueError, TypeError):
+            return None
+        if is_pid_alive(pid_int):
+            if pid_int != os.getpid():
+                return current
+        else:
+            # PID is dead: interrupted or crashed inventory run
+            return None
+    else:
+        # Fallback for legacy progress files without PID: consider active only if updated within 300s
+        updated_at_str = current.get("updated_at")
+        if updated_at_str:
+            try:
+                updated_dt = datetime.datetime.fromisoformat(updated_at_str)
+                age = (datetime.datetime.now(datetime.timezone.utc) - updated_dt).total_seconds()
+                if age < 300:
+                    return current
+            except Exception:
+                pass
+    return None
+
+
+def activity_logger():
+    return logging.getLogger("librarymanager.activity")
+
+
+def write_inventory_progress(
+    database_path: Path | str,
+    status: str,
+    processed: int = 0,
+    total: int = 0,
+    detail: str = "",
+    run_id: Optional[str] = None,
+    pid: Optional[int] = None,
+) -> dict:
+    """Atomically publish inventory progress for the onboarding UI.
+
+    Guarantees:
+    - Identifiable run ownership via run_id and pid.
+    - Only the active inventory run is permitted to publish progress.
+    - A secondary or unowned process cannot overwrite or clear the active run's progress.
+    - Interrupted/stale runs from terminated PIDs are safely reclaimed.
+    - Temporary files are PID-and-timestamp-isolated and cleaned up safely.
+    """
+    progress_path = inventory_progress_path(database_path)
+    owner_pid = int(pid or os.getpid())
+
+    # Check ownership against existing progress file
+    current = read_inventory_progress(database_path)
+    if isinstance(current, dict) and current.get("status") in ("preparing", "running"):
+        active_pid = current.get("pid")
+        active_run_id = current.get("run_id")
+        if active_pid is not None:
+            try:
+                active_pid_int = int(active_pid)
+            except (ValueError, TypeError):
+                active_pid_int = None
+            if active_pid_int and is_pid_alive(active_pid_int):
+                # If an active run is held by another process or another run ID:
+                if active_pid_int != owner_pid or (active_run_id and run_id and active_run_id != run_id):
+                    activity_logger().warning(
+                        "Ignoring inventory progress update (status=%s) from unowned process (PID %s, run %s); "
+                        "active inventory run %s (PID %s) holds ownership",
+                        status, owner_pid, run_id, active_run_id, active_pid_int
+                    )
+                    return current
+
+    temporary_path = progress_path.with_name(f"{progress_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    effective_run_id = str(run_id or (current.get("run_id") if isinstance(current, dict) else "") or "")
+    payload = {
+        "status": str(status),
+        "processed": max(0, int(processed or 0)),
+        "total": max(0, int(total or 0)),
+        "detail": str(detail or ""),
+        "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "run_id": effective_run_id,
+        "pid": owner_pid,
+    }
+    max_attempts = 5
+    try:
+        temporary_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        for attempt in range(max_attempts):
+            try:
+                temporary_path.replace(progress_path)
+                break
+            except OSError as exc:
+                if _is_transient_filesystem_error(exc) and attempt < max_attempts - 1:
+                    time.sleep(0.05 * (attempt + 1))
+                else:
+                    if _is_transient_filesystem_error(exc):
+                        activity_logger().warning(
+                            "Failed to publish inventory progress file %s after %d transient retry attempts: %s",
+                            progress_path, max_attempts, exc
+                        )
+                    else:
+                        activity_logger().warning(
+                            "Non-transient filesystem error replacing inventory progress file %s: %s",
+                            progress_path, exc
+                        )
+                    break
+    except Exception as exc:
+        activity_logger().warning(
+            "Unexpected error writing inventory progress temporary file %s: %s",
+            temporary_path, exc
+        )
+    finally:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return payload
 
 
 def _is_mock(fn: Any) -> bool:
@@ -131,14 +323,41 @@ def inventory(
     database_path: Path,
     scenes,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    run_id: Optional[str] = None,
 ) -> dict:
     """Execute a full library inventory sweep across the provided Stash scenes."""
     now = utc_now()
     connect_fn = _get_core_fn("connect", _connect)
     is_offline_fn = _get_core_fn("is_file_on_unavailable_root", _default_is_file_on_unavailable_root)
+    get_active_fn = _get_core_fn("get_active_inventory_run", get_active_inventory_run)
+
+    # Check if another living process is actively running inventory
+    active_run = get_active_fn(database_path)
+    if active_run and active_run.get("pid") is not None and active_run.get("pid") != os.getpid():
+        raise RuntimeError(
+            f"Inventory is already in progress in another process (PID {active_run.get('pid')}). "
+            "Please wait for the active scan to finish."
+        )
+
+    # Fast lock probe: check if SQLite write lock is already held without waiting 30 seconds
+    if not _is_mock(connect_fn):
+        probe_conn = connect_fn(database_path)
+        try:
+            probe_conn.execute("PRAGMA busy_timeout = 250")
+            probe_conn.execute("BEGIN IMMEDIATE")
+            probe_conn.rollback()
+        except sqlite3.OperationalError as exc:
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                raise RuntimeError(
+                    "Inventory cannot execute because the database is currently in use by another operation."
+                ) from exc
+            raise
+        finally:
+            probe_conn.close()
+
     connection = connect_fn(database_path)
     try:
-        run_id = connection.execute(
+        db_run_id = connection.execute(
             "INSERT INTO inventory_runs(started_at) VALUES (?)", (now,)
         ).lastrowid
         records = list(flatten_scene_files(scenes))
@@ -191,19 +410,19 @@ def inventory(
                 summary["changed_paths"] += 1
                 connection.execute(
                     "INSERT INTO inventory_events(run_id,file_id,event_type,old_path,new_path,recorded_at) VALUES (?,?,?,?,?,?)",
-                    (run_id, record["file_id"], "stash_path_changed", previous["path"], record["path"], now),
+                    (db_run_id, record["file_id"], "stash_path_changed", previous["path"], record["path"], now),
                 )
             if not is_offline:
                 if previous and not previous["exists_on_disk"] and exists:
                     summary["restored"] += 1
                     connection.execute(
                         "INSERT INTO inventory_events(run_id,file_id,event_type,old_path,new_path,recorded_at) VALUES (?,?,?,?,?,?)",
-                        (run_id, record["file_id"], "file_restored", previous["path"], record["path"], now),
+                        (db_run_id, record["file_id"], "file_restored", previous["path"], record["path"], now),
                     )
                 if (not previous or previous["exists_on_disk"]) and not exists:
                     connection.execute(
                         "INSERT INTO inventory_events(run_id,file_id,event_type,old_path,new_path,recorded_at) VALUES (?,?,?,?,?,?)",
-                        (run_id, record["file_id"], "file_missing", record["path"], None, now),
+                        (db_run_id, record["file_id"], "file_missing", record["path"], None, now),
                     )
 
             connection.execute(
@@ -230,10 +449,12 @@ def inventory(
             """UPDATE inventory_runs SET completed_at=?,stash_file_count=?,stash_scene_count=?,present_count=?,missing_count=?,
                    changed_path_count=?,restored_count=?,status='complete' WHERE id=?""",
             (now, summary["files"], summary["scenes"], summary["present"], summary["missing"],
-             summary["changed_paths"], summary["restored"], run_id),
+             summary["changed_paths"], summary["restored"], db_run_id),
         )
         connection.commit()
-        summary["run_id"] = run_id
+        summary["run_id"] = db_run_id
+        if run_id:
+            summary["client_run_id"] = run_id
         return summary
     except Exception:
         connection.rollback()
@@ -310,3 +531,18 @@ def refresh_scene_inventory(database_path: Path, scene: dict) -> int:
         return len(records)
     finally:
         connection.close()
+
+
+__all__ = [
+    "flatten_scene_files",
+    "inventory",
+    "refresh_scene_inventory",
+    "inventory_progress_path",
+    "read_inventory_progress",
+    "write_inventory_progress",
+    "get_active_inventory_run",
+    "_is_transient_filesystem_error",
+    "_default_is_pid_alive",
+    "is_pid_alive",
+]
+

@@ -157,97 +157,13 @@ def assert_scene_removal_safe(scene, deleted_path):
         )
 
 
-def inventory_progress_path(database_path):
-    return Path(database_path).with_name(f"{Path(database_path).name}.inventory-progress.json")
-
-
-def _is_transient_filesystem_error(exc: OSError) -> bool:
-    """Check if an OSError is a transient file locking or contention error.
-
-    On Windows:
-      - winerror 5: ERROR_ACCESS_DENIED (destination locked by concurrent reader/antivirus)
-      - winerror 32: ERROR_SHARING_VIOLATION (in-use by another process)
-      - winerror 33: ERROR_LOCK_VIOLATION (range lock)
-    On POSIX:
-      - errno.EBUSY: Device or resource busy
-      - errno.ETXTBSY: Text file busy
-      - errno.EAGAIN / errno.EWOULDBLOCK: Resource temporarily unavailable
-    """
-    winerror = getattr(exc, "winerror", None)
-    if winerror in (5, 32, 33):
-        return True
-    err = getattr(exc, "errno", None)
-    transient_errnos = {
-        getattr(errno, "EBUSY", None),
-        getattr(errno, "ETXTBSY", None),
-        getattr(errno, "EAGAIN", None),
-        getattr(errno, "EWOULDBLOCK", None),
-    }
-    transient_errnos.discard(None)
-    if err in transient_errnos:
-        return True
-    err_str = str(exc).lower()
-    if any(marker in err_str for marker in ("winerror 5", "winerror 32", "access is denied", "accès refusé")):
-        return True
-    return False
-
-
-def write_inventory_progress(database_path, status, processed=0, total=0, detail=""):
-    """Atomically publish inventory progress for the onboarding UI."""
-    progress_path = inventory_progress_path(database_path)
-    temporary_path = progress_path.with_name(f"{progress_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    payload = {
-        "status": str(status),
-        "processed": max(0, int(processed or 0)),
-        "total": max(0, int(total or 0)),
-        "detail": str(detail or ""),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    max_attempts = 5
-    try:
-        temporary_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        for attempt in range(max_attempts):
-            try:
-                temporary_path.replace(progress_path)
-                break
-            except OSError as exc:
-                if _is_transient_filesystem_error(exc) and attempt < max_attempts - 1:
-                    time.sleep(0.05 * (attempt + 1))
-                else:
-                    if _is_transient_filesystem_error(exc):
-                        activity_logger().warning(
-                            "Failed to publish inventory progress file %s after %d transient retry attempts: %s",
-                            progress_path, max_attempts, exc
-                        )
-                    else:
-                        activity_logger().warning(
-                            "Non-transient filesystem error replacing inventory progress file %s: %s",
-                            progress_path, exc
-                        )
-                    break
-    except Exception as exc:
-        activity_logger().warning(
-            "Unexpected error writing inventory progress temporary file %s: %s",
-            temporary_path, exc
-        )
-    finally:
-        try:
-            temporary_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-    return payload
-
-
-def read_inventory_progress(database_path):
-    progress_path = inventory_progress_path(database_path)
-    if not progress_path.is_file():
-        return {"status": "idle", "processed": 0, "total": 0, "detail": ""}
-    try:
-        payload = json.loads(progress_path.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {"status": "idle", "processed": 0, "total": 0, "detail": ""}
-    except (OSError, ValueError):
-        return {"status": "unknown", "processed": 0, "total": 0,
-                "detail": "Progress is temporarily unavailable"}
+from librarymanager.services.inventory import (
+    inventory_progress_path,
+    _is_transient_filesystem_error,
+    write_inventory_progress,
+    read_inventory_progress,
+    get_active_inventory_run,
+)
 
 
 def require_bulk_dismissal(resolution):
@@ -1380,37 +1296,60 @@ def main():
     elif mode == "inventory_progress":
         message = json.dumps(read_inventory_progress(database_path), ensure_ascii=False)
     elif mode in ("inventory", "build_inventory"):
-        stash = StashInterface(plugin_input["server_connection"])
-        write_inventory_progress(database_path, "preparing", detail="Reading scenes from Stash")
-        try:
-            scenes = fetch_scenes(stash)
-            summary = inventory(
-                database_path,
-                scenes,
-                progress_callback=lambda processed, total: write_inventory_progress(
-                    database_path, "running", processed, total, "Checking files on disk"
-                ),
+        active_run = get_active_inventory_run(database_path)
+        if active_run:
+            active_pid = active_run.get("pid")
+            active_run_id = active_run.get("run_id")
+            msg = f"Inventory is already in progress (PID {active_pid}). Please wait for the current run to finish."
+            activity_logger().info(
+                "Skipping concurrent inventory request (%s): run %s (PID %s) is currently active",
+                mode, active_run_id, active_pid
             )
-            write_inventory_progress(database_path, "complete", summary["files"], summary["files"],
-                                     "Baseline inventory complete")
-        except Exception as inventory_error:
-            current_progress = read_inventory_progress(database_path)
-            write_inventory_progress(database_path, "failed", current_progress.get("processed", 0),
-                                     current_progress.get("total", 0), str(inventory_error))
-            record_activity(
-                database_path, "inventory", "library inventory", "failed",
-                severity="error", detail=str(inventory_error)
-            )
-            raise
-        if mode == "build_inventory":
-            message = json.dumps(summary, ensure_ascii=False)
+            if mode == "build_inventory":
+                print(json.dumps({"error": msg}))
+                return
+            else:
+                message = msg
         else:
-            message = (
-                f"Read-only inventory complete: {summary['scenes']} scenes containing {summary['files']} files, "
-                f"{summary['present']} files present, "
-                f"{summary['missing']} missing, {summary['changed_paths']} Stash path changes, "
-                f"{summary['restored']} restored."
+            run_id = f"inv-{int(time.time())}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+            stash = StashInterface(plugin_input["server_connection"])
+            write_inventory_progress(
+                database_path, "preparing", detail="Reading scenes from Stash", run_id=run_id
             )
+            try:
+                scenes = fetch_scenes(stash)
+                summary = inventory(
+                    database_path,
+                    scenes,
+                    progress_callback=lambda processed, total: write_inventory_progress(
+                        database_path, "running", processed, total, "Checking files on disk", run_id=run_id
+                    ),
+                    run_id=run_id,
+                )
+                write_inventory_progress(
+                    database_path, "complete", summary["files"], summary["files"],
+                    "Baseline inventory complete", run_id=run_id
+                )
+            except Exception as inventory_error:
+                current_progress = read_inventory_progress(database_path)
+                write_inventory_progress(
+                    database_path, "failed", current_progress.get("processed", 0),
+                    current_progress.get("total", 0), str(inventory_error), run_id=run_id
+                )
+                record_activity(
+                    database_path, "inventory", "library inventory", "failed",
+                    severity="error", detail=str(inventory_error)
+                )
+                raise
+            if mode == "build_inventory":
+                message = json.dumps(summary, ensure_ascii=False)
+            else:
+                message = (
+                    f"Read-only inventory complete: {summary['scenes']} scenes containing {summary['files']} files, "
+                    f"{summary['present']} files present, "
+                    f"{summary['missing']} missing, {summary['changed_paths']} Stash path changes, "
+                    f"{summary['restored']} restored."
+                )
     elif mode == "reconcile":
         summary, report = reconcile_missing_files(database_path)
         report_path = Path(__file__).with_name("reconciliation-report.json")

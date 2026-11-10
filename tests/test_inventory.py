@@ -1,4 +1,5 @@
 import sqlite3
+import sys
 import tempfile
 import time
 import unittest
@@ -438,6 +439,202 @@ class InventoryTests(unittest.TestCase):
                 )
             self.assertEqual(summary["scenes"], 14)
             self.assertEqual(summary["files"], 14)
+
+    def test_two_simultaneous_inventory_requests_second_rejected(self):
+        inv_mod = sys.modules["librarymanager.services.inventory"]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            # Simulate Run 1 active in another living process (PID 42001)
+            write_inventory_progress(
+                database, "running", 50, 100, "Scanning files", run_id="run-101", pid=42001
+            )
+
+            # Mock PID 42001 as alive
+            with patch.object(inv_mod, "is_pid_alive", lambda pid: pid == 42001):
+                active = inv_mod.get_active_inventory_run(database)
+                self.assertIsNotNone(active)
+                self.assertEqual(active["run_id"], "run-101")
+                self.assertEqual(active["pid"], 42001)
+
+                # Attempt second run from process PID 42002 via inventory()
+                with self.assertRaisesRegex(RuntimeError, "already in progress.*PID 42001"):
+                    inventory(database, [{"id": "1", "files": []}])
+
+    def test_second_request_rejected_without_affecting_first(self):
+        inv_mod = sys.modules["librarymanager.services.inventory"]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            # Run 1 publishes active progress
+            write_inventory_progress(
+                database, "running", 45, 100, "Checking scene 45", run_id="run-active", pid=42001
+            )
+
+            # Run 2 (different PID and run_id) attempts to publish progress
+            with patch.object(inv_mod, "is_pid_alive", lambda pid: pid == 42001):
+                write_inventory_progress(
+                    database, "preparing", 0, 100, "Second run starting", run_id="run-rejected", pid=42002
+                )
+
+            # Progress file must be 100% untouched by the second request
+            progress = read_inventory_progress(database)
+            self.assertEqual(progress["run_id"], "run-active")
+            self.assertEqual(progress["pid"], 42001)
+            self.assertEqual(progress["status"], "running")
+            self.assertEqual(progress["processed"], 45)
+            self.assertEqual(progress["detail"], "Checking scene 45")
+
+    def test_first_inventory_can_complete_normally(self):
+        inv_mod = sys.modules["librarymanager.services.inventory"]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            # Run 1 is active
+            write_inventory_progress(
+                database, "running", 75, 100, "Checking scene 75", run_id="run-active", pid=42001
+            )
+
+            # Rejected concurrent attempt occurs
+            with patch.object(inv_mod, "is_pid_alive", lambda pid: pid == 42001):
+                write_inventory_progress(
+                    database, "failed", 0, 0, "Crash attempt", run_id="run-intruder", pid=42003
+                )
+
+                # Run 1 finishes normally
+                write_inventory_progress(
+                    database, "complete", 100, 100, "Baseline inventory complete", run_id="run-active", pid=42001
+                )
+
+            progress = read_inventory_progress(database)
+            self.assertEqual(progress["status"], "complete")
+            self.assertEqual(progress["run_id"], "run-active")
+            self.assertEqual(progress["pid"], 42001)
+            self.assertEqual(progress["processed"], 100)
+
+    def test_second_request_cannot_overwrite_first_run_progress(self):
+        inv_mod = sys.modules["librarymanager.services.inventory"]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            write_inventory_progress(
+                database, "running", 30, 200, "Running step 1", run_id="run-owner", pid=42001
+            )
+
+            with patch.object(inv_mod, "is_pid_alive", lambda pid: pid == 42001):
+                # Try overwriting with complete, failed, and running from rogue PIDs
+                for bad_pid, bad_run in [(42002, "run-2"), (42003, "run-3"), (42004, "")]:
+                    write_inventory_progress(
+                        database, "failed", 0, 0, "Rogue error", run_id=bad_run, pid=bad_pid
+                    )
+
+            current = read_inventory_progress(database)
+            self.assertEqual(current["run_id"], "run-owner")
+            self.assertEqual(current["pid"], 42001)
+            self.assertEqual(current["status"], "running")
+            self.assertEqual(current["processed"], 30)
+
+    def test_correct_final_status_and_progress_ownership(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            run_id = "run-verified-final"
+            my_pid = os.getpid()
+
+            # Sequence of authorized writes
+            p1 = write_inventory_progress(database, "preparing", 0, 10, "Init", run_id=run_id, pid=my_pid)
+            self.assertEqual(p1["run_id"], run_id)
+            self.assertEqual(p1["pid"], my_pid)
+
+            p2 = write_inventory_progress(database, "running", 5, 10, "Halfway", run_id=run_id, pid=my_pid)
+            self.assertEqual(p2["processed"], 5)
+
+            p3 = write_inventory_progress(database, "complete", 10, 10, "Done", run_id=run_id, pid=my_pid)
+            self.assertEqual(p3["status"], "complete")
+            self.assertEqual(p3["processed"], 10)
+
+            final = read_inventory_progress(database)
+            self.assertEqual(final["status"], "complete")
+            self.assertEqual(final["run_id"], run_id)
+            self.assertEqual(final["pid"], my_pid)
+
+    def test_recovery_after_process_terminates_unexpectedly(self):
+        inv_mod = sys.modules["librarymanager.services.inventory"]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            # Previous process crashed/died (PID 99999999 is dead)
+            write_inventory_progress(
+                database, "running", 15, 100, "Crashed mid-run", run_id="run-crashed", pid=99999999
+            )
+
+            with patch.object(inv_mod, "is_pid_alive", lambda pid: False):
+                # Dead PID must NOT be considered active
+                self.assertIsNone(inv_mod.get_active_inventory_run(database))
+
+                # New process claims ownership cleanly
+                new_run_id = "run-recovered"
+                new_pid = os.getpid()
+                write_inventory_progress(
+                    database, "preparing", 0, 100, "Recovered start", run_id=new_run_id, pid=new_pid
+                )
+
+            current = read_inventory_progress(database)
+            self.assertEqual(current["run_id"], new_run_id)
+            self.assertEqual(current["pid"], new_pid)
+            self.assertEqual(current["status"], "preparing")
+
+    def test_existing_progress_file_compatibility(self):
+        inv_mod = sys.modules["librarymanager.services.inventory"]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            progress_path = Path(database).with_name(f"{Path(database).name}.inventory-progress.json")
+            # Write a legacy progress file without run_id or pid (e.g. from version 1.0.26)
+            legacy_payload = {
+                "status": "complete",
+                "processed": 500,
+                "total": 500,
+                "detail": "Baseline inventory complete",
+                "updated_at": "2026-10-15T04:54:00+00:00",
+            }
+            progress_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+            # Must read without errors
+            progress = read_inventory_progress(database)
+            self.assertEqual(progress["status"], "complete")
+            self.assertEqual(progress["processed"], 500)
+
+            # get_active_inventory_run treats completed legacy file as idle
+            self.assertIsNone(inv_mod.get_active_inventory_run(database))
+
+            # New inventory write seamlessly upgrades schema with run_id and pid
+            write_inventory_progress(database, "running", 1, 10, "Upgraded run", run_id="run-upgraded")
+            upgraded = read_inventory_progress(database)
+            self.assertEqual(upgraded["run_id"], "run-upgraded")
+            self.assertEqual(upgraded["pid"], os.getpid())
+
+    def test_inventory_fast_lock_probe_fails_fast_on_active_writer(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            # Establish schema
+            conn = librarymanager_core.connect(database)
+            conn.execute(
+                "INSERT INTO files(file_id, scene_id, path, basename, exists_on_disk, first_seen_at, last_seen_at) "
+                "VALUES ('1', '1', '/test.mp4', 'test.mp4', 1, '2026-01-01', '2026-01-01')"
+            )
+            conn.commit()
+
+            # Process 1 acquires exclusive write lock
+            writer = sqlite3.connect(str(database))
+            writer.execute("BEGIN IMMEDIATE")
+            writer.execute("UPDATE files SET basename='locked.mp4' WHERE file_id='1'")
+
+            try:
+                import time
+                t0 = time.time()
+                with self.assertRaisesRegex(RuntimeError, "database is currently in use"):
+                    inventory(database, [{"id": "1", "files": [{"id": "1", "path": "/test.mp4"}]}])
+                elapsed = time.time() - t0
+                # Must fail fast (around 250ms), NOT hang for 30 seconds
+                self.assertLess(elapsed, 2.0, f"Fast probe took too long ({elapsed:.2f}s)")
+            finally:
+                writer.rollback()
+                writer.close()
+                conn.close()
 
     def test_scene_removal_refuses_when_scene_files_cannot_be_verified(self):
         with self.assertRaisesRegex(ValueError, "could not verify"):

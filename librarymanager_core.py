@@ -1153,12 +1153,44 @@ def get_authoritative_unavailable_roots(database_path: Path = None, extra_roots:
     return _impl(database_path=database_path, extra_roots=extra_roots)
 
 
-def inventory(database_path: Path, scenes, progress_callback=None) -> dict:
+def inventory(database_path: Path, scenes, progress_callback=None, run_id=None) -> dict:
     from librarymanager.services.inventory import inventory as _impl
-    return _impl(database_path, scenes, progress_callback=progress_callback)
+    return _impl(database_path, scenes, progress_callback=progress_callback, run_id=run_id)
 
 
 inventory._is_watchtower_wrapper = True
+
+
+def inventory_progress_path(database_path: Path | str) -> Path:
+    from librarymanager.services.inventory import inventory_progress_path as _impl
+    return _impl(database_path)
+
+
+inventory_progress_path._is_watchtower_wrapper = True
+
+
+def read_inventory_progress(database_path: Path | str) -> dict:
+    from librarymanager.services.inventory import read_inventory_progress as _impl
+    return _impl(database_path)
+
+
+read_inventory_progress._is_watchtower_wrapper = True
+
+
+def get_active_inventory_run(database_path: Path | str) -> dict | None:
+    from librarymanager.services.inventory import get_active_inventory_run as _impl
+    return _impl(database_path)
+
+
+get_active_inventory_run._is_watchtower_wrapper = True
+
+
+def write_inventory_progress(database_path, status, processed=0, total=0, detail="", run_id=None, pid=None) -> dict:
+    from librarymanager.services.inventory import write_inventory_progress as _impl
+    return _impl(database_path, status, processed=processed, total=total, detail=detail, run_id=run_id, pid=pid)
+
+
+write_inventory_progress._is_watchtower_wrapper = True
 
 
 def refresh_scene_inventory(database_path: Path, scene: dict) -> int:
