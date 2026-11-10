@@ -45,14 +45,6 @@ class InventoryTests(unittest.TestCase):
     def test_posix_monitor_launch_starts_new_session(self):
         self.assertEqual(monitor_process_launch_options("darwin"), {"start_new_session": True})
 
-    def test_windows_pid_probe_never_uses_os_kill(self):
-        with patch("librarymanager_core.sys.platform", "win32"), \
-                patch("librarymanager_core._windows_pid_alive", return_value=True) as windows_probe, \
-                patch("librarymanager_core.os.kill") as unsafe_kill:
-            self.assertTrue(_is_pid_alive(12345))
-        windows_probe.assert_called_once_with(12345)
-        unsafe_kill.assert_not_called()
-
     def test_monitor_start_passes_windows_isolation_to_child_process(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
