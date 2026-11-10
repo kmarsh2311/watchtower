@@ -315,6 +315,130 @@ class InventoryTests(unittest.TestCase):
             progress = read_inventory_progress(database)
             self.assertEqual((progress["status"], progress["processed"], progress["total"]), ("running", 50, 120))
 
+    def test_inventory_progress_retries_transient_windows_file_lock(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            real_replace = Path.replace
+            attempts = 0
+
+            def transient_replace(self, target):
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    err = PermissionError(13, "[WinError 5] Access is denied")
+                    err.winerror = 5
+                    raise err
+                return real_replace(self, target)
+
+            with patch.object(Path, "replace", transient_replace):
+                payload = write_inventory_progress(database, "running", 50, 120, "Retrying on transient lock")
+
+            self.assertEqual(attempts, 3)
+            self.assertEqual(payload["status"], "running")
+            progress = read_inventory_progress(database)
+            self.assertEqual((progress["status"], progress["processed"], progress["total"]), ("running", 50, 120))
+
+    def test_inventory_progress_retries_transient_sharing_violation_winerror32(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            real_replace = Path.replace
+            attempts = 0
+
+            def transient_replace(self, target):
+                nonlocal attempts
+                attempts += 1
+                if attempts < 2:
+                    err = OSError(13, "[WinError 32] The process cannot access the file because it is being used by another process")
+                    err.winerror = 32
+                    raise err
+                return real_replace(self, target)
+
+            with patch.object(Path, "replace", transient_replace):
+                payload = write_inventory_progress(database, "running", 60, 120, "Retrying on WinError 32")
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual(payload["status"], "running")
+
+    def test_inventory_progress_permanent_failure_does_not_retry(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            attempts = 0
+
+            def permanent_replace(self, target):
+                nonlocal attempts
+                attempts += 1
+                err = OSError(28, "No space left on device")
+                err.errno = 28  # ENOSPC
+                raise err
+
+            with patch.object(Path, "replace", permanent_replace):
+                with patch.object(librarymanager.activity_logger(), "warning") as mock_warn:
+                    payload = write_inventory_progress(database, "running", 10, 100, "Disk full failure")
+                    self.assertEqual(payload["status"], "running")
+                    self.assertEqual(attempts, 1)  # Only 1 attempt, no unnecessary sleep/retry
+                    mock_warn.assert_called()
+
+            # Clean up check
+            temp_files = list(Path(temporary_directory).glob("*.tmp"))
+            self.assertEqual(temp_files, [])
+
+    def test_inventory_progress_failure_is_non_fatal_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+
+            def failing_replace(self, target):
+                raise PermissionError(13, "[WinError 5] Accès refusé")
+
+            with patch.object(Path, "replace", failing_replace):
+                with patch.object(librarymanager.activity_logger(), "warning") as mock_warn:
+                    payload = write_inventory_progress(database, "running", 75, 100, "Lock failure")
+                    self.assertEqual(payload["status"], "running")
+                    mock_warn.assert_called()
+
+            # Ensure all temporary files were safely cleaned up
+            temp_files = list(Path(temporary_directory).glob("*.tmp"))
+            self.assertEqual(temp_files, [])
+
+    def test_inventory_progress_lock_does_not_corrupt_existing_file(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            # Write valid initial progress
+            write_inventory_progress(database, "running", 10, 100, "Initial progress")
+            initial_progress = read_inventory_progress(database)
+            self.assertEqual(initial_progress["processed"], 10)
+
+            # Persistent lock on second write
+            def failing_replace(self, target):
+                raise PermissionError(13, "[WinError 5] Access is denied")
+
+            with patch.object(Path, "replace", failing_replace):
+                write_inventory_progress(database, "running", 20, 100, "Second update locked")
+
+            # Verify existing file was preserved uncorrupted
+            current_progress = read_inventory_progress(database)
+            self.assertEqual(current_progress["processed"], 10)
+            self.assertEqual(current_progress["status"], "running")
+
+    def test_inventory_continues_when_progress_callback_encounters_file_locks(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "inventory.sqlite3"
+            scenes = [{"id": str(i), "files": [{"id": f"f{i}", "path": f"/media/scene_{i}.mp4", "size": 1000}]}
+                      for i in range(1, 15)]
+
+            def failing_replace(self, target):
+                raise PermissionError(13, "[WinError 5] Accès refusé")
+
+            with patch.object(Path, "replace", failing_replace):
+                summary = inventory(
+                    database,
+                    scenes,
+                    progress_callback=lambda p, t: write_inventory_progress(
+                        database, "running", p, t, "Scanning with file lock"
+                    ),
+                )
+            self.assertEqual(summary["scenes"], 14)
+            self.assertEqual(summary["files"], 14)
+
     def test_scene_removal_refuses_when_scene_files_cannot_be_verified(self):
         with self.assertRaisesRegex(ValueError, "could not verify"):
             assert_scene_removal_safe({"id": "10"}, "/missing/video.mp4")

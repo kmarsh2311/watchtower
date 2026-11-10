@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.27 — 2026-11-10
+
+- **SQLite 64-bit Integer Overflow Resolution**: Mapped unsigned 64-bit filesystem metadata (`st_ino`, `st_dev`, `st_mtime_ns`) into SQLite's signed 64-bit `INTEGER` range ($[-2^{63}, 2^{63} - 1]$) using a two's-complement projection (`to_sqlite_int`). Resolves `OverflowError: Python int too large to convert to SQLite INTEGER` on Linux/Docker (OverlayFS/ZFS) during live status polling, duplicate detection, and file reconciliation without requiring database migrations or full library rehashing.
+- **Filesystem Metadata Validation & Pre-1970 Timestamp Support**: Enforced strict validation in `get_file_stat_snapshot()` to reject invalid/negative file sizes while properly preserving legitimate pre-1970 negative nanosecond timestamps.
+- **Windows Inventory Progress Atomic Replacement Resiliency**: Added bounded backoff retries in `write_inventory_progress()` for transient Windows file-lock errors (`WinError 5 Access is denied`, `WinError 32 Sharing violation`). Made progress reporting non-fatal to the underlying inventory indexing process with guaranteed PID-and-timestamp-isolated temporary file cleanup.
+- **Upgraded Database Backward Compatibility**: Fully verified that existing installations with populated SQLite databases upgrade seamlessly without cache invalidation, table resets, or full library rehashing.
+
 ## 1.0.26 — 2026-10-15
 
 - **Major Modular Subsystem Architecture**: Deconstructed the monolithic codebase into structured, domain-driven packages under `librarymanager/`:

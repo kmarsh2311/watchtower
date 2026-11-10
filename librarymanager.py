@@ -4,6 +4,7 @@
 import base64
 import json
 import csv
+import errno
 import logging
 import plistlib
 from logging.handlers import RotatingFileHandler
@@ -36,7 +37,7 @@ from librarymanager_core import (
                                  reconcile_filesystem_events, pending_filesystem_events,
                                  pending_transcoder_candidates, promote_transcoder_candidate, utc_now,
                                  find_duplicate_scene_file, inspect_backlog_duplicate,
-                                 get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
+                                 to_sqlite_int, get_file_stat_snapshot, expect_filesystem_delete, resolve_filesystem_event,
                                  cancel_expected_filesystem_delete, _is_pid_alive, _terminate_pid,
                                  get_configured_incoming_folders, _is_subpath_of, parse_cold_storage_roots,
                                  clean_deleted_scenes_from_stash)
@@ -160,6 +161,37 @@ def inventory_progress_path(database_path):
     return Path(database_path).with_name(f"{Path(database_path).name}.inventory-progress.json")
 
 
+def _is_transient_filesystem_error(exc: OSError) -> bool:
+    """Check if an OSError is a transient file locking or contention error.
+
+    On Windows:
+      - winerror 5: ERROR_ACCESS_DENIED (destination locked by concurrent reader/antivirus)
+      - winerror 32: ERROR_SHARING_VIOLATION (in-use by another process)
+      - winerror 33: ERROR_LOCK_VIOLATION (range lock)
+    On POSIX:
+      - errno.EBUSY: Device or resource busy
+      - errno.ETXTBSY: Text file busy
+      - errno.EAGAIN / errno.EWOULDBLOCK: Resource temporarily unavailable
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror in (5, 32, 33):
+        return True
+    err = getattr(exc, "errno", None)
+    transient_errnos = {
+        getattr(errno, "EBUSY", None),
+        getattr(errno, "ETXTBSY", None),
+        getattr(errno, "EAGAIN", None),
+        getattr(errno, "EWOULDBLOCK", None),
+    }
+    transient_errnos.discard(None)
+    if err in transient_errnos:
+        return True
+    err_str = str(exc).lower()
+    if any(marker in err_str for marker in ("winerror 5", "winerror 32", "access is denied", "accès refusé")):
+        return True
+    return False
+
+
 def write_inventory_progress(database_path, status, processed=0, total=0, detail=""):
     """Atomically publish inventory progress for the onboarding UI."""
     progress_path = inventory_progress_path(database_path)
@@ -171,11 +203,38 @@ def write_inventory_progress(database_path, status, processed=0, total=0, detail
         "detail": str(detail or ""),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    max_attempts = 5
     try:
         temporary_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        temporary_path.replace(progress_path)
+        for attempt in range(max_attempts):
+            try:
+                temporary_path.replace(progress_path)
+                break
+            except OSError as exc:
+                if _is_transient_filesystem_error(exc) and attempt < max_attempts - 1:
+                    time.sleep(0.05 * (attempt + 1))
+                else:
+                    if _is_transient_filesystem_error(exc):
+                        activity_logger().warning(
+                            "Failed to publish inventory progress file %s after %d transient retry attempts: %s",
+                            progress_path, max_attempts, exc
+                        )
+                    else:
+                        activity_logger().warning(
+                            "Non-transient filesystem error replacing inventory progress file %s: %s",
+                            progress_path, exc
+                        )
+                    break
+    except Exception as exc:
+        activity_logger().warning(
+            "Unexpected error writing inventory progress temporary file %s: %s",
+            temporary_path, exc
+        )
     finally:
-        temporary_path.unlink(missing_ok=True)
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return payload
 
 
@@ -256,8 +315,16 @@ def delete_verified_backlog_duplicate(
         current = available_companions.get(requested_path)
         if not current:
             raise ValueError("A selected companion is no longer an exact companion inside the incoming folder")
-        expected_snapshot = tuple(int((requested or {}).get(key, -1)) for key in ("size", "mtime_ns", "device", "inode"))
-        current_snapshot = tuple(int(current.get(key, -2)) for key in ("size", "mtime_ns", "device", "inode"))
+        expected_snapshot = tuple(
+            to_sqlite_int((requested or {}).get(key, -1)) if key in ("device", "inode")
+            else int((requested or {}).get(key, -1))
+            for key in ("size", "mtime_ns", "device", "inode")
+        )
+        current_snapshot = tuple(
+            to_sqlite_int(current.get(key, -2)) if key in ("device", "inode")
+            else int(current.get(key, -2))
+            for key in ("size", "mtime_ns", "device", "inode")
+        )
         if expected_snapshot != current_snapshot:
             raise ValueError(f"Companion changed after confirmation: {Path(requested_path).name}")
         selected_paths.add(requested_path)
@@ -322,7 +389,11 @@ def delete_verified_backlog_duplicate(
     companion_errors = []
     for companion_path in sorted(selected_paths):
         companion = available_companions[companion_path]
-        expected_snapshot = tuple(int(companion[key]) for key in ("size", "mtime_ns", "device", "inode"))
+        expected_snapshot = tuple(
+            to_sqlite_int(companion[key]) if key in ("device", "inode")
+            else int(companion[key])
+            for key in ("size", "mtime_ns", "device", "inode")
+        )
         if get_file_stat_snapshot(companion_path) != expected_snapshot:
             companion_errors.append(f"{Path(companion_path).name}: changed or unavailable")
             continue

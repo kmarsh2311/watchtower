@@ -41,6 +41,7 @@ from librarymanager.scanning.filesystem import (
     process_next_checksum_job,
     reset_checksum_jobs_for_monitor_restart,
     strict_incoming_companions,
+    to_sqlite_int,
 )
 from librarymanager.scanning.naming_rules import (
     filename_format_options,
@@ -165,4 +166,5 @@ __all__ = [
     "reset_checksum_jobs_for_monitor_restart",
     "scene_naming_signature",
     "strict_incoming_companions",
+    "to_sqlite_int",
 ]

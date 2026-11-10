@@ -1611,6 +1611,12 @@ CHECKSUM_RETRY_BASE_SECONDS = 15.0
 CHECKSUM_MAX_ACTIVE_JOBS = 8
 
 
+def to_sqlite_int(val: int | None) -> int | None:
+    """Safely project an integer (e.g. 64-bit unsigned inode or device) to SQLite signed 64-bit range."""
+    from librarymanager.scanning.filesystem import to_sqlite_int as _impl
+    return _impl(val)
+
+
 def get_file_stat_snapshot(path: Path | str) -> tuple[int, int, int, int] | None:
     """Return a high-resolution (size, mtime_ns, device, inode) identity snapshot."""
     from librarymanager.scanning.filesystem import get_file_stat_snapshot as _impl

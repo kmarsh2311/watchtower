@@ -401,13 +401,38 @@ def get_authoritative_unavailable_roots(database_path: Optional[Path] = None, ex
     return sorted(unavailable)
 
 
+def to_sqlite_int(val: int | None) -> int | None:
+    """Normalize an integer to fit within SQLite's signed 64-bit INTEGER range [-2^63, 2^63 - 1].
+
+    On Linux, Docker (overlayfs), ZFS, and network filesystems (SMB/NFS), st_ino and st_dev
+    are unsigned 64-bit integers [0, 2^64 - 1]. Python handles arbitrary-precision integers,
+    but sqlite3 raises OverflowError if an integer >= 2^63 is passed into parameterized queries.
+    This safely projects unsigned 64-bit values into signed 64-bit integers using two's complement,
+    preserving exact 1-to-1 bijection, equality comparisons, and identity semantics.
+    """
+    if val is None:
+        return None
+    val = int(val) & 0xFFFFFFFFFFFFFFFF
+    if val >= 0x8000000000000000:
+        val -= 0x10000000000000000
+    return val
+
+
 def get_file_stat_snapshot(path: Path | str) -> tuple[int, int, int, int] | None:
     """Return a high-resolution (size, mtime_ns, device, inode) identity snapshot."""
     try:
         p = Path(path)
         st = p.stat()
-        return (int(st.st_size), int(st.st_mtime_ns), int(st.st_dev), int(st.st_ino))
-    except OSError:
+        raw_size = int(st.st_size)
+        if raw_size < 0 or raw_size >= (1 << 63):
+            return None
+        return (
+            raw_size,
+            to_sqlite_int(st.st_mtime_ns),
+            to_sqlite_int(st.st_dev),
+            to_sqlite_int(st.st_ino),
+        )
+    except (OSError, ValueError):
         return None
 
 
@@ -478,6 +503,10 @@ def enqueue_checksum_calculation(
     if snapshot is None or snapshot[0] <= 0:
         return False
     size, mtime_ns, device, inode = snapshot
+    size = to_sqlite_int(size)
+    mtime_ns = to_sqlite_int(mtime_ns)
+    device = to_sqlite_int(device)
+    inode = to_sqlite_int(inode)
     now_ts = time.time()
     now = utc_now()
     connection = connect(database_path)
@@ -493,8 +522,8 @@ def enqueue_checksum_calculation(
             (
                 existing_job["status"] != "processing" and
                 (
-                    int(existing_job["device"] if existing_job["device"] is not None else -1) != device or
-                    int(existing_job["inode"] if existing_job["inode"] is not None else -1) != inode
+                    to_sqlite_int(existing_job["device"] if existing_job["device"] is not None else -1) != device or
+                    to_sqlite_int(existing_job["inode"] if existing_job["inode"] is not None else -1) != inode
                 )
             )
         )
@@ -614,8 +643,10 @@ def _retry_checksum_job(database_path: Path, job: dict, reason: str) -> None:
 def process_checksum_job(database_path: Path, job: dict) -> bool:
     """Hash one claimed job and persist its verified file identity."""
     expected = (
-        int(job["size"]), int(job["mtime_ns"]),
-        int(job.get("device") or 0), int(job.get("inode") or 0),
+        to_sqlite_int(job["size"]),
+        to_sqlite_int(job["mtime_ns"]),
+        to_sqlite_int(job.get("device") or 0),
+        to_sqlite_int(job.get("inode") or 0),
     )
     current = get_file_stat_snapshot(job["path"])
     if current is None:
@@ -699,6 +730,10 @@ def get_cached_or_compute_sha256(
     if stat is None:
         return None, "offline"
     size, mtime_ns, device, inode = stat
+    size = to_sqlite_int(size)
+    mtime_ns = to_sqlite_int(mtime_ns)
+    device = to_sqlite_int(device)
+    inode = to_sqlite_int(inode)
     if size == 0:
         return None, "empty"
 
@@ -768,6 +803,10 @@ def _cached_sha256_for_current_path(database_path: Path, path: Path | str) -> st
     if snapshot is None:
         return None
     size, mtime_ns, device, inode = snapshot
+    size = to_sqlite_int(size)
+    mtime_ns = to_sqlite_int(mtime_ns)
+    device = to_sqlite_int(device)
+    inode = to_sqlite_int(inode)
     connection = connect(database_path)
     try:
         row = connection.execute(
@@ -932,5 +971,6 @@ __all__ = [
     "process_next_checksum_job",
     "reset_checksum_jobs_for_monitor_restart",
     "strict_incoming_companions",
+    "to_sqlite_int",
     "utc_now",
 ]

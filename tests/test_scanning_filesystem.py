@@ -178,3 +178,172 @@ def test_compatibility_forwarding_wrappers(test_db: Path, tmp_path: Path):
     # Check monkeypatch interop on calculate_sha256_verified
     orig_wrapper = core.calculate_sha256_verified
     assert getattr(orig_wrapper, "_is_watchtower_wrapper", False) is True
+
+
+def test_to_sqlite_int_conversion():
+    assert fs.to_sqlite_int(None) is None
+    assert fs.to_sqlite_int(0) == 0
+    assert fs.to_sqlite_int(12345) == 12345
+    assert fs.to_sqlite_int(-1) == -1
+    # 64-bit signed max (2**63 - 1)
+    max_signed = (1 << 63) - 1
+    assert fs.to_sqlite_int(max_signed) == max_signed
+    # 2**63 maps to -2**63
+    assert fs.to_sqlite_int(1 << 63) == -(1 << 63)
+    # 2**64 - 1 maps to -1
+    assert fs.to_sqlite_int((1 << 64) - 1) == -1
+    # Large Docker / ZFS unsigned inode (> 2**63 - 1)
+    large_ino = 18446744073709551610  # 2**64 - 6
+    assert fs.to_sqlite_int(large_ino) == -6
+    # Semantics: identity bijection
+    a = (1 << 63) + 9999
+    b = (1 << 63) + 9999
+    c = (1 << 63) + 10000
+    assert fs.to_sqlite_int(a) == fs.to_sqlite_int(b)
+    assert fs.to_sqlite_int(a) != fs.to_sqlite_int(c)
+
+
+def test_sqlite_large_inode_checksum_and_cache(test_db: Path, tmp_path: Path, monkeypatch):
+    test_file = tmp_path / "large_inode_video.mp4"
+    test_file.write_bytes(b"TEST_LARGE_INODE_DATA" * 50)
+
+    # Simulate 64-bit unsigned inode and device (e.g. from Docker overlayfs or ZFS)
+    large_inode = (1 << 64) - 42  # > 2**63 - 1
+    large_device = (1 << 63) + 123456  # > 2**63 - 1
+    real_stat = test_file.stat()
+
+    class FakeStat:
+        st_size = real_stat.st_size
+        st_mtime_ns = real_stat.st_mtime_ns
+        st_dev = large_device
+        st_ino = large_inode
+
+    monkeypatch.setattr(Path, "stat", lambda self: FakeStat())
+
+    # Verify get_file_stat_snapshot safely normalizes without overflow
+    snapshot = fs.get_file_stat_snapshot(test_file)
+    assert snapshot is not None
+    size, mtime_ns, dev, ino = snapshot
+    assert dev == fs.to_sqlite_int(large_device)
+    assert ino == fs.to_sqlite_int(large_inode)
+
+    # 1. Direct get_cached_or_compute_sha256 calculation and SQLite cache insert
+    sha256, status = fs.get_cached_or_compute_sha256(test_db, test_file, allow_compute=True, file_id="scene-large-1")
+    assert status == "verified"
+    assert sha256 is not None
+    assert len(sha256) == 64
+
+    # Verify subsequent lookup hits cache and matches verified status without OverflowError
+    cached_sha, cached_status = fs.get_cached_or_compute_sha256(test_db, test_file, allow_compute=False)
+    assert cached_status == "verified"
+    assert cached_sha == sha256
+
+    # 2. Enqueue checksum calculation into checksum_jobs with large inode
+    queued = fs.enqueue_checksum_calculation(test_db, test_file, file_id="scene-large-2", stability_seconds=0.0)
+    assert queued is True
+
+    # 3. Claim and process the queued job
+    job = fs.claim_checksum_job(test_db)
+    assert job is not None
+    processed = fs.process_checksum_job(test_db, job)
+    assert processed is True
+
+    # 4. Cached lookup for current path
+    assert fs._cached_sha256_for_current_path(test_db, test_file) == sha256
+
+
+def test_sqlite_large_mtime_ns_and_size(test_db: Path, tmp_path: Path, monkeypatch):
+    test_file = tmp_path / "future_mtime_video.mp4"
+    test_file.write_bytes(b"TEST_FUTURE_MTIME_DATA" * 20)
+
+    # Simulate timestamps or corrupted sizes > 2**63 - 1 (e.g. year 3000 or unsigned wrapped off_t)
+    large_mtime_ns = (1 << 63) + 987654321
+    large_size = 1024
+
+    class FakeStat:
+        st_size = large_size
+        st_mtime_ns = large_mtime_ns
+        st_dev = 1234
+        st_ino = 5678
+
+    monkeypatch.setattr(Path, "stat", lambda self: FakeStat())
+
+    snapshot = fs.get_file_stat_snapshot(test_file)
+    assert snapshot is not None
+    assert snapshot[1] == fs.to_sqlite_int(large_mtime_ns)
+
+    # Verify no OverflowError occurs during hash cache insertion and query
+    sha, status = fs.get_cached_or_compute_sha256(test_db, test_file, allow_compute=True)
+    assert status == "verified"
+    assert sha is not None
+
+    cached_sha, cached_status = fs.get_cached_or_compute_sha256(test_db, test_file, allow_compute=False)
+    assert cached_status == "verified"
+    assert cached_sha == sha
+
+
+def test_existing_cache_entries_reused_without_rehashing(test_db: Path, tmp_path: Path, monkeypatch):
+    test_file = tmp_path / "cached_video.mp4"
+    test_file.write_bytes(b"REUSE_CACHE_TEST_DATA" * 20)
+
+    # First computation populates the cache
+    sha1, status1 = fs.get_cached_or_compute_sha256(test_db, test_file, allow_compute=True, file_id="scene-reuse")
+    assert status1 == "verified"
+    assert sha1 is not None
+
+    # Monkeypatch calculate function to raise an error if called
+    def failing_hasher(path):
+        raise AssertionError("calculate_sha256 should NOT be called when cache entry exists!")
+
+    monkeypatch.setattr(fs, "get_calculate_sha256_verified_fn", lambda: failing_hasher)
+
+    # Verify cache hit reuses the entry without recalculating
+    sha2, status2 = fs.get_cached_or_compute_sha256(test_db, test_file, allow_compute=True)
+    assert status2 == "verified"
+    assert sha2 == sha1
+
+
+def test_negative_and_excessive_file_sizes_rejected(tmp_path: Path, monkeypatch):
+    test_file = tmp_path / "invalid_size.mp4"
+    test_file.write_bytes(b"DATA")
+
+    for bad_size in (-1, -100, -(1 << 30), 1 << 63, 1 << 64):
+        class BadSizeStat:
+            st_size = bad_size
+            st_mtime_ns = 1_000_000_000
+            st_dev = 1
+            st_ino = 1
+
+        monkeypatch.setattr(Path, "stat", lambda self: BadSizeStat())
+        assert fs.get_file_stat_snapshot(test_file) is None
+        assert fs.calculate_sha256_verified(test_file) is None
+
+
+def test_pre_1970_timestamps_handled_correctly(test_db: Path, tmp_path: Path, monkeypatch):
+    test_file = tmp_path / "pre_1970_video.mp4"
+    test_file.write_bytes(b"PRE_1970_TEST_DATA" * 10)
+
+    # 1969-12-31 23:59:59 UTC = -1 second = -1,000,000,000 nanoseconds
+    pre_1970_ns = -1_000_000_000
+    real_stat = test_file.stat()
+
+    class Pre1970Stat:
+        st_size = real_stat.st_size
+        st_mtime_ns = pre_1970_ns
+        st_dev = 200
+        st_ino = 300
+
+    monkeypatch.setattr(Path, "stat", lambda self: Pre1970Stat())
+
+    snapshot = fs.get_file_stat_snapshot(test_file)
+    assert snapshot is not None
+    assert snapshot[1] == pre_1970_ns  # Legitimately preserved negative timestamp
+
+    # Verify SQLite caching and lookup work with negative timestamp
+    sha, status = fs.get_cached_or_compute_sha256(test_db, test_file, allow_compute=True)
+    assert status == "verified"
+    assert sha is not None
+
+    cached_sha, cached_status = fs.get_cached_or_compute_sha256(test_db, test_file, allow_compute=False)
+    assert cached_status == "verified"
+    assert cached_sha == sha
